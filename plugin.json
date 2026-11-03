@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "easyfontkit",
+  "version": "0.1.0",
+  "description": "Find the fonts a website really uses, save the font files with their licenses, and get the closest free match for the paid ones.",
+  "author": {
+    "name": "Emin Budak",
+    "url": "https://eminbudak.com"
+  },
+  "repository": "https://github.com/EminBudak/easyfontkit",
+  "license": "MIT",
+  "keywords": ["fonts", "typography", "webfonts", "font-license", "design"]
+}

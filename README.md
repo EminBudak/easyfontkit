@@ -77,6 +77,13 @@ That covers Claude Code, Codex, Cursor and the other agents the [`skills`](https
 /plugin install easyfontkit@easyfontkit
 ```
 
+In GitHub Copilot CLI, add the repo as a plugin marketplace and install from it:
+
+```bash
+copilot plugin marketplace add EminBudak/easyfontkit
+copilot plugin install easyfontkit@easyfontkit
+```
+
 Then ask as usual:
 
 > Build a pricing page that uses the same fonts as stripe.com

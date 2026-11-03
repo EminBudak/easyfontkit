@@ -1,0 +1,25 @@
+{
+  "note": "Hand-picked free fonts for well-known paid ones. Each entry says why: metric-compatible fonts keep the same widths, so text breaks the same way; revivals are open versions of the same historical design; common substitutes are the stand-ins designers reach for. Ids are Fontsource ids.",
+  "fonts": [
+    { "names": ["Arial"], "free": ["arimo"], "basis": "metric-compatible with Arial" },
+    { "names": ["Helvetica", "Helvetica Neue", "Neue Haas Grotesk", "Neue Haas Grotesk Display", "Neue Haas Grotesk Text", "Neue Haas Unica"], "free": ["inter", "arimo"], "basis": "a common substitute; Arimo also keeps Helvetica's widths" },
+    { "names": ["Times New Roman", "Times"], "free": ["tinos"], "basis": "metric-compatible with Times New Roman" },
+    { "names": ["Courier New", "Courier"], "free": ["cousine"], "basis": "metric-compatible with Courier New" },
+    { "names": ["Georgia"], "free": ["gelasio"], "basis": "metric-compatible with Georgia" },
+    { "names": ["Calibri"], "free": ["carlito"], "basis": "metric-compatible with Calibri" },
+    { "names": ["Cambria"], "free": ["caladea"], "basis": "metric-compatible with Cambria" },
+    { "names": ["SF Pro", "SF Pro Display", "SF Pro Text", "San Francisco", "-apple-system", "BlinkMacSystemFont", "system-ui"], "free": ["inter"], "basis": "the common substitute for Apple's system font" },
+    { "names": ["SF Mono", "Menlo", "Monaco"], "free": ["jetbrains-mono", "ibm-plex-mono"], "basis": "a common substitute" },
+    { "names": ["Segoe UI"], "free": ["noto-sans", "open-sans"], "basis": "a common substitute" },
+    { "names": ["Gotham", "Gotham SSm", "Gotham Rounded"], "free": ["montserrat"], "basis": "a common substitute" },
+    { "names": ["Proxima Nova"], "free": ["montserrat", "figtree"], "basis": "a common substitute" },
+    { "names": ["Avenir", "Avenir Next", "Avenir LT Std"], "free": ["nunito-sans"], "basis": "a common substitute" },
+    { "names": ["Futura", "Futura PT", "Futura Std"], "free": ["jost"], "basis": "drawn after Futura" },
+    { "names": ["Myriad Pro", "Myriad"], "free": ["source-sans-3", "pt-sans"], "basis": "a common substitute" },
+    { "names": ["Adobe Garamond", "Adobe Garamond Pro", "Garamond", "Garamond Premier Pro"], "free": ["eb-garamond"], "basis": "an open revival of Garamond" },
+    { "names": ["Baskerville", "ITC New Baskerville", "Baskerville URW"], "free": ["libre-baskerville"], "basis": "an open revival of Baskerville" },
+    { "names": ["Adobe Caslon", "Adobe Caslon Pro", "Caslon", "Big Caslon"], "free": ["libre-caslon-text"], "basis": "an open revival of Caslon" },
+    { "names": ["Bodoni", "Bodoni 72", "ITC Bodoni", "Bauer Bodoni"], "free": ["bodoni-moda"], "basis": "an open revival of Bodoni" },
+    { "names": ["Didot", "Linotype Didot"], "free": ["playfair-display"], "basis": "a similar high-contrast design" }
+  ]
+}

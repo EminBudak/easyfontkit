@@ -1,0 +1,323 @@
+"use strict";
+
+// From what the page scan saw to fonts a person can use. Each face Chrome
+// drew a role with is tied to its files, the files are grouped into
+// families, and every family gets where it came from, its license and, when
+// it is not free, the closest free fonts.
+
+const { licenseOf, sourceOf, redact } = require("./license");
+const { freeMatches, lookup, cleanName, words, key } = require("./match");
+
+const ROLE_ORDER = ["heading", "body", "button", "code"];
+const ROLE_WORDS = { heading: "headings", body: "body text", button: "buttons", code: "code" };
+const SYSTEM_KEYWORD = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace|ui-rounded|math|emoji|fangsong|-apple-system|blinkmacsystemfont)$/i;
+// A family name that is not one: some sites ship their files under a
+// stand-in ("TN Web Use Only") with a scrambled PostScript name.
+const STAND_IN = /\buse only\b|\bnot licensed\b|\bmunged\b/i;
+// A face drawing less of a role's text than this is a fallback for a few
+// characters (an arrow, an emoji) the role's own font does not have.
+const MIN_SHARE = 0.15;
+
+const bare = (url) => String(url || "").split("#")[0];
+const noQuery = (url) => bare(url).split("?")[0];
+const lower = (text) => String(text || "").toLowerCase();
+
+function parseStack(stack) {
+  return String(stack || "")
+    .split(",")
+    .map((part) => part.trim().replace(/^(['"])(.*)\1$/, "$2").trim())
+    .filter(Boolean);
+}
+
+const topOf = (counts) => Object.entries(counts || {}).sort((a, b) => b[1] - a[1]).map(([value]) => value);
+
+// The system font a stack asks for, by a name people know.
+const SYSTEM_NAMES = {
+  "system-ui": "System UI font",
+  "-apple-system": "System UI font",
+  blinkmacsystemfont: "System UI font",
+  "ui-sans-serif": "System UI font",
+  "ui-serif": "System serif font",
+  "ui-monospace": "System monospace font",
+  "ui-rounded": "System rounded font",
+  "sans-serif": "The browser's sans serif",
+  serif: "The browser's serif",
+  monospace: "The browser's monospace",
+  cursive: "The browser's cursive",
+  fantasy: "The browser's fantasy font",
+};
+// A CSS name written as an identifier ("nyt-franklin") is kept as written;
+// one written as a name ("Airbnb Cereal VF") is cleaned like a file's.
+const cssDisplay = (name) => (/^[a-z0-9-]+$/.test(name) ? name : cleanName(name) || name);
+const systemName = (family) => SYSTEM_NAMES[lower(family)] || cssDisplay(family);
+
+// The CSS families each file is declared under: by its address in the
+// @font-face rules, and by Chrome's own report of the web fonts it loaded.
+function declareFiles(files, rules, faces) {
+  for (const file of files) {
+    const exact = new Set(file.urls.map(bare));
+    const loose = new Set(file.urls.map(noQuery));
+    let declared = rules.filter((rule) => rule.urls.some((url) => exact.has(bare(url))));
+    if (!declared.length) declared = rules.filter((rule) => rule.urls.some((url) => loose.has(noQuery(url))));
+    declared = [...declared, ...faces.filter((face) => exact.has(bare(face.src)))];
+    file.cssFamilies = [...new Set(declared.map((rule) => rule.family).filter(Boolean))];
+    // The characters the site loads this file for: a family split into
+    // latin and latin-ext files needs it to pick the right one.
+    file.unicodeRange = (declared.find((rule) => rule.unicodeRange) || {}).unicodeRange || "";
+  }
+}
+
+// A file's family as people name it: from the file itself, else from the
+// CSS family it is declared under, else from its address.
+function fileFamily(file) {
+  if (file.font.family && !STAND_IN.test(file.font.family)) return cleanName(file.font.family);
+  if (file.cssFamilies.length) return cssDisplay(file.cssFamilies[0]);
+  const url = file.urls.find((address) => !address.startsWith("data:")) || "";
+  const base = decodeURIComponent(noQuery(url).split("/").pop() || "")
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[.-][a-f0-9]{6,}$/i, "");
+  return /[a-z]{3}/i.test(base) ? cleanName(base) : "";
+}
+
+// The files a face Chrome drew with comes from: by the PostScript or
+// family name Chrome reports, found among every name each file carries;
+// by Chrome's own report of the web fonts it loaded; else by the first
+// family of the CSS stack that has files. Several matches are narrowed to
+// the ones the stack asks for.
+function filesOfFace(face, stack, files, faces) {
+  const named = (name) => (name ? files.filter((file) => file.font.names.includes(name)) : []);
+  let found = named(face.postScriptName);
+  if (!found.length) found = named(face.familyName);
+  if (!found.length && face.familyName) {
+    const sources = new Set(faces.filter((loaded) => loaded.platformFamily === face.familyName).map((loaded) => bare(loaded.src)));
+    found = files.filter((file) => file.urls.some((url) => sources.has(bare(url))));
+  }
+  const asked = new Set(stack.map(lower));
+  const inStack = (file) => file.cssFamilies.some((name) => asked.has(lower(name)));
+  if (found.length > 1 && found.some(inStack)) found = found.filter(inStack);
+  if (!found.length) {
+    for (const name of stack) {
+      const declared = files.filter((file) => file.cssFamilies.some((css) => lower(css) === lower(name)));
+      if (declared.length) return declared;
+    }
+  }
+  return found;
+}
+
+function categoryOf(font, stacks, roles, listed) {
+  if (font && (font.monospace || (font.panose[0] === 2 && font.panose[3] === 9))) return "mono";
+  if (font && font.panose[0] === 2 && font.panose[1] >= 2 && font.panose[1] <= 10) return "serif";
+  if (font && font.panose[0] === 2 && font.panose[1] >= 11 && font.panose[1] <= 15) return "sans";
+  const generics = stacks.flatMap(parseStack).map(lower);
+  if (generics.some((name) => name === "monospace" || name === "ui-monospace")) return "mono";
+  if (generics.some((name) => name === "serif" || name === "ui-serif")) return "serif";
+  if (generics.some((name) => ["sans-serif", "system-ui", "ui-sans-serif", "-apple-system"].includes(name))) return "sans";
+  if (listed && ["sans", "serif", "mono"].includes(listed.category)) return listed.category;
+  return roles.includes("code") ? "mono" : "sans";
+}
+
+// The weights a family's files cover: a variable file its whole wght axis,
+// a static one its own weight.
+function fileWeight(font) {
+  const axis = font.axes.find((a) => a.tag === "wght");
+  if (axis) return { min: Math.round(axis.min), max: Math.round(axis.max) };
+  const w = font.weight && font.weight >= 1 && font.weight <= 1000 ? font.weight : 400;
+  return { min: w, max: w };
+}
+
+// The file the license is read from: the one that says the most.
+function telling(files) {
+  const score = ({ font }) => (font.license ? 4 : 0) + (font.licenseUrl ? 2 : 0) + (font.manufacturer ? 1 : 0) + (font.copyright ? 1 : 0);
+  return [...files].sort((a, b) => score(b) - score(a))[0];
+}
+
+// The file the proportions are read from: upright, nearest to regular, and
+// measurable.
+function regular(files) {
+  const rank = ({ font }) => (font.italic ? 1000 : 0) + Math.abs((fileWeight(font).min + fileWeight(font).max) / 2 - 400) + (font.lowercaseWidth ? 0 : 500);
+  return [...files].sort((a, b) => rank(a) - rank(b))[0];
+}
+
+function buildFamilies(scan) {
+  const { pageUrl, roles: rawRoles, files, rules, faces, loaded } = scan;
+  declareFiles(files, rules, faces);
+  const loadedNames = new Set(loaded.map((face) => lower(face.family)));
+  const families = new Map();
+  const familyOf = (name, extra) => {
+    const id = name ? key(words(name)) : `file-${families.size + 1}`;
+    if (!families.has(id)) families.set(id, { key: id, name: name || "Unnamed font", system: false, cssNames: new Set(), files: [], roles: [], weightsUsed: new Set(), stacks: [], ...extra });
+    return families.get(id);
+  };
+  for (const file of files) {
+    const family = familyOf(fileFamily(file));
+    family.files.push(file);
+    file.cssFamilies.forEach((name) => family.cssNames.add(name));
+  }
+  const familyOfFile = new Map([...families.values()].flatMap((family) => family.files.map((file) => [file.sha, family])));
+
+  const missingFamily = (name) => {
+    const shown = cssDisplay(name);
+    const family = familyOf(/\p{L}/u.test(shown) ? shown : "Unnamed font", { missing: true });
+    if (/\p{L}/u.test(name)) family.cssNames.add(name);
+    return family;
+  };
+  // The web family a stack asks for before any system font: the first name
+  // the CSS gives files to, or one Chrome loaded as a web font.
+  const webFamilyIn = (stack) => {
+    for (const name of stack) {
+      if (SYSTEM_KEYWORD.test(name)) return null;
+      const declared = files.find((file) => file.cssFamilies.some((css) => lower(css) === lower(name)));
+      if (declared) return familyOfFile.get(declared.sha);
+      if (loadedNames.has(lower(name))) return missingFamily(name);
+    }
+    return null;
+  };
+
+  const fallbacks = new Map();
+  const roles = {};
+  for (const role of ROLE_ORDER) {
+    const faceList = rawRoles[role] || [];
+    const total = faceList.reduce((sum, face) => sum + face.glyphs, 0);
+    const used = [];
+    for (const [i, face] of faceList.entries()) {
+      if (i > 0 && face.glyphs / total < MIN_SHARE) continue;
+      const stackText = topOf(face.stacks)[0] || "";
+      const stack = parseStack(stackText);
+      let family;
+      if (face.custom) {
+        const found = filesOfFace(face, stack, files, faces);
+        const counts = new Map();
+        for (const file of found) counts.set(familyOfFile.get(file.sha), (counts.get(familyOfFile.get(file.sha)) || 0) + 1);
+        family = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([f]) => f)[0];
+        // A web font Chrome drew with whose file was not caught (served
+        // from a cache the recording missed): named after its CSS family.
+        if (!family) family = webFamilyIn(stack) || missingFamily(face.familyName || "Unnamed font");
+      } else {
+        // A system font, although the stack asks for a web font first: the
+        // web font came too late for this text (font-display optional or
+        // swap on a first visit). It counts as the web font, the one the
+        // site means.
+        family = webFamilyIn(stack);
+        if (family) {
+          const late = fallbacks.get(family) || { drawnWith: new Set(), roles: [] };
+          late.drawnWith.add(face.familyName);
+          if (!late.roles.includes(role)) late.roles.push(role);
+          fallbacks.set(family, late);
+        } else {
+          const asked = stack.find((css) => !loadedNames.has(lower(css))) || face.familyName;
+          const name = systemName(asked);
+          family = familyOf(`system ${name}`, { system: true, name, drawnWith: face.familyName });
+        }
+      }
+      Object.keys(face.weights).map(Number).filter(Boolean).forEach((w) => family.weightsUsed.add(w));
+      if (!family.roles.includes(role)) family.roles.push(role);
+      family.stacks.push(stackText);
+      let entry = used.find((known) => known.family === family);
+      if (!entry) {
+        entry = { family, glyphs: 0, italicGlyphs: 0, weights: {}, stack: stackText };
+        used.push(entry);
+      }
+      entry.glyphs += face.glyphs;
+      entry.italicGlyphs += face.italicGlyphs;
+      for (const [weight, count] of Object.entries(face.weights)) entry.weights[weight] = (entry.weights[weight] || 0) + count;
+    }
+    if (!used.length) continue;
+    const [main, ...others] = used.sort((a, b) => b.glyphs - a.glyphs);
+    roles[role] = {
+      family: main.family.name,
+      key: main.family.key,
+      weights: topOf(main.weights).map(Number).filter(Boolean),
+      italic: main.italicGlyphs > main.glyphs / 2,
+      stack: main.stack,
+      also: others.map((entry) => entry.family.name),
+    };
+  }
+
+  const notes = [...fallbacks].map(([family, late]) => {
+    const where = late.roles.map((role) => ROLE_WORDS[role]);
+    const roleText = where.length <= 1 ? where.join("") : `${where.slice(0, -1).join(", ")} and ${where[where.length - 1]}`;
+    return `Some of the ${roleText} was drawn with ${[...late.drawnWith].join(" and ")}, a fallback, because ${family.name} loaded too late for it. That text is counted as ${family.name}, the font the site asks for.`;
+  });
+  const list = [...families.values()].map((family) => describeFamily(family, pageUrl));
+  const order = (family) => {
+    const at = ROLE_ORDER.findIndex((role) => family.roles.includes(role));
+    return at === -1 ? ROLE_ORDER.length : at;
+  };
+  list.sort((a, b) => order(a) - order(b) || b.files.length - a.files.length);
+  return { roles, families: list, notes };
+}
+
+function describeFamily(family, pageUrl) {
+  const cssNames = [...family.cssNames];
+  const weightsUsed = [...family.weightsUsed].sort((a, b) => a - b);
+  if (family.system) {
+    const names = family.stacks.flatMap(parseStack);
+    const category = categoryOf(null, family.stacks, family.roles, null);
+    return {
+      key: family.key,
+      name: family.name,
+      system: true,
+      drawnWith: family.drawnWith,
+      stack: family.stacks[0] || "",
+      roles: family.roles,
+      weightsUsed,
+      category,
+      source: "system",
+      license: { status: "system", name: "", url: "", maker: "", basis: "the site asks for a font already on the visitor's computer and sends no file" },
+      files: [],
+      free: freeMatches({ names, category, stack: true }),
+    };
+  }
+  const urls = family.files.flatMap((file) => file.urls);
+  const firstUrl = urls.find((url) => !url.startsWith("data:")) || urls[0] || "";
+  const source = firstUrl ? sourceOf(firstUrl, pageUrl) : "unknown";
+  const listed = [family.name, ...cssNames].map(lookup).find(Boolean) || null;
+  const told = family.files.length ? telling(family.files).font : {};
+  const license = family.files.length
+    ? licenseOf(told, { source, listed })
+    : { status: "unknown", name: "", url: "", maker: "", basis: "its file was not caught, so it could not be read" };
+  const reg = family.files.length ? regular(family.files).font : null;
+  const category = categoryOf(reg, family.stacks, family.roles, listed);
+  const metrics = reg ? { xHeight: reg.xHeight, capHeight: reg.capHeight, lowercaseWidth: reg.lowercaseWidth } : null;
+  const files = family.files
+    .map((file) => ({ file, weight: fileWeight(file.font) }))
+    .sort((a, b) => a.weight.min - b.weight.min || Number(a.file.font.italic) - Number(b.file.font.italic))
+    .map(({ file, weight }) => ({
+      sha: file.sha,
+      buffer: file.buffer,
+      url: file.urls.find((url) => !url.startsWith("data:")) || "data URL",
+      format: file.font.format,
+      weight,
+      style: file.font.style,
+      italic: file.font.italic,
+      variable: file.font.axes.length > 0,
+      axes: file.font.axes,
+      unicodeRange: file.unicodeRange,
+      bytes: file.buffer.length,
+    }));
+  return {
+    key: family.key,
+    name: family.name,
+    system: false,
+    missing: Boolean(family.missing),
+    cssNames,
+    roles: family.roles,
+    weightsUsed,
+    category,
+    source,
+    host: (() => {
+      try {
+        return new URL(firstUrl).hostname;
+      } catch {
+        return "";
+      }
+    })(),
+    license: { ...license, text: redact(told.license), copyright: told.copyright || "", designer: told.designer || "", embedding: told.embedding || "" },
+    listed: listed ? { id: listed.id, family: listed.family, from: listed.type === "g" ? "Google Fonts" : "Fontsource", license: listed.license } : null,
+    metrics,
+    files,
+    free: license.status === "open" ? [] : freeMatches({ names: [family.name, ...cssNames], category, metrics, slab: /slab/i.test(family.name) || Boolean(reg && reg.panose[1] === 6) }),
+  };
+}
+
+module.exports = { buildFamilies, parseStack };

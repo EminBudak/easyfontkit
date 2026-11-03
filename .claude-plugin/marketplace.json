@@ -1,0 +1,23 @@
+{
+  "name": "easyfontkit",
+  "description": "easyfontkit: the fonts a website really uses, their files and licenses, and the closest free match for the paid ones, as a FONTS.md your coding agent reads.",
+  "owner": {
+    "name": "Emin Budak"
+  },
+  "plugins": [
+    {
+      "name": "easyfontkit",
+      "description": "Reads a website in a headless browser, finds the fonts it draws headings, body text, buttons and code with, saves every font file the page loads with what each one says about its license, and names the closest free font for each paid one, as FONTS.md, fonts.css and fonts.json.",
+      "version": "0.1.0",
+      "source": "./",
+      "skills": ["./skills/easyfontkit"],
+      "author": {
+        "name": "Emin Budak"
+      },
+      "homepage": "https://github.com/EminBudak/easyfontkit",
+      "repository": "https://github.com/EminBudak/easyfontkit",
+      "license": "MIT",
+      "keywords": ["skills", "fonts", "typography", "brand", "design"]
+    }
+  ]
+}

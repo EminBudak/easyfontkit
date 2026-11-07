@@ -43,7 +43,7 @@ Then a section per family: where it was served from, who made it, its copyright 
 
 fonts.css gives every role two variables. `--font-code` is the site's own font, backed by the saved file. `--font-code-free` is the closest free font, loaded from Google Fonts or Fontsource. Use whichever fits what you are making.
 
-The folder has to be new, empty or hold an earlier kit; easyfontkit refuses any other. Run it again into the same folder and the new kit takes the place of the earlier one once all of it is written. Other files you keep there, in files/ too, are never removed or replaced. A run that fails, or is stopped with Ctrl-C, SIGTERM or SIGHUP, leaves the folder as it was: the earlier kit stays whole, nothing is added, and a folder that was not there is not made. Only a run killed outright in the moment it writes the kit (kill -9, or a forced end on Windows) can leave a hidden .easyfontkit-part folder behind, and the next run that ends well in that folder removes it.
+The folder has to be new, empty or hold an earlier kit; easyfontkit refuses any other. Run it again into the same folder and the new kit takes the place of the earlier one once all of it is written; two runs that save into one folder at the same moment take turns. Other files you keep there, in files/ too, are never removed or replaced. A run that fails, or is stopped with Ctrl-C, SIGTERM or SIGHUP, leaves the folder as it was: the earlier kit stays whole, nothing is added, and a folder that was not there is not made. A run killed outright (kill -9, or a forced end on Windows) can leave a hidden .easyfontkit-part folder or .easyfontkit-lock file there, which the next run that ends well in the folder removes. If it was killed while it moved the new kit in, the folder is left half replaced, with the rest of the earlier kit in that hidden folder, and the next run that saves a kit there puts the earlier kit back together before anything else.
 
 ## How the license is read
 
@@ -114,7 +114,7 @@ It needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set `CHROME_PATH`
 3. For up to 24 headings, paragraphs, buttons and code blocks, asks Chrome which fonts it drew the text with and how many glyphs each one drew. The font with the most glyphs is the role's font.
 4. Ties each of those fonts to its file by the names inside the file, by the @font-face rule that loads it, or by Chrome's own record of the web fonts it loaded. Some sites hide the names in their files; then the CSS name stands in.
 5. Reads every file's name, OS/2, post, head, cmap and hmtx tables (WOFF2, WOFF, TrueType and OpenType), decides the license, and measures the font for the free match.
-6. Writes the kit into a hidden folder inside the kit's folder and, once all of it is written, moves it in place of the earlier kit in one go.
+6. Writes the kit into a hidden folder inside the kit's folder. Once all of it is written, it moves the earlier kit's files aside and the new ones in, one at a time, with fonts.json last, so a fonts.json in the folder always goes with the files next to it.
 
 The index of free fonts in `skills/easyfontkit/scripts/data/fonts.json` comes from the [Fontsource](https://fontsource.org) API and the Google Fonts catalog, with the measurements taken from Fontsource's files. `npm run build-index` rebuilds it.
 

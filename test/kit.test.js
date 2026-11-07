@@ -12,6 +12,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const test = require("node:test");
+const { Worker } = require("node:worker_threads");
 const { makeFontKit, normalizeUrl, earlierKit, saveKit } = require("../skills/easyfontkit/scripts/lib/kit");
 const { findChrome } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { fixture, interAs } = require("./helpers");
@@ -186,6 +187,11 @@ test("never writes into a folder that holds someone else's files, and reads an e
     const before = snapshot(dir);
     assert.deepEqual(earlierKit(dir), { files: ["acme-400.woff2"] });
     assert.deepEqual(snapshot(dir), before);
+    // The lock and the part folders of runs do not count.
+    const empty = path.join(dir, "empty");
+    fs.mkdirSync(path.join(empty, ".easyfontkit-part-1-0000000a"), { recursive: true });
+    fs.writeFileSync(path.join(empty, ".easyfontkit-lock"), "1");
+    assert.equal(earlierKit(empty), null);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -229,13 +235,201 @@ test("the new kit goes in only whole: a step that fails puts the earlier kit bac
           newKitIn(part, ["inter-400.woff2", "inter-700.woff2"]);
           // Someone's folder came where a new file goes while the page was read.
           fs.mkdirSync(path.join(dir, "files", "inter-700.woff2"));
-          inTheWay = snapshot(dir, { folderTimes: false }).filter((line) => !line.startsWith(".easyfontkit-part-"));
+          inTheWay = snapshot(dir, { folderTimes: false }).filter((line) => !line.startsWith(".easyfontkit-"));
         }),
       (err) => err.message === `The new kit could not be put in place in ${dir} (${path.join("files", "inter-700.woff2")} is in the way), so the earlier kit there is as it was.`,
     );
     assert.deepEqual(snapshot(dir, { folderTimes: false }), inTheWay);
     fs.rmdirSync(path.join(dir, "files", "inter-700.woff2"));
     assert.deepEqual(snapshot(dir, { folderTimes: false }), before);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+// Two runs saving into one folder, each in a thread of its own that goes by
+// another pid, as two processes would. Once both have written their kit, or
+// one of them waits for the other's lock, their lstat and rename calls take
+// turns as schedule says: 0 for the first run, 1 for the second. A run that
+// waits for the lock, or is done, lets the other go on.
+const SAVER = `
+const { workerData, parentPort } = require("node:worker_threads");
+const fs = require("node:fs");
+const path = require("node:path");
+const { kitjs, dir, tag, id, shared, schedule, names } = workerData;
+// shared: [0] calls made, [1 + id] run id is done, [3] runs that wrote
+// their kit, [4 + id] run id waits for the lock.
+const other = 1 - id;
+const free = () => Atomics.load(shared, 1 + other) || Atomics.load(shared, 4 + other);
+const turn = (call) => {
+  for (;;) {
+    const at = Atomics.load(shared, 0);
+    if (at >= schedule.length || schedule[at] === id || free()) break;
+    Atomics.wait(shared, 0, at, 5);
+  }
+  try {
+    return call();
+  } finally {
+    Atomics.add(shared, 0, 1);
+    Atomics.notify(shared, 0);
+  }
+};
+if (id === 1) Object.defineProperty(process, "pid", { value: 1 });
+const { lstatSync, renameSync, openSync } = fs;
+fs.openSync = (file, ...rest) => {
+  if (!String(file).endsWith(".easyfontkit-lock")) return openSync(file, ...rest);
+  try {
+    const fd = openSync(file, ...rest);
+    Atomics.store(shared, 4 + id, 0);
+    return fd;
+  } catch (err) {
+    if (err.code === "EEXIST") Atomics.store(shared, 4 + id, 1);
+    Atomics.notify(shared, 0);
+    throw err;
+  }
+};
+const { saveKit } = require(kitjs);
+let result = "ok";
+try {
+  saveKit(dir, (part) => {
+    fs.writeFileSync(path.join(part, "fonts.json"), JSON.stringify({ version: 1, generator: "easyfontkit " + tag, families: [{ files: names.map((name) => ({ file: "files/" + name })) }] }));
+    fs.writeFileSync(path.join(part, "FONTS.md"), tag);
+    fs.writeFileSync(path.join(part, "fonts.css"), tag);
+    fs.mkdirSync(path.join(part, "files"));
+    for (const name of names) fs.writeFileSync(path.join(part, "files", name), tag);
+    Atomics.add(shared, 3, 1);
+    while (Atomics.load(shared, 3) < 2 && !free()) Atomics.wait(shared, 3, Atomics.load(shared, 3), 5);
+    fs.lstatSync = (...args) => turn(() => lstatSync(...args));
+    fs.renameSync = (...args) => turn(() => renameSync(...args));
+  });
+} catch (err) {
+  result = err.message;
+}
+fs.lstatSync = lstatSync;
+fs.renameSync = renameSync;
+Atomics.store(shared, 1 + id, 1);
+Atomics.notify(shared, 0);
+parentPort.postMessage(result);
+`;
+
+test("two runs that save into one folder at the same moment take turns: both end well, and the folder holds the second one's kit whole", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-turns-"));
+  const names = ["inter-400.woff2", "inter-700.woff2", "acme-400.woff2"];
+  // Every few offsets of the two in lockstep, and some at random.
+  const schedules = [];
+  for (let offset = 0; offset <= 40; offset += 4) schedules.push(Array.from({ length: 300 }, (_, i) => (i < offset ? 0 : (i - offset) % 2)));
+  for (let seed = 1; seed <= 6; seed++) {
+    let x = seed * 2654435761;
+    schedules.push(Array.from({ length: 300 }, () => ((x = (x * 1103515245 + 12345) & 0x7fffffff) >> 16) & 1));
+  }
+  const save = (dir, tag, id, shared, schedule) =>
+    new Promise((resolve) => {
+      const worker = new Worker(SAVER, { eval: true, workerData: { kitjs: require.resolve("../skills/easyfontkit/scripts/lib/kit"), dir, tag, id, shared, schedule, names } });
+      worker.on("message", resolve);
+      worker.on("error", (err) => resolve(`crashed: ${err.message}`));
+    });
+  try {
+    for (const [n, order] of schedules.entries()) {
+      const dir = path.join(parent, `kit${n}`);
+      earlierKitIn(dir);
+      const shared = new Int32Array(new SharedArrayBuffer(32));
+      const schedule = new Int32Array(new SharedArrayBuffer(4 * order.length));
+      schedule.set(order);
+      assert.deepEqual(await Promise.all([save(dir, "A", 0, shared, schedule), save(dir, "B", 1, shared, schedule)]), ["ok", "ok"], `schedule ${n}`);
+      // The one that went second holds the folder; the earlier kit and the
+      // first one's kit are gone with their part folders.
+      const last = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+      assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"], `schedule ${n}`);
+      assert.deepEqual(fs.readdirSync(path.join(dir, "files")).sort(), [...names, "notes.txt"].sort(), `schedule ${n}`);
+      for (const name of ["fonts.css", ...names.map((name) => `files/${name}`)]) assert.equal(fs.readFileSync(path.join(dir, name), "utf8"), last, `schedule ${n}: ${name}`);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "fonts.json"), "utf8")).generator, `easyfontkit ${last}`);
+      assert.equal(fs.readFileSync(path.join(dir, "files", "notes.txt"), "utf8"), "mine");
+    }
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a run still saving into the folder is waited for, and a lock a killed run left is taken over", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-lock-"));
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const lockFile = path.join(dir, ".easyfontkit-lock");
+    // Another process holds the lock for 400 ms.
+    const holder = spawn(process.execPath, ["-e", `const fs = require("fs"); fs.writeFileSync(${JSON.stringify(lockFile)}, String(process.pid), { flag: "wx" }); console.log("locked"); setTimeout(() => fs.rmSync(${JSON.stringify(lockFile)}), 400);`], { stdio: ["ignore", "pipe", "inherit"] });
+    await new Promise((resolve) => holder.stdout.once("data", resolve));
+    const started = Date.now();
+    saveKit(dir, (part) => newKitIn(part, ["inter-400.woff2"]));
+    assert.ok(Date.now() - started >= 250, `saved after ${Date.now() - started} ms, while the other run held the lock`);
+    assert.equal(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8"), "new\n");
+    // A lock whose process has ended.
+    const ended = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+    fs.writeFileSync(lockFile, ended);
+    saveKit(dir, (part) => newKitIn(part, ["inter-700.woff2"]));
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
+    assert.deepEqual(fs.readdirSync(path.join(dir, "files")).sort(), ["inter-700.woff2", "notes.txt"]);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a run killed outright while it moves its kit in leaves the earlier kit for the next run to put back", { skip: noSignals }, () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-killed-"));
+  try {
+    // Killed with SIGKILL right after its KILL_AT-th rename.
+    const killer = path.join(parent, "killer.js");
+    fs.writeFileSync(killer, `const fs = require("fs"); const rename = fs.renameSync; let n = 0; fs.renameSync = (...args) => { rename(...args); if (++n === Number(process.env.KILL_AT)) process.kill(process.pid, "SIGKILL"); };`);
+    const saver = path.join(parent, "saver.js");
+    fs.writeFileSync(
+      saver,
+      `const fs = require("fs"); const path = require("path");
+       require(${JSON.stringify(require.resolve("../skills/easyfontkit/scripts/lib/kit"))}).saveKit(process.argv[2], (part) => {
+         fs.writeFileSync(path.join(part, "fonts.json"), JSON.stringify({ version: 1, generator: "easyfontkit killed", families: [{ files: [{ file: "files/inter-400.woff2" }, { file: "files/acme-400.woff2" }] }] }));
+         fs.writeFileSync(path.join(part, "FONTS.md"), "killed"); fs.writeFileSync(path.join(part, "fonts.css"), "killed");
+         fs.mkdirSync(path.join(part, "files")); for (const name of ["inter-400.woff2", "acme-400.woff2"]) fs.writeFileSync(path.join(part, "files", name), "killed");
+       });`,
+    );
+    for (const first of [false, true]) {
+      let k = 1;
+      for (; ; k++) {
+        const dir = path.join(parent, `${first ? "first" : "again"}-${k}`);
+        if (!first) earlierKitIn(dir);
+        const before = snapshot(dir, { folderTimes: false });
+        const killed = spawnSync(process.execPath, ["--require", killer, saver, dir], { env: { ...process.env, KILL_AT: String(k) } });
+        if (killed.signal !== "SIGKILL") {
+          assert.equal(killed.status, 0, String(killed.stderr));
+          break;
+        }
+        // The next run puts back what the killed one had moved before its
+        // own kit is written: here that fails, so the folder is the earlier
+        // kit exactly, or empty when there was none.
+        assert.throws(() => saveKit(dir, () => assert.fail("no kit")), /no kit/, `killed after rename ${k}`);
+        assert.deepEqual(snapshot(dir, { folderTimes: false }), before || [], `killed after rename ${k}`);
+        // And one that ends well leaves its own kit whole.
+        saveKit(dir, (part) => newKitIn(part, ["inter-400.woff2"]));
+        assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"], `killed after rename ${k}`);
+        assert.deepEqual(fs.readdirSync(path.join(dir, "files")).sort(), first ? ["inter-400.woff2"] : ["inter-400.woff2", "notes.txt"]);
+      }
+      // The list of moves, every move, and the run that was not killed.
+      assert.ok(k >= (first ? 6 : 11), `only ${k - 1} renames`);
+    }
+    // A file put by hand where the killed run's FONTS.md went is never moved
+    // away: the earlier kit's FONTS.md stays aside, and the run says where.
+    const dir = path.join(parent, "edited");
+    const shown = () => (fs.existsSync(path.join(dir, "FONTS.md")) ? fs.readFileSync(path.join(dir, "FONTS.md"), "utf8") : "");
+    for (let k = 1; shown() !== "killed"; k++) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      earlierKitIn(dir);
+      assert.equal(spawnSync(process.execPath, ["--require", killer, saver, dir], { env: { ...process.env, KILL_AT: String(k) } }).signal, "SIGKILL");
+    }
+    fs.writeFileSync(path.join(dir, "FONTS.md"), "edited");
+    const part = fs.readdirSync(dir).find((name) => name.startsWith(".easyfontkit-part-"));
+    assert.throws(() => saveKit(dir, () => assert.fail("no kit")), {
+      message: `A run killed while it put its kit in ${dir} left the earlier kit there half moved, and it could not be put back together (FONTS.md is taken), so no kit was made. The earlier kit's files that could not go back are in ${path.join(dir, part, "earlier")}; move them back by hand, or pick another folder with --out.`,
+    });
+    assert.equal(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8"), "edited");
+    assert.equal(fs.readFileSync(path.join(dir, part, "earlier", "FONTS.md"), "utf8"), "# Fonts of acme.example\n");
   } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }

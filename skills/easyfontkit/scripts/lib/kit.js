@@ -13,8 +13,10 @@
 //   files/      every font file the page loaded, as the browser received it
 //
 // Nothing is written while the page is read. The kit is then made in a
-// part folder inside its folder and moved in place of an earlier kit there
-// in one go, so a run that fails or is stopped leaves the folder as it was.
+// part folder inside its folder, and moved in for an earlier kit there one
+// file at a time: the earlier kit's files go aside, fonts.json first, and
+// the new ones come in, fonts.json last. A run that fails or is stopped
+// leaves the folder as it was.
 
 const crypto = require("crypto");
 const fs = require("fs");
@@ -73,31 +75,81 @@ const isFile = (file) => {
   const stat = entry(file);
   return Boolean(stat && (stat.isFile() || stat.isSymbolicLink()));
 };
+const namesIn = (dir) => {
+  try {
+    return fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+};
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const remove = (file) => {
+  try {
+    fs.rmSync(file, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  } catch {
+    // Left for the next run.
+  }
+};
 
-// A run's part folder in the kit's folder: .easyfontkit-part-<pid>-<random>.
+// A run's part folder in the kit's folder, .easyfontkit-part-<pid>-<random>;
+// the list of moves a run writes in it before it moves its kit in; and the
+// lock that runs saving into the same folder take turns with.
 const PART = /^\.easyfontkit-part-(\d+)-[0-9a-f]{8}$/;
+const MOVES = "moves.json";
+const LOCK = ".easyfontkit-lock";
+
+function readKit(file) {
+  try {
+    const kit = JSON.parse(fs.readFileSync(file, "utf8"));
+    return kit && kit.version === 1 && String(kit.generator || "").startsWith("easyfontkit") ? kit : null;
+  } catch {
+    return null;
+  }
+}
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // Another user's process.
+    return err.code === "EPERM";
+  }
+}
+// The run that made a part folder or a lock has ended: its process is gone,
+// or it went by this process's pid, so it was an earlier process with the
+// same pid, as this process asks only about ones it did not make.
+const ended = (pid) => pid === process.pid || !alive(pid);
+
+// The part folders in dir with a list of moves: the run moved its kit in
+// and had not finished. A run whose process has ended was killed outright
+// in the middle of it.
+function swaps(dir) {
+  return namesIn(dir)
+    .map((name) => [name, PART.exec(name)])
+    .filter(([name, m]) => m && exists(path.join(dir, name, MOVES)))
+    .map(([name, m]) => ({ part: path.join(dir, name), ended: ended(Number(m[1])) }));
+}
 
 // The kit's folder as a run finds it: null when it is missing or empty, or
 // the earlier kit there, with the names of its font files that are in
 // files/ as files. A folder that holds anything else is refused, so a run
-// never mixes into or replaces someone's files. Part folders do not count.
+// never mixes into or replaces someone's files. The lock and the part
+// folders of runs do not count. A folder a killed run left half
+// replaced counts as a kit (cut): saveKit puts it back together first.
 // Nothing is changed.
 function earlierKit(dir) {
   let names;
   try {
-    names = fs.readdirSync(dir).filter((name) => !PART.test(name));
+    names = fs.readdirSync(dir).filter((name) => !PART.test(name) && name !== LOCK);
   } catch (err) {
     if (err.code === "ENOENT") return null;
     throw err;
   }
   if (!names.length) return null;
-  let old = null;
-  try {
-    old = JSON.parse(fs.readFileSync(path.join(dir, "fonts.json"), "utf8"));
-  } catch {
-    // Not a kit.
-  }
-  if (!old || old.version !== 1 || !String(old.generator || "").startsWith("easyfontkit")) {
+  const old = readKit(path.join(dir, "fonts.json"));
+  if (!old) {
+    if (swaps(dir).length) return { files: [], cut: true };
     throw new Error(`${dir} is not empty and holds no earlier font kit. Pick another folder with --out.`);
   }
   return { files: [...new Set(kitFiles(old))].filter((name) => isFile(path.join(dir, "files", name))) };
@@ -124,18 +176,73 @@ function rename(from, to) {
       return fs.renameSync(from, to);
     } catch (err) {
       if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(err.code) || waited >= 2_000) throw err;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      pause(50);
     }
   }
 }
 
-function alive(pid) {
+// Two runs that save into one folder at the same moment take turns: the
+// first makes the lock file, with its pid in it, and the second waits for
+// it to go, at most LOCK_WAIT. A lock whose run has ended, or one older
+// than any save takes, was left by a run killed outright, and is taken
+// over. Gives the function that lets go of the lock.
+const LOCK_WAIT = 10_000;
+const LOCK_STALE = 120_000;
+function lockOf(file) {
+  let stat;
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // Another user's process.
-    return err.code === "EPERM";
+    stat = fs.lstatSync(file);
+  } catch {
+    return null;
+  }
+  let text = "";
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    // Not readable: told by its age alone.
+  }
+  const pid = /^\d+$/.test(text) ? Number(text) : 0;
+  const age = Date.now() - stat.mtimeMs;
+  // A lock with no pid yet has just been made, unless it is a few seconds old.
+  return { text, mtimeMs: stat.mtimeMs, stale: age > LOCK_STALE || (pid ? ended(pid) : age > 5_000) };
+}
+function lock(dir) {
+  const file = path.join(dir, LOCK);
+  // Only ever a file: a folder of that name is never taken for a lock.
+  const unlink = () => {
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // Gone already, or left for the next run to take over.
+    }
+  };
+  for (let waited = 0; ; waited += 50) {
+    let fd;
+    try {
+      fd = fs.openSync(file, "wx");
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+    }
+    if (fd !== undefined) {
+      try {
+        fs.writeSync(fd, String(process.pid));
+      } catch (err) {
+        fs.closeSync(fd);
+        unlink();
+        throw err;
+      }
+      fs.closeSync(fd);
+      return unlink;
+    }
+    if (waited >= LOCK_WAIT) throw new Error(`Another run is saving a font kit in ${dir}, so no kit was made. Try again once it is done.`);
+    const holder = lockOf(file);
+    if (holder && holder.stale) {
+      // Taken over only while it is still the same lock.
+      const now = lockOf(file);
+      if (now && now.text === holder.text && now.mtimeMs === holder.mtimeMs) unlink();
+    } else {
+      pause(50);
+    }
   }
 }
 
@@ -154,48 +261,88 @@ function makePart(dir) {
   }
 }
 
+// What a move takes, to know it again where it went: a rename keeps a
+// file's size and time, and a folder's names.
+function idOf(file) {
+  const stat = fs.lstatSync(file);
+  return stat.isDirectory() ? { names: fs.readdirSync(file).sort() } : { size: stat.size, mtimeMs: stat.mtimeMs };
+}
+function isSame(file, id) {
+  const stat = entry(file);
+  if (!stat || !id) return false;
+  if (id.names) return stat.isDirectory() && JSON.stringify(namesIn(file).sort()) === JSON.stringify(id.names);
+  return !stat.isDirectory() && stat.size === id.size && stat.mtimeMs === id.mtimeMs;
+}
+
+// Moves back, last first, each move whose file is still where it went,
+// unless something has taken its old place: all of moves, or only the
+// first done when the others were not made. Gives what could not go back,
+// or "".
+function undo(dir, moves, done = moves.length) {
+  let left = "";
+  for (const [from, to, id] of moves.slice(0, done).reverse()) {
+    if (!isSame(path.join(dir, to), id)) continue;
+    try {
+      if (exists(path.join(dir, from))) throw new Error(`${path.normalize(from)} is taken`);
+      rename(path.join(dir, to), path.join(dir, from));
+    } catch (err) {
+      left = left || err.message;
+    }
+  }
+  return left;
+}
+
+function readMoves(part) {
+  try {
+    const moves = JSON.parse(fs.readFileSync(path.join(part, MOVES), "utf8"));
+    return Array.isArray(moves) && moves.every((move) => Array.isArray(move) && typeof move[0] === "string" && typeof move[1] === "string") ? moves : null;
+  } catch {
+    return null;
+  }
+}
+
 // The new kit, made in the part folder, put in place of the earlier kit.
 // The earlier kit's own files go aside into the part folder, fonts.json
 // first, and the new ones come in, fonts.json last, so a fonts.json in the
-// folder always belongs to a whole kit. Each step is a rename within the
-// folder that never replaces anything, and one that fails puts back every
-// file moved before it.
+// folder always goes with the files next to it. The moves are written down
+// in the part folder before the first one, and that list is removed after
+// the last, so a run killed in between can be undone by the next one. Each
+// move is a rename within the folder that never takes the place of
+// anything, and one that fails puts back every file moved before it.
 function putInPlace(dir, part, earlier) {
-  const aside = path.join(part, "earlier");
-  const files = path.join(part, "files");
-  const withFiles = exists(files);
-  const moved = [];
-  const move = (from, to) => {
-    if (exists(to)) throw new Error(`${path.relative(dir, to)} is in the way`);
-    rename(from, to);
-    moved.push([from, to]);
-  };
+  const own = path.basename(part);
+  const moves = [];
+  const plan = (from, to) => moves.push([from, to, idOf(path.join(dir, from))]);
+  if (earlier) {
+    for (const name of ["fonts.json", "FONTS.md", "fonts.css"]) {
+      if (isFile(path.join(dir, name))) plan(name, `${own}/earlier/${name}`);
+    }
+    for (const name of earlier.files) plan(`files/${name}`, `${own}/earlier/files/${name}`);
+  }
+  for (const name of ["FONTS.md", "fonts.css"]) plan(`${own}/${name}`, name);
+  const withFiles = exists(path.join(part, "files"));
+  if (withFiles && !exists(path.join(dir, "files"))) plan(`${own}/files`, "files");
+  else if (withFiles) for (const name of fs.readdirSync(path.join(part, "files"))) plan(`${own}/files/${name}`, `files/${name}`);
+  plan(`${own}/fonts.json`, "fonts.json");
+  fs.mkdirSync(path.join(part, "earlier", "files"), { recursive: true });
+  fs.writeFileSync(path.join(part, `${MOVES}.tmp`), JSON.stringify(moves));
+  rename(path.join(part, `${MOVES}.tmp`), path.join(part, MOVES));
+  let done = 0;
   try {
-    if (earlier) {
-      fs.mkdirSync(path.join(aside, "files"), { recursive: true });
-      for (const name of ["fonts.json", "FONTS.md", "fonts.css"]) {
-        if (isFile(path.join(dir, name))) move(path.join(dir, name), path.join(aside, name));
-      }
-      for (const name of earlier.files) move(path.join(dir, "files", name), path.join(aside, "files", name));
+    for (const [from, to] of moves) {
+      if (exists(path.join(dir, to))) throw new Error(`${path.normalize(to)} is in the way`);
+      rename(path.join(dir, from), path.join(dir, to));
+      done++;
     }
-    for (const name of ["FONTS.md", "fonts.css"]) move(path.join(part, name), path.join(dir, name));
-    if (withFiles && !exists(path.join(dir, "files"))) move(files, path.join(dir, "files"));
-    else if (withFiles) for (const name of fs.readdirSync(files)) move(path.join(files, name), path.join(dir, "files", name));
-    move(path.join(part, "fonts.json"), path.join(dir, "fonts.json"));
   } catch (err) {
-    let back = true;
-    for (const [from, to] of moved.reverse()) {
-      try {
-        rename(to, from);
-      } catch {
-        back = false;
-      }
-    }
-    const error = new Error(`The new kit could not be put in place in ${dir} (${err.message}), so ${back ? "the earlier kit there is as it was" : `some of the earlier kit's files are in ${aside}`}.`);
-    // The part folder then holds what could not be put back, and stays.
-    error.keepPart = !back;
+    const left = undo(dir, moves, done);
+    if (!left) throw new Error(`The new kit could not be put in place in ${dir} (${err.message}), so the earlier kit there is as it was.`);
+    const error = new Error(`The new kit could not be put in place in ${dir} (${err.message}), and some of the earlier kit's files could not be moved back (${left}): they are in ${path.join(part, "earlier")}. The next run that saves a kit there tries again to put them back.`);
+    // The part folder holds them, with its list of moves, and stays.
+    error.keepPart = true;
     throw error;
   }
+  remove(path.join(part, MOVES));
   // As before, without font files: a files folder that held only the
   // earlier kit's goes too.
   if (!withFiles) {
@@ -204,6 +351,21 @@ function putInPlace(dir, part, earlier) {
     } catch {
       // Missing, or holding files of the user's.
     }
+  }
+}
+
+// What runs killed outright in the middle of their moves had moved, put
+// back, so the earlier kit is whole again; then their part folders go,
+// with the new kits they had made.
+function putBack(dir) {
+  for (const { part, ended: gone } of swaps(dir)) {
+    if (!gone) continue;
+    const moves = readMoves(part);
+    const left = moves ? undo(dir, moves) : "its list of moves cannot be read";
+    if (left) {
+      throw new Error(`A run killed while it put its kit in ${dir} left the earlier kit there half moved, and it could not be put back together (${left}), so no kit was made. The earlier kit's files that could not go back are in ${path.join(part, "earlier")}; move them back by hand, or pick another folder with --out.`);
+    }
+    remove(part);
   }
 }
 
@@ -222,56 +384,44 @@ function removeMade(dir, made) {
 
 // Once the new kit is in place: the part folder, which holds the earlier
 // kit by then, and the part folders of runs killed outright while they
-// wrote their kit, whose process has ended. Another process's run that is
-// still going keeps its own. Nothing here fails the run: what cannot be
-// removed is left for the next run.
+// wrote their kit, before they moved anything. Nothing here fails the run:
+// what cannot be removed is left for the next run.
 function tidy(dir, part) {
-  const folders = [part];
-  try {
-    for (const name of fs.readdirSync(dir)) {
-      const pid = Number((PART.exec(name) || [])[1]);
-      // This process has no other part folder at this point: one under its
-      // own pid is a leftover of an earlier process that had the same pid.
-      if (pid && name !== path.basename(part) && (pid === process.pid || !alive(pid))) folders.push(path.join(dir, name));
-    }
-  } catch {
-    // Only this run's own, then.
-  }
-  for (const folder of folders) {
-    try {
-      fs.rmSync(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-    } catch {
-      // Left for the next run.
-    }
+  remove(part);
+  for (const name of namesIn(dir)) {
+    const m = PART.exec(name);
+    if (m && ended(Number(m[1])) && !exists(path.join(dir, name, MOVES))) remove(path.join(dir, name));
   }
 }
 
 // The kit, written by write() into a part folder of its own inside dir and
 // put in place of the earlier kit there, or nothing at all: on any error
-// the part folder goes, and so do the folders made for it. All of it runs
+// the part folder goes, and so do the folders made for it. Runs saving into
+// one folder take turns, and the first to save after a run killed in the
+// middle of its moves puts the earlier kit back together. All of it runs
 // without a pause, so a stop signal is handled before it starts or after it
 // is done, never halfway. The folder is read again here, as it can have
 // changed while the page was read.
 function saveKit(dir, write) {
-  const earlier = earlierKit(dir);
+  earlierKit(dir);
   const made = fs.mkdirSync(dir, { recursive: true });
+  let unlock = null;
   let part = "";
   try {
+    unlock = lock(dir);
+    putBack(dir);
+    const earlier = earlierKit(dir);
     part = makePart(dir);
     write(part, ownFiles(dir, earlier));
     putInPlace(dir, part, earlier);
+    tidy(dir, part);
   } catch (err) {
-    if (part && !err.keepPart) {
-      try {
-        fs.rmSync(part, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-      } catch {
-        // Left for the next run that ends well in this folder.
-      }
-    }
+    if (part && !err.keepPart) remove(part);
+    if (unlock) unlock();
     if (made) removeMade(dir, made);
     throw err;
   }
-  tidy(dir, part);
+  unlock();
 }
 
 const slug = (text) =>
@@ -530,7 +680,8 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
   const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
   const target = dir || `easyfontkit-${host}`;
   // A folder of someone else's is refused before the page is read.
-  const run = { dir: target, earlier: Boolean(earlierKit(target)) };
+  const earlier = earlierKit(target);
+  const run = { dir: target, earlier: Boolean(earlier && !earlier.cut) };
   runs.add(run);
   try {
     let scan;

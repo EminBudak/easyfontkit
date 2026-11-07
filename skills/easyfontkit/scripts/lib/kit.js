@@ -75,6 +75,14 @@ const isFile = (file) => {
   const stat = entry(file);
   return Boolean(stat && (stat.isFile() || stat.isSymbolicLink()));
 };
+// A folder, or a link to one.
+const isFolder = (file) => {
+  try {
+    return fs.statSync(file).isDirectory();
+  } catch {
+    return false;
+  }
+};
 const namesIn = (dir) => {
   try {
     return fs.readdirSync(dir);
@@ -134,8 +142,9 @@ function swaps(dir) {
 // The kit's folder as a run finds it: null when it is missing or empty, or
 // the earlier kit there, with the names of its font files that are in
 // files/ as files. A folder that holds anything else is refused, so a run
-// never mixes into or replaces someone's files. The lock and the part
-// folders of runs do not count. A folder a killed run left half
+// never mixes into or replaces someone's files, and so is a kit that has
+// something other than a file where the new kit puts one. The lock and the
+// part folders of runs do not count. A folder a killed run left half
 // replaced counts as a kit (cut): saveKit puts it back together first.
 // Nothing is changed.
 function earlierKit(dir) {
@@ -152,7 +161,41 @@ function earlierKit(dir) {
     if (swaps(dir).length) return { files: [], cut: true };
     throw new Error(`${dir} is not empty and holds no earlier font kit. Pick another folder with --out.`);
   }
+  for (const name of ["FONTS.md", "fonts.css", "files"]) {
+    const at = path.join(dir, name);
+    if (exists(at) && (name === "files" ? !isFolder(at) : !isFile(at))) {
+      throw new Error(`No kit can be saved in ${dir}: ${at} is not a ${name === "files" ? "folder" : "file"}. Move it away, or pick another folder with --out.`);
+    }
+  }
   return { files: [...new Set(kitFiles(old))].filter((name) => isFile(path.join(dir, "files", name))) };
+}
+
+// The kit's folder before the page is read, without writing anything:
+// refused when it holds someone else's files, or when this user cannot
+// make it or write in it. Gives what earlierKit gives.
+function checkFolder(dir) {
+  const target = path.resolve(dir);
+  let at = target;
+  let stat;
+  for (;;) {
+    try {
+      stat = fs.statSync(at);
+      break;
+    } catch (err) {
+      // ENOTDIR: a file on the way, found one level up.
+      if ((err.code !== "ENOENT" && err.code !== "ENOTDIR") || path.dirname(at) === at) throw err;
+      at = path.dirname(at);
+    }
+  }
+  const shown = at === target ? dir : path.isAbsolute(dir) ? at : path.relative(process.cwd(), at) || ".";
+  const then = at === target ? "" : `, so ${dir} cannot be made there`;
+  if (!stat.isDirectory()) throw new Error(`${shown} is not a folder${then}. Pick another folder with --out.`);
+  try {
+    fs.accessSync(at, fs.constants.W_OK | fs.constants.X_OK | (at === target ? fs.constants.R_OK : 0));
+  } catch {
+    throw new Error(`This user may not write in ${shown}${then}. Pick another folder with --out.`);
+  }
+  return earlierKit(dir);
 }
 
 // The names in the kit's files folder that the earlier kit does not list:
@@ -679,8 +722,9 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
   const url = normalizeUrl(rawUrl);
   const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
   const target = dir || `easyfontkit-${host}`;
-  // A folder of someone else's is refused before the page is read.
-  const earlier = earlierKit(target);
+  // Refused before the page is read: a folder of someone else's, or one
+  // this user cannot write in.
+  const earlier = checkFolder(target);
   const run = { dir: target, earlier: Boolean(earlier && !earlier.cut) };
   runs.add(run);
   try {

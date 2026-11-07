@@ -187,6 +187,16 @@ test("never writes into a folder that holds someone else's files, and reads an e
     const before = snapshot(dir);
     assert.deepEqual(earlierKit(dir), { files: ["acme-400.woff2"] });
     assert.deepEqual(snapshot(dir), before);
+    // Something other than a file where the new kit puts one, or other than
+    // a folder where it puts its files, is refused before the page is read.
+    for (const [name, make] of [["fonts.css", (at) => fs.mkdirSync(at)], ["files", (at) => fs.writeFileSync(at, "mine")]]) {
+      const kept = path.join(dir, `${name}.kept`);
+      if (fs.existsSync(path.join(dir, name))) fs.renameSync(path.join(dir, name), kept);
+      make(path.join(dir, name));
+      assert.throws(() => earlierKit(dir), { message: `No kit can be saved in ${dir}: ${path.join(dir, name)} is not a ${name === "files" ? "folder" : "file"}. Move it away, or pick another folder with --out.` });
+      fs.rmSync(path.join(dir, name), { recursive: true });
+      if (fs.existsSync(kept)) fs.renameSync(kept, path.join(dir, name));
+    }
     // The lock and the part folders of runs do not count.
     const empty = path.join(dir, "empty");
     fs.mkdirSync(path.join(empty, ".easyfontkit-part-1-0000000a"), { recursive: true });
@@ -215,6 +225,41 @@ test("a run that fails leaves the earlier kit exactly as it was, and a first run
     assert.throws(() => saveKit(deep, () => assert.fail("no kit")), /no kit/);
     assert.deepEqual(fs.readdirSync(parent).sort(), ["kit"]);
   } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a folder the kit cannot be saved in is refused before the browser starts", { skip: (process.platform === "win32" && "no modes on Windows") || (process.getuid && process.getuid() === 0 && "root may write anywhere") }, () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-check-"));
+  // No browser: a check that came after it would say so instead.
+  const env = { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") };
+  const cli = (out) => spawnSync(process.execPath, [CLI, "acme.example", "--out", out], { encoding: "utf8", env });
+  try {
+    const locked = path.join(parent, "locked");
+    fs.mkdirSync(locked);
+    fs.chmodSync(locked, 0o555);
+    const file = path.join(parent, "notes.txt");
+    fs.writeFileSync(file, "mine");
+    const kit = path.join(parent, "kit");
+    earlierKitIn(kit);
+    fs.rmSync(path.join(kit, "FONTS.md"));
+    fs.mkdirSync(path.join(kit, "FONTS.md"));
+    const before = snapshot(parent);
+    const refused = {
+      [path.join(locked, "kit")]: `This user may not write in ${locked}, so ${path.join(locked, "kit")} cannot be made there. Pick another folder with --out.`,
+      [locked]: `This user may not write in ${locked}. Pick another folder with --out.`,
+      [file]: `${file} is not a folder. Pick another folder with --out.`,
+      [path.join(file, "kit")]: `${file} is not a folder, so ${path.join(file, "kit")} cannot be made there. Pick another folder with --out.`,
+      [kit]: `No kit can be saved in ${kit}: ${path.join(kit, "FONTS.md")} is not a file. Move it away, or pick another folder with --out.`,
+    };
+    for (const [out, message] of Object.entries(refused)) {
+      const run = cli(out);
+      assert.equal(run.status, 1, out);
+      assert.equal(run.stderr, `easyfontkit: ${message}\n`);
+    }
+    assert.deepEqual(snapshot(parent), before);
+  } finally {
+    fs.chmodSync(path.join(parent, "locked"), 0o755);
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });

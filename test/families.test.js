@@ -65,3 +65,22 @@ test("text a late web font left to a fallback counts as the web font, with a not
   assert.equal(roles.code.family, "System monospace font");
   assert.equal(families.find((f) => f.system).drawnWith, "DejaVu Sans Mono");
 });
+
+test("a font on the visitor's computer keeps the name the CSS asks for it by", () => {
+  const { roles, families } = buildFamilies({
+    pageUrl: PAGE,
+    roles: {
+      heading: [face("Liberation Sans", 120, '"Arial Black", sans-serif', { custom: false, weight: "900" })],
+      body: [face("Liberation Serif", 400, '"Times New Roman", Times, serif', { custom: false })],
+    },
+    files: [],
+    rules: [],
+    faces: [],
+    loaded: [],
+  });
+  assert.equal(roles.heading.family, "Arial Black");
+  assert.equal(roles.body.family, "Times New Roman");
+  const times = families.find((f) => f.name === "Times New Roman");
+  assert.equal(times.category, "serif");
+  assert.deepEqual(times.free.map((f) => f.family), ["Tinos"]);
+});

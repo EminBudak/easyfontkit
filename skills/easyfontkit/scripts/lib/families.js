@@ -49,7 +49,10 @@ const SYSTEM_NAMES = {
 // A CSS name written as an identifier ("nyt-franklin") is kept as written;
 // one written as a name ("Airbnb Cereal VF") is cleaned like a file's.
 const cssDisplay = (name) => (/^[a-z0-9-]+$/.test(name) ? name : cleanName(name) || name);
-const systemName = (family) => SYSTEM_NAMES[lower(family)] || cssDisplay(family);
+// A font on the visitor's computer is named as the CSS asks for it: the
+// words a file adds to a name are part of a system family's own name, like
+// Roman in Times New Roman or Black in Arial Black.
+const systemName = (family) => SYSTEM_NAMES[lower(family)] || family;
 
 // The CSS families each file is declared under: by its address in the
 // @font-face rules, and by Chrome's own report of the web fonts it loaded.

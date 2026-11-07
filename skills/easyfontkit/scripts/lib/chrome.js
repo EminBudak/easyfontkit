@@ -205,7 +205,7 @@ function connect(wsUrl) {
           return new Promise((res, rej) => {
             const timer = setTimeout(() => {
               pending.delete(id);
-              rej(new Error(`${method} timed out`));
+              rej(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
             }, Math.max(1_000, Math.min(timeoutMs, timeLeft())));
             pending.set(id, { resolve: res, reject: rej, timer });
             ws.send(JSON.stringify({ id, method, params }));
@@ -241,11 +241,20 @@ async function openPage(base, { width, height }) {
 // Opens the address and waits for its load event, at most 30 s: a page that
 // never finishes loading (a stuck tracking script) is read as it stands.
 // The wait's timer is cleared once the page has loaded, or it would keep
-// the process alive for the rest of the 30 s after the kit is done.
-// Returns the address the tab ended on, after any redirects.
+// the process alive for the rest of the 30 s after the kit is done. The
+// server gets the run's time to answer, less a minute for reading the
+// page: 30 s at least, and never more than the run has left. Returns the
+// address the tab ended on, after any redirects.
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
-  const { errorText } = await cdp.send("Page.navigate", { url });
+  const answer = Math.max(1_000, Math.min(Math.max(30_000, timeLeft() - 60_000), timeLeft()));
+  let errorText;
+  try {
+    ({ errorText } = await cdp.send("Page.navigate", { url }, answer));
+  } catch (err) {
+    if (!err.timedOut) throw err;
+    throw new Error(`Could not open ${url}: no answer in ${Math.round(answer / 1000)} s. The site may be down or slow; try again later, or give it more time with --timeout.`);
+  }
   if (errorText) throw new Error(`Could not open ${url}: ${errorText}`);
   let timer;
   const late = new Promise((resolve) => (timer = setTimeout(resolve, Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))));

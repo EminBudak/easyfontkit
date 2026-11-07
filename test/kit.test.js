@@ -531,12 +531,14 @@ test("a stop signal kills the browser, leaves the folder as it was, says so and 
   try {
     // A browser that starts and never answers, so a run waits for it, with
     // a helper process that makes its profile again once it is removed, as
-    // Chrome's helpers can on their way out.
+    // Chrome's helpers can on their way out, and a socket folder in the temp
+    // folder that the profile links to, as Chrome's own.
     const chrome = path.join(parent, "chrome");
     fs.writeFileSync(
       chrome,
       `#!/bin/sh
 for arg in "$@"; do case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}";; esac; done
+socket=$(mktemp -d "$TMPDIR/com.example.Chrome.XXXXXX") && : > "$socket/SingletonSocket" && ln -s "$socket/SingletonSocket" "$profile/SingletonSocket"
 (i=0; while [ -d "$profile" ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i + 1)); done; mkdir -p "$profile/Default") &
 echo $$ > "$(dirname "$0")/chrome.pid"
 exec sleep 60
@@ -749,6 +751,14 @@ test("a run stopped while it reads the page leaves the earlier kit as it was, cl
     const mine = profiles().filter((name) => !others.has(name));
     assert.equal(mine.length, 1);
     await sleep(1500);
+    // Chrome's socket folder, which it removes only when it quits. On Linux
+    // the profile links to it from the start.
+    let socket = "";
+    try {
+      socket = path.dirname(fs.readlinkSync(path.join(os.tmpdir(), mine[0], "SingletonSocket")));
+    } catch (err) {
+      if (process.platform === "linux") throw err;
+    }
     process.kill(-child.pid, "SIGTERM");
     await sleep(20);
     try {
@@ -764,6 +774,7 @@ test("a run stopped while it reads the page leaves the earlier kit as it was, cl
     for (let i = 0; i < 150 && browsers().length; i++) await sleep(20);
     assert.deepEqual(browsers(), []);
     assert.equal(fs.existsSync(path.join(os.tmpdir(), mine[0])), false, "no browser profile left");
+    if (socket) assert.equal(fs.existsSync(socket), false, "no socket folder left");
   } finally {
     try {
       process.kill(-child.pid, "SIGKILL");

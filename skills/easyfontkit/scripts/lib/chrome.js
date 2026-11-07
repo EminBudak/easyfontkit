@@ -60,6 +60,34 @@ function findChrome() {
 // profile, from the moment it is spawned.
 const open = new Set();
 
+// Chrome keeps the socket that hands a second start of a profile over to
+// the first one in a folder of its own in the temp folder, linked from the
+// profile as SingletonSocket. Chrome removes that folder when it quits; one
+// that is killed cannot, so it is removed with the profile.
+function singletonOf(profile) {
+  try {
+    const socket = fs.readlinkSync(path.join(profile, "SingletonSocket"));
+    const folder = path.dirname(socket);
+    if (path.basename(socket) === "SingletonSocket" && fs.realpathSync(path.dirname(folder)) === fs.realpathSync(os.tmpdir())) return folder;
+  } catch {
+    // Not made yet, or not on this system.
+  }
+  return "";
+}
+
+// A browser's profile and its socket folder, once the browser has ended,
+// each removal tried again a few times with the given delay.
+function removeProfile({ profile, singleton }, maxRetries, retryDelay) {
+  for (const folder of [profile, singleton]) {
+    if (!folder) continue;
+    try {
+      fs.rmSync(folder, { recursive: true, force: true, maxRetries, retryDelay });
+    } catch {
+      // Left for the system's temp clean-up.
+    }
+  }
+}
+
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
@@ -93,7 +121,7 @@ async function launch({ width, height }) {
   let exited = false;
   child.on("exit", () => (exited = true));
   child.on("error", () => (exited = true));
-  const started = { child, profile };
+  const started = { child, profile, singleton: "" };
   open.add(started);
   let base = "";
   // Chrome is asked to quit first: killed outright, its helper processes go
@@ -114,11 +142,8 @@ async function launch({ width, height }) {
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
     open.delete(started);
-    try {
-      fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    } catch {
-      // Left for the system's temp clean-up.
-    }
+    started.singleton = started.singleton || singletonOf(profile);
+    removeProfile(started, 10, 100);
   };
   // Chrome writes the port it picked to DevToolsActivePort in the profile.
   const portFile = path.join(profile, "DevToolsActivePort");
@@ -127,6 +152,7 @@ async function launch({ width, height }) {
       const port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim();
       if (/^\d+$/.test(port)) {
         base = `http://127.0.0.1:${port}`;
+        started.singleton = singletonOf(profile);
         return { base, close };
       }
     } catch {
@@ -138,31 +164,27 @@ async function launch({ width, height }) {
   throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
 }
 
-// Every browser still open, killed at once, and its profile removed, for a
-// process that is being stopped and has no time to ask them to quit. Their
-// helper processes end by themselves soon after, but on their way out they
-// can write to the profile and make it again, so it is removed once more a
-// moment later. What is still left goes with the system's temp clean-up.
+// Every browser still open, killed at once, and its profile and socket
+// folder removed, for a process that is being stopped and has no time to
+// ask them to quit. Their helper processes end by themselves soon after,
+// but on their way out they can write to the profile and make it again, so
+// it is removed once more a moment later. What is still left goes with the
+// system's temp clean-up.
 function killBrowsers() {
   const browsers = [...open];
   open.clear();
   if (!browsers.length) return;
-  for (const { child } of browsers) {
+  for (const browser of browsers) {
+    browser.singleton = browser.singleton || singletonOf(browser.profile);
     try {
-      child.kill("SIGKILL");
+      browser.child.kill("SIGKILL");
     } catch {
       // Gone already.
     }
   }
   for (const wait of [0, 100]) {
     if (wait) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
-    for (const { profile } of browsers) {
-      try {
-        fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
-      } catch {
-        // Tried again, or left.
-      }
-    }
+    for (const browser of browsers) removeProfile(browser, 3, 50);
   }
 }
 

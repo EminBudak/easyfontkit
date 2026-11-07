@@ -5,27 +5,36 @@
 // folder rules and the CLI's own answers, which need no browser.
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const test = require("node:test");
-const { makeFontKit, normalizeUrl, prepareDir } = require("../skills/easyfontkit/scripts/lib/kit");
+const { makeFontKit, normalizeUrl, earlierKit, saveKit } = require("../skills/easyfontkit/scripts/lib/kit");
 const { findChrome } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { fixture, interAs } = require("./helpers");
 
 const CLI = path.resolve(__dirname, "../skills/easyfontkit/scripts/easyfontkit.js");
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
+const noSignals = process.platform === "win32" && "no POSIX signals or shell scripts on Windows";
 
+// A route answers with its status (200 unless it says), its headers and its
+// body; one that holds never answers.
 function serve(routes) {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       const route = routes[req.url.split("?")[0]];
       if (!route) return void res.writeHead(404, { "content-type": "text/plain" }).end("not found");
-      res.writeHead(200, { "content-type": route.type }).end(route.body);
+      if (route.hold) return;
+      res.writeHead(route.status || 200, { "content-type": route.type || "text/html", ...route.headers }).end(route.body || "");
     });
-    server.listen(0, "127.0.0.1", () => resolve({ server, origin: `http://127.0.0.1:${server.address().port}` }));
+    const close = () => {
+      server.closeAllConnections();
+      server.close();
+    };
+    server.listen(0, "127.0.0.1", () => resolve({ server: { close }, origin: `http://127.0.0.1:${server.address().port}` }));
   });
 }
 
@@ -45,6 +54,61 @@ function run(args) {
     child.on("close", (status) => resolve({ status, stdout, stderr, lingered: Date.now() - printedAt }));
   });
 }
+
+// Every entry of a folder, hidden ones too, with its kind, mode, contents
+// and time: two snapshots that match mean the folder is exactly as it was.
+// Without folderTimes, the times of folders are left out.
+function snapshot(dir, { folderTimes = true } = {}) {
+  if (!fs.existsSync(dir)) return null;
+  const lines = [];
+  const walk = (at, rel) => {
+    for (const name of fs.readdirSync(at).sort()) {
+      const full = path.join(at, name);
+      const stat = fs.lstatSync(full);
+      const where = rel ? `${rel}/${name}` : name;
+      const mode = (stat.mode & 0o7777).toString(8);
+      if (stat.isDirectory()) {
+        lines.push(`${where}/ ${mode}${folderTimes ? ` ${stat.mtimeMs}` : ""}`);
+        walk(full, where);
+      } else {
+        lines.push(`${where} ${mode} ${crypto.createHash("sha1").update(fs.readFileSync(full)).digest("hex")} ${stat.mtimeMs}`);
+      }
+    }
+  };
+  walk(dir, "");
+  return lines;
+}
+
+// A kit as an earlier run left it, with a file of the user's in its files
+// folder.
+function earlierKitIn(dir) {
+  fs.mkdirSync(path.join(dir, "files"), { recursive: true });
+  const kit = { version: 1, generator: "easyfontkit 0.1.1", url: "https://acme.example/", families: [{ files: [{ file: "files/acme-400.woff2" }] }] };
+  fs.writeFileSync(path.join(dir, "fonts.json"), JSON.stringify(kit));
+  fs.writeFileSync(path.join(dir, "FONTS.md"), "# Fonts of acme.example\n");
+  fs.writeFileSync(path.join(dir, "fonts.css"), ":root {}\n");
+  fs.writeFileSync(path.join(dir, "files", "acme-400.woff2"), fixture("inter-latin-400.woff2"));
+  fs.writeFileSync(path.join(dir, "files", "notes.txt"), "mine");
+}
+
+// A new kit, written into its part folder as makeFontKit writes it.
+function newKitIn(part, names = []) {
+  fs.writeFileSync(path.join(part, "fonts.json"), JSON.stringify({ version: 1, generator: "easyfontkit test", families: [{ files: names.map((name) => ({ file: `files/${name}` })) }] }));
+  fs.writeFileSync(path.join(part, "FONTS.md"), "new\n");
+  fs.writeFileSync(path.join(part, "fonts.css"), "new\n");
+  fs.mkdirSync(path.join(part, "files"));
+  for (const name of names) fs.writeFileSync(path.join(part, "files", name), "new");
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const gone = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+};
 
 // A heading font that sells itself, an open body font declared under
 // another CSS name, a second heading font whose file hides its names, and
@@ -101,23 +165,208 @@ test("addresses: bare domains get https, anything else is refused", () => {
   assert.throws(() => normalizeUrl(""), /Give a website address/);
 });
 
-test("never writes into a folder that holds someone else's files", () => {
+test("never writes into a folder that holds someone else's files, and reads an earlier kit without changing it", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-dir-"));
   try {
+    assert.equal(earlierKit(path.join(dir, "missing")), null);
+    assert.equal(earlierKit(dir), null);
     fs.writeFileSync(path.join(dir, "notes.txt"), "mine");
-    assert.throws(() => prepareDir(dir), /not empty/);
-    assert.equal(fs.readFileSync(path.join(dir, "notes.txt"), "utf8"), "mine");
-    // An earlier kit is replaced, by file name only.
+    assert.throws(() => earlierKit(dir), /not empty and holds no earlier font kit/);
+    assert.throws(() => saveKit(dir, () => assert.fail("nothing is written")), /not empty and holds no earlier font kit/);
+    assert.deepEqual(fs.readdirSync(dir), ["notes.txt"]);
+    // An earlier kit's font files, by name only and only as files: a folder
+    // under a name it lists is not the kit's.
     fs.rmSync(path.join(dir, "notes.txt"));
-    fs.mkdirSync(path.join(dir, "files"));
+    fs.mkdirSync(path.join(dir, "files", "keep"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "files", "keep", "mine.txt"), "mine");
     fs.writeFileSync(path.join(dir, "files", "acme-400.woff2"), "old");
     fs.writeFileSync(path.join(dir, "FONTS.md"), "old");
-    const old = { version: 1, generator: "easyfontkit 0.1.0", families: [{ files: [{ file: "../../escape.woff2" }, { file: "files/acme-400.woff2" }] }] };
+    const old = { version: 1, generator: "easyfontkit 0.1.0", families: [{ files: [{ file: "../../escape.woff2" }, { file: "files/acme-400.woff2" }, { file: "files/keep" }, { file: "files/gone.woff2" }] }] };
     fs.writeFileSync(path.join(dir, "fonts.json"), JSON.stringify(old));
-    prepareDir(dir);
-    assert.deepEqual(fs.readdirSync(dir), []);
+    const before = snapshot(dir);
+    assert.deepEqual(earlierKit(dir), { files: ["acme-400.woff2"] });
+    assert.deepEqual(snapshot(dir), before);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a run that fails leaves the earlier kit exactly as it was, and a first run that fails makes no folder", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-keep-"));
+  const env = { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") };
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    const failed = spawnSync(process.execPath, [CLI, "acme.example", "--out", dir], { encoding: "utf8", env });
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /No Chrome, Chromium, Edge or Brave found/);
+    assert.deepEqual(snapshot(dir), before);
+    const deep = path.join(parent, "new", "deep", "kit");
+    assert.equal(spawnSync(process.execPath, [CLI, "acme.example", "--out", deep], { env }).status, 1);
+    assert.deepEqual(fs.readdirSync(parent).sort(), ["kit"]);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("the new kit goes in only whole: a step that fails puts the earlier kit back", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-swap-"));
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    // A file moved aside and back keeps its time; the folder it was in
+    // shows the moves in its own.
+    const before = snapshot(dir, { folderTimes: false });
+    let inTheWay;
+    assert.throws(
+      () =>
+        saveKit(dir, (part, own) => {
+          assert.deepEqual(own, ["notes.txt"]);
+          newKitIn(part, ["inter-400.woff2", "inter-700.woff2"]);
+          // Someone's folder came where a new file goes while the page was read.
+          fs.mkdirSync(path.join(dir, "files", "inter-700.woff2"));
+          inTheWay = snapshot(dir, { folderTimes: false }).filter((line) => !line.startsWith(".easyfontkit-part-"));
+        }),
+      (err) => err.message === `The new kit could not be put in place in ${dir} (${path.join("files", "inter-700.woff2")} is in the way), so the earlier kit there is as it was.`,
+    );
+    assert.deepEqual(snapshot(dir, { folderTimes: false }), inTheWay);
+    fs.rmdirSync(path.join(dir, "files", "inter-700.woff2"));
+    assert.deepEqual(snapshot(dir, { folderTimes: false }), before);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a run that ends well leaves its kit, the user's files, and the part folders of runs still going", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-tidy-"));
+  const going = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    // The part folders of a run killed outright and of one still going.
+    const ended = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+    const dead = `.easyfontkit-part-${ended}-0000000a`;
+    const live = `.easyfontkit-part-${going.pid}-0000000b`;
+    fs.mkdirSync(path.join(dir, dead));
+    fs.writeFileSync(path.join(dir, dead, "fonts.json"), "{}");
+    fs.mkdirSync(path.join(dir, live));
+    // A file of the user's under the name a new font file would take.
+    fs.writeFileSync(path.join(dir, "files", "Inter-400.woff2"), "mine");
+    saveKit(dir, (part, own) => {
+      assert.deepEqual(own.sort(), ["Inter-400.woff2", "notes.txt"]);
+      newKitIn(part, ["inter-400-2.woff2"]);
+    });
+    assert.deepEqual(fs.readdirSync(dir).sort(), [live, "FONTS.md", "files", "fonts.css", "fonts.json"].sort());
+    assert.deepEqual(fs.readdirSync(path.join(dir, "files")).sort(), ["Inter-400.woff2", "inter-400-2.woff2", "notes.txt"]);
+    assert.equal(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8"), "new\n");
+    assert.equal(fs.readFileSync(path.join(dir, "files", "Inter-400.woff2"), "utf8"), "mine");
+  } finally {
+    going.kill();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("the part folder is made with mkdir, so the access a default ACL gives others reaches it", { skip: process.platform === "win32" && "no modes on Windows" }, () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-mode-"));
+  const umask = process.umask(0o027);
+  try {
+    let mode = 0;
+    saveKit(path.join(parent, "kit"), (part) => {
+      mode = fs.statSync(part).mode & 0o777;
+      newKitIn(part);
+    });
+    assert.equal(mode.toString(8), "750", "mkdtemp would give 700");
+  } finally {
+    process.umask(umask);
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a stop signal kills the browser, leaves the folder as it was, says so and ends the run by that signal, also when a second one comes", { skip: noSignals }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-signal-"));
+  const groups = [];
+  try {
+    // A browser that starts and never answers, so a run waits for it, with
+    // a helper process that makes its profile again once it is removed, as
+    // Chrome's helpers can on their way out.
+    const chrome = path.join(parent, "chrome");
+    fs.writeFileSync(
+      chrome,
+      `#!/bin/sh
+for arg in "$@"; do case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}";; esac; done
+(i=0; while [ -d "$profile" ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i + 1)); done; mkdir -p "$profile/Default") &
+echo $$ > "$(dirname "$0")/chrome.pid"
+exec sleep 60
+`,
+      { mode: 0o755 },
+    );
+    // The copy of the signal npm and makersmcp's supervisor pass on, made to
+    // come while the first one is handled: as the browser's profile is
+    // removed.
+    const twice = path.join(parent, "twice.js");
+    fs.writeFileSync(
+      twice,
+      `const fs = require("fs");
+       const rmSync = fs.rmSync;
+       fs.rmSync = (target, ...rest) => {
+         if (String(target).includes("easyfontkit-chrome-")) {
+           fs.rmSync = rmSync;
+           process.kill(process.pid, "SIGTERM");
+           const until = Date.now() + 300;
+           while (Date.now() < until);
+         }
+         return rmSync(target, ...rest);
+       };`,
+    );
+    const stop = async (dir, preload) => {
+      const tmp = fs.mkdtempSync(path.join(parent, "tmp-"));
+      fs.rmSync(path.join(parent, "chrome.pid"), { force: true });
+      // In a process group of its own, with its browser, so whatever is
+      // left of it can be stopped at the end.
+      const child = spawn(process.execPath, [...(preload ? ["--require", preload] : []), CLI, "acme.example", "--out", dir], {
+        detached: true,
+        stdio: ["ignore", "ignore", "pipe"],
+        env: { ...process.env, CHROME_PATH: chrome, TMPDIR: tmp },
+      });
+      groups.push(child.pid);
+      let stderr = "";
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      let exited = false;
+      const ended = new Promise((resolve) =>
+        child.on("exit", (code, signal) => {
+          exited = true;
+          resolve({ code, signal });
+        }),
+      );
+      while (!exited && !fs.existsSync(path.join(parent, "chrome.pid"))) await sleep(20);
+      assert.equal(exited, false, stderr);
+      const pid = Number(fs.readFileSync(path.join(parent, "chrome.pid"), "utf8"));
+      child.kill("SIGTERM");
+      const { signal } = await ended;
+      for (let i = 0; i < 100 && !gone(pid); i++) await sleep(20);
+      return { signal, stderr, browserLeft: !gone(pid), profiles: fs.readdirSync(tmp) };
+    };
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    for (const preload of [null, twice]) {
+      const stopped = await stop(dir, preload);
+      assert.deepEqual(stopped, { signal: "SIGTERM", stderr: `easyfontkit: stopped by SIGTERM, so no kit was made. The earlier kit in ${dir} is as it was.\n`, browserLeft: false, profiles: [] });
+      assert.deepEqual(snapshot(dir), before);
+    }
+    const first = await stop(path.join(parent, "new", "kit"));
+    assert.equal(first.stderr, "easyfontkit: stopped by SIGTERM, so no kit was made.\n");
+    assert.equal(fs.existsSync(path.join(parent, "new")), false);
+  } finally {
+    for (const group of groups) {
+      try {
+        process.kill(-group, "SIGKILL");
+      } catch {
+        // Nothing of it is left.
+      }
+    }
+    fs.rmSync(parent, { recursive: true, force: true });
   }
 });
 
@@ -211,10 +460,75 @@ test("a page's fonts: each role's face, every file saved as served, each license
     const json = JSON.parse(cli.stdout);
     assert.equal(json.roles.body.family, "Inter");
     assert.equal(json.families.find((f) => f.name === "Inter").files[0].file, "");
-    assert.equal(fs.existsSync(path.join(dir, "files")), false);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "fonts.css", "fonts.json"]);
+
+    // Files of the user's own in the files folder stay theirs, also one
+    // under the name a new font file would take.
+    fs.mkdirSync(path.join(dir, "files"));
+    fs.writeFileSync(path.join(dir, "files", "inter-400.woff2"), "mine");
+    fs.writeFileSync(path.join(dir, "files", "notes.txt"), "mine");
+    const again = await makeFontKit(origin, { dir, timeLimit: 90_000 });
+    assert.equal(again.kit.families.find((f) => f.name === "Inter").files[0].file, "files/inter-400-2.woff2");
+    assert.ok(fs.readFileSync(path.join(dir, "files", "inter-400-2.woff2")).equals(fixture("inter-latin-400.woff2")));
+    assert.equal(fs.readFileSync(path.join(dir, "files", "inter-400.woff2"), "utf8"), "mine");
+    assert.equal(fs.readFileSync(path.join(dir, "files", "notes.txt"), "utf8"), "mine");
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
   } finally {
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a run stopped while it reads the page leaves the earlier kit as it was, closes its browser and ends by the signal", { skip: noBrowser || noSignals }, async () => {
+  const { server, origin } = await serve({
+    "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },
+    "/held.css": { hold: true },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-stop-"));
+  const dir = path.join(parent, "kit");
+  // The browser's profile goes in the temp folder: a longer path than that
+  // can be too long for the socket Chrome makes there.
+  const profiles = () => fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith("easyfontkit-chrome-"));
+  const others = new Set(profiles());
+  let child;
+  try {
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    // In a process group of its own, as makersmcp runs a kit. The stop goes
+    // to the whole group, as Ctrl-C and makersmcp's cancel send it, and a
+    // second copy to the kit, as npm and makersmcp's supervisor pass it on.
+    child = spawn(process.execPath, [CLI, origin, "--out", dir], { detached: true, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    const ended = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+    const opened = new Promise((resolve) => child.stderr.on("data", (chunk) => /Opening/.test((stderr += chunk)) && resolve()));
+    await Promise.race([opened, ended]);
+    assert.match(stderr, /Opening/);
+    const mine = profiles().filter((name) => !others.has(name));
+    assert.equal(mine.length, 1);
+    await sleep(1500);
+    process.kill(-child.pid, "SIGTERM");
+    await sleep(20);
+    try {
+      process.kill(child.pid, "SIGTERM");
+    } catch {
+      // Ended already.
+    }
+    const { signal } = await ended;
+    assert.equal(signal, "SIGTERM");
+    assert.ok(stderr.endsWith(`\neasyfontkit: stopped by SIGTERM, so no kit was made. The earlier kit in ${dir} is as it was.\n`), stderr);
+    assert.deepEqual(snapshot(dir), before);
+    const browsers = () => spawnSync("ps", ["-A", "-o", "args="], { encoding: "utf8" }).stdout.split("\n").filter((line) => line.includes(mine[0]));
+    for (let i = 0; i < 150 && browsers().length; i++) await sleep(20);
+    assert.deepEqual(browsers(), []);
+    assert.equal(fs.existsSync(path.join(os.tmpdir(), mine[0])), false, "no browser profile left");
+  } finally {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // Nothing of its group is left.
+    }
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true, maxRetries: 5 });
   }
 });
 

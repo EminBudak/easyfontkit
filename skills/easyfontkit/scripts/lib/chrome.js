@@ -56,6 +56,10 @@ function findChrome() {
   return "";
 }
 
+// The browsers this process has started and not closed yet, each with its
+// profile, from the moment it is spawned.
+const open = new Set();
+
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
@@ -89,6 +93,8 @@ async function launch({ width, height }) {
   let exited = false;
   child.on("exit", () => (exited = true));
   child.on("error", () => (exited = true));
+  const started = { child, profile };
+  open.add(started);
   let base = "";
   // Chrome is asked to quit first: killed outright, its helper processes go
   // on writing to the profile for a while and the folder cannot be removed.
@@ -107,6 +113,7 @@ async function launch({ width, height }) {
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
+    open.delete(started);
     try {
       fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch {
@@ -129,6 +136,34 @@ async function launch({ width, height }) {
   }
   await close();
   throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
+}
+
+// Every browser still open, killed at once, and its profile removed, for a
+// process that is being stopped and has no time to ask them to quit. Their
+// helper processes end by themselves soon after, but on their way out they
+// can write to the profile and make it again, so it is removed once more a
+// moment later. What is still left goes with the system's temp clean-up.
+function killBrowsers() {
+  const browsers = [...open];
+  open.clear();
+  if (!browsers.length) return;
+  for (const { child } of browsers) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Gone already.
+    }
+  }
+  for (const wait of [0, 100]) {
+    if (wait) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+    for (const { profile } of browsers) {
+      try {
+        fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      } catch {
+        // Tried again, or left.
+      }
+    }
+  }
 }
 
 function connect(wsUrl) {
@@ -224,4 +259,4 @@ async function navigate(cdp, url) {
   }
 }
 
-module.exports = { findChrome, launch, connect, openPage, navigate };
+module.exports = { findChrome, launch, killBrowsers, connect, openPage, navigate };

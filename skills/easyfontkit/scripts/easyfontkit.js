@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 
-const { makeFontKit } = require("./lib/kit");
+const fs = require("fs");
+const os = require("os");
+const { makeFontKit, stopRuns } = require("./lib/kit");
 const version = require("./lib/version");
 
 const USAGE = `Usage: easyfontkit <url> [options]
@@ -11,6 +13,10 @@ folder: which font its headings, body text, buttons and code are drawn
 with, every font file the page loads, how each one is licensed, and the
 closest free font for each one that is not free. FONTS.md is for people
 and coding agents, fonts.css for pages, fonts.json for tools.
+
+The folder has to be new, empty or hold an earlier kit, which a new run
+replaces once the new kit is whole. A run that fails or is stopped leaves
+the folder as it was.
 
 Options:
   --out <dir>      where to save (default: ./easyfontkit-<host>)
@@ -68,6 +74,40 @@ function summary({ dir, kit }) {
   return lines.join("\n");
 }
 
+// Ctrl-C, a kill or a closed terminal while the page is read: the browser
+// is killed and the process ends by the same signal, before the run has
+// written anything, so the kit's folder is left as it was. Once the kit is
+// in place, the run has ended well and the process ends as it would have.
+// The listeners stay until the process is about to end, so a second copy
+// of the signal, as npm and makersmcp's supervisor pass one on, changes
+// nothing. An error that ends the process kills the browser too.
+const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+let stopping = false;
+function stopOnSignals() {
+  for (const signal of SIGNALS) {
+    process.on(signal, () => {
+      if (stopping) return;
+      stopping = true;
+      const stopped = stopRuns();
+      if (!stopped.length) return void process.stdout.write("", () => process.exit(0));
+      // Written at once: a pipe can be asynchronous, and the process ends
+      // right after.
+      for (const run of stopped) fs.writeSync(2, `easyfontkit: stopped by ${signal}, so no kit was made.${run.earlier ? ` The earlier kit in ${run.dir} is as it was.` : ""}\n`);
+      for (const name of SIGNALS) process.removeAllListeners(name);
+      const code = 128 + os.constants.signals[signal];
+      try {
+        process.kill(process.pid, signal);
+      } catch {
+        // Windows cannot raise every signal.
+        process.exit(code);
+      }
+      // Only reached where that signal does not end a process.
+      setTimeout(() => process.exit(code), 100);
+    });
+  }
+  process.on("exit", () => stopRuns());
+}
+
 async function main() {
   let options;
   try {
@@ -78,6 +118,7 @@ async function main() {
   }
   if (options.help) return void process.stdout.write(`${USAGE}\n`);
   if (options.version) return void process.stdout.write(`${version}\n`);
+  stopOnSignals();
   try {
     const result = await makeFontKit(options.url, {
       dir: options.out,
@@ -87,6 +128,8 @@ async function main() {
     });
     process.stdout.write(options.json ? JSON.stringify(result.kit, null, 2) + "\n" : summary(result) + "\n");
   } catch (err) {
+    // A stopped run has said so, and ends by its signal.
+    if (stopping) return;
     if (options.json) process.stdout.write(JSON.stringify({ ok: false, error: err.message }) + "\n");
     process.stderr.write(`easyfontkit: ${err.message}\n`);
     process.exit(1);

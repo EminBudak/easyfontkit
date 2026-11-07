@@ -55,7 +55,14 @@ function record(cdp) {
   });
   cdp.on("CSS.fontsUpdated", ({ font }) => font && faces.push(font));
   cdp.on("CSS.styleSheetAdded", ({ header }) => header && header.origin === "regular" && sheets.set(header.styleSheetId, header));
-  return { fonts, faces, sheets };
+  // The tab's own page as the server answered it: the last response its
+  // main frame got, after any redirects, so a script that moves the page on
+  // counts too. The frames inside a page get documents of their own.
+  const page = { frame: "", status: 0, url: "" };
+  cdp.on("Network.responseReceived", ({ frameId, type, response }) => {
+    if (type === "Document" && response && page.frame && frameId === page.frame) Object.assign(page, { status: response.status, url: response.url });
+  });
+  return { fonts, faces, sheets, page };
 }
 
 async function evaluate(cdp, expression, timeoutMs = 10_000) {
@@ -300,15 +307,26 @@ async function readFiles(fonts, rules, faces) {
 }
 
 // Opens the page and reads it: the faces of each role, every font file it
-// loaded, its @font-face rules, the web fonts Chrome reports as loaded, and
-// the families document.fonts holds.
+// loaded, its @font-face rules, the web fonts Chrome reports as loaded, the
+// families document.fonts holds, and the status and address the server
+// answered the page with (answer).
 async function scanPage(cdp, url, log = () => {}) {
   const recorded = record(cdp);
   await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: 50_000_000 });
   await cdp.send("DOM.enable");
   await cdp.send("CSS.enable");
+  const { frameTree } = await cdp.send("Page.getFrameTree");
+  recorded.page.frame = frameTree.frame.id;
   log(`Opening ${url}`);
-  const pageUrl = await navigate(cdp, url);
+  let pageUrl;
+  try {
+    pageUrl = await navigate(cdp, url);
+  } catch (err) {
+    // An error status with no page of its own makes Chrome show its own
+    // error page and give a net:: code, which says less than the status.
+    if (recorded.page.status < 400) throw err;
+    return { pageUrl: url, answer: { status: recorded.page.status, url: recorded.page.url }, title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [] };
+  }
   await fontsReady(cdp);
   log("Reading the page");
   await walk(cdp);
@@ -328,7 +346,8 @@ async function scanPage(cdp, url, log = () => {}) {
   }));
   const { files, skipped } = await readFiles(recorded.fonts, rules, faces);
   const challenge = !files.length && CHALLENGE_TITLE.test(title) ? title : "";
-  return { pageUrl, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
+  const answer = { status: recorded.page.status, url: recorded.page.url };
+  return { pageUrl, answer, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
 }
 
 module.exports = { scanPage, fontFaceRules, decodeDataUrl };

@@ -31,3 +31,4 @@ The folder has to be new, empty or hold an earlier kit. A new run into it replac
 - A free match chosen by proportions has a similar x-height, cap height and width, which keeps line lengths and spacing close. It can still look different. Tell the user it is the nearest free font, not the same design.
 - If a role shows a system font where you expected the brand's own, the site may load its fonts late. Try `--timeout 240`, and tell the user what you got.
 - If the site answers with a bot check, the run stops and says so. Ask the user for the font names.
+- If the page answers with an error status, the run stops, writes nothing and names the status and the address it ended on. After a 404, check the address with the user or read the site's home page. After a 401 or a 403, the page may need a login, or the site may turn away headless browsers. After a 500, a 503 or a 429, the site may be down or busy: try again later.

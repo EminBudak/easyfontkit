@@ -534,12 +534,62 @@ test("a run stopped while it reads the page leaves the earlier kit as it was, cl
 
 test("a bot check served instead of the page fails with a reason and leaves nothing behind", { skip: noBrowser }, async () => {
   const html = "<!doctype html><html><head><title>Just a moment...</title></head><body><p>Checking your browser.</p></body></html>";
-  const { server, origin } = await serve({ "/": { type: "text/html", body: html } });
+  // Also with the error status a bot check often comes with: it is still
+  // told as a bot check.
+  const { server, origin } = await serve({ "/": { body: html }, "/403": { status: 403, body: html } });
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-out-"));
   const dir = path.join(parent, "kit");
   try {
-    await assert.rejects(makeFontKit(origin, { dir, timeLimit: 60_000 }), /answered with a bot check \("Just a moment\.\.\."\)/);
-    assert.equal(fs.existsSync(dir), false, "no folder left behind");
+    for (const url of [origin, `${origin}/403`]) {
+      await assert.rejects(makeFontKit(url, { dir, timeLimit: 60_000 }), /answered with a bot check \("Just a moment\.\.\."\)/);
+      assert.equal(fs.existsSync(dir), false, "no folder left behind");
+    }
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a page that answers with an error is refused, naming the status and the address the run ended on, and the earlier kit stays", { skip: noBrowser }, async () => {
+  // Error pages as servers send them, drawn in the browser's default font.
+  const error = (title) => `<!doctype html><html><head><title>${title}</title></head><body><h1>${title}</h1><p>The page you asked for is not here.</p></body></html>`;
+  const { server, origin } = await serve({
+    "/": { body: `<!doctype html><html><head><title>Home</title></head><body><h1>Home</h1><p>A page that loads.</p></body></html>` },
+    "/missing": { status: 404, body: error("Not Found") },
+    "/moved": { status: 302, headers: { location: "/gone/page.html" } },
+    "/empty": { status: 404 },
+    "/broken": { status: 500, body: error("Internal Server Error") },
+    "/private": { status: 403, body: error("Forbidden") },
+    "/old-home": { status: 301, headers: { location: "/" } },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-error-"));
+  const dir = path.join(parent, "kit");
+  const elsewhere = "Give the address of a page that loads without an error, like the site's home page.";
+  try {
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    const cli = await run([`${origin}/missing`, "--out", dir, "--json"]);
+    const missing = `${origin}/missing answered with an error, HTTP 404 Not Found, so no kit was made. ${elsewhere}`;
+    assert.equal(cli.status, 1);
+    assert.deepEqual(JSON.parse(cli.stdout), { ok: false, error: missing });
+    assert.equal(cli.stderr, `easyfontkit: ${missing}\n`);
+    assert.deepEqual(snapshot(dir), before);
+    const refused = {
+      // A #fragment is not sent to the server, so it is not a redirect.
+      "/missing#top": missing,
+      "/moved": `${origin}/moved led to ${origin}/gone/page.html, which answered with an error, HTTP 404 Not Found, so no kit was made. ${elsewhere}`,
+      // No page of its own: Chrome shows its error page, and the status says more.
+      "/empty": `${origin}/empty answered with an error, HTTP 404 Not Found, so no kit was made. ${elsewhere}`,
+      "/broken": `${origin}/broken answered with an error, HTTP 500 Internal Server Error, so no kit was made. The site may be down or busy; try again later.`,
+      "/private": `${origin}/private answered with an error, HTTP 403 Forbidden, so no kit was made. The page may need a login, or the site may turn away headless browsers; check the page in a normal browser.`,
+    };
+    for (const [route, message] of Object.entries(refused)) {
+      await assert.rejects(makeFontKit(`${origin}${route}`, { dir, timeLimit: 60_000 }), { message });
+      assert.deepEqual(snapshot(dir), before, route);
+    }
+    // A redirect that ends on a page that loads makes a kit, as before.
+    const { kit } = await makeFontKit(`${origin}/old-home`, { dir, timeLimit: 60_000 });
+    assert.equal(kit.url, `${origin}/`);
   } finally {
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });

@@ -123,6 +123,7 @@ The index of free fonts in `skills/easyfontkit/scripts/data/fonts.json` comes fr
 - Text drawn into a canvas, an image or an SVG path has no font to find.
 - A role is read from the page's own headings, paragraphs, buttons and code. A site that builds its headings from plain divs gets them from elements named "title" or "heading" instead, and may get them wrong.
 - A site that answers with a bot check gets no kit: easyfontkit stops and says so.
+- A page that answers with an error status, like a 404 or a 500, gets no kit either, also after a redirect: an error page is not the page you asked for, and its fonts are often only the browser's defaults. easyfontkit names the status and the address it ended on. A site that serves some of its real pages with an error status, like an app whose deep links answer 404, gets no kit for those; read its home page instead.
 - The free match is chosen on proportions, not on how the letters are drawn. A visual comparison is on the list for a later version.
 
 ## License

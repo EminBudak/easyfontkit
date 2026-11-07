@@ -205,6 +205,9 @@ test("a run that fails leaves the earlier kit exactly as it was, and a first run
     const deep = path.join(parent, "new", "deep", "kit");
     assert.equal(spawnSync(process.execPath, [CLI, "acme.example", "--out", deep], { env }).status, 1);
     assert.deepEqual(fs.readdirSync(parent).sort(), ["kit"]);
+    // A save that fails removes the folders made for it, too.
+    assert.throws(() => saveKit(deep, () => assert.fail("no kit")), /no kit/);
+    assert.deepEqual(fs.readdirSync(parent).sort(), ["kit"]);
   } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }
@@ -463,14 +466,15 @@ test("a page's fonts: each role's face, every file saved as served, each license
     assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "fonts.css", "fonts.json"]);
 
     // Files of the user's own in the files folder stay theirs, also one
-    // under the name a new font file would take.
+    // under the name a new font file would take, written in other case, as
+    // a macOS or Windows disk holds the two as one.
     fs.mkdirSync(path.join(dir, "files"));
-    fs.writeFileSync(path.join(dir, "files", "inter-400.woff2"), "mine");
+    fs.writeFileSync(path.join(dir, "files", "Inter-400.woff2"), "mine");
     fs.writeFileSync(path.join(dir, "files", "notes.txt"), "mine");
     const again = await makeFontKit(origin, { dir, timeLimit: 90_000 });
     assert.equal(again.kit.families.find((f) => f.name === "Inter").files[0].file, "files/inter-400-2.woff2");
     assert.ok(fs.readFileSync(path.join(dir, "files", "inter-400-2.woff2")).equals(fixture("inter-latin-400.woff2")));
-    assert.equal(fs.readFileSync(path.join(dir, "files", "inter-400.woff2"), "utf8"), "mine");
+    assert.equal(fs.readFileSync(path.join(dir, "files", "Inter-400.woff2"), "utf8"), "mine");
     assert.equal(fs.readFileSync(path.join(dir, "files", "notes.txt"), "utf8"), "mine");
     assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
   } finally {
@@ -554,7 +558,8 @@ test("a page that answers with an error is refused, naming the status and the ad
   // Error pages as servers send them, drawn in the browser's default font.
   const error = (title) => `<!doctype html><html><head><title>${title}</title></head><body><h1>${title}</h1><p>The page you asked for is not here.</p></body></html>`;
   const { server, origin } = await serve({
-    "/": { body: `<!doctype html><html><head><title>Home</title></head><body><h1>Home</h1><p>A page that loads.</p></body></html>` },
+    // A frame that answers with an error is not the page.
+    "/": { body: `<!doctype html><html><head><title>Home</title></head><body><h1>Home</h1><p>A page that loads.</p><iframe src="/missing"></iframe></body></html>` },
     "/missing": { status: 404, body: error("Not Found") },
     "/moved": { status: 302, headers: { location: "/gone/page.html" } },
     "/empty": { status: 404 },

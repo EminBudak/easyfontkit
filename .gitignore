@@ -1,3 +1,4 @@
 node_modules/
 easyfontkit-*/
 .DS_Store
+.t/

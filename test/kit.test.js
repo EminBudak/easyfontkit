@@ -29,14 +29,20 @@ function serve(routes) {
   });
 }
 
+// The CLI's answer, and how long the process went on after it had printed
+// its result.
 function run(args) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => (stdout += chunk));
+    let printedAt = 0;
+    child.stdout.on("data", (chunk) => {
+      printedAt = Date.now();
+      stdout += chunk;
+    });
     child.stderr.on("data", (chunk) => (stderr += chunk));
-    child.on("close", (status) => resolve({ status, stdout, stderr }));
+    child.on("close", (status) => resolve({ status, stdout, stderr, lingered: Date.now() - printedAt }));
   });
 }
 
@@ -201,6 +207,7 @@ test("a page's fonts: each role's face, every file saved as served, each license
     // --no-files nothing is saved.
     const cli = await run([origin, "--out", dir, "--json", "--no-files"]);
     assert.equal(cli.status, 0, cli.stderr);
+    assert.ok(cli.lingered < 10_000, `the process ended ${cli.lingered} ms after printing the kit`);
     const json = JSON.parse(cli.stdout);
     assert.equal(json.roles.body.family, "Inter");
     assert.equal(json.families.find((f) => f.name === "Inter").files[0].file, "");

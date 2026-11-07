@@ -205,12 +205,17 @@ async function openPage(base, { width, height }) {
 
 // Opens the address and waits for its load event, at most 30 s: a page that
 // never finishes loading (a stuck tracking script) is read as it stands.
+// The wait's timer is cleared once the page has loaded, or it would keep
+// the process alive for the rest of the 30 s after the kit is done.
 // Returns the address the tab ended on, after any redirects.
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   const { errorText } = await cdp.send("Page.navigate", { url });
   if (errorText) throw new Error(`Could not open ${url}: ${errorText}`);
-  await Promise.race([loaded, sleep(Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))]);
+  let timer;
+  const late = new Promise((resolve) => (timer = setTimeout(resolve, Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))));
+  await Promise.race([loaded, late]);
+  clearTimeout(timer);
   try {
     const { currentIndex, entries } = await cdp.send("Page.getNavigationHistory");
     return (entries[currentIndex] || {}).url || url;

@@ -293,7 +293,7 @@ async function navigate(cdp, url) {
     if (!err.timedOut) throw err;
     throw new Error(`Could not open ${url}: no answer in ${Math.round(answer / 1000)} s. The site may be down or slow; try again later, or give it more time with --timeout.`);
   }
-  if (errorText) throw new Error(`Could not open ${url}: ${errorText}`);
+  if (errorText) throw Object.assign(new Error(`Could not open ${url}: ${errorText}`), { errorText });
   let timer;
   const late = new Promise((resolve) => (timer = setTimeout(resolve, Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))));
   await Promise.race([loaded, late]);

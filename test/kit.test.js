@@ -1460,6 +1460,9 @@ test("a page that moves itself on is read where it ends, and one that ends on an
   const { server, origin } = await serve({
     "/meta": { body: page(`<meta http-equiv="refresh" content="0;url=${dead}">`, "") },
     "/script": { body: page("", `<script>setTimeout(() => (location.href = ${JSON.stringify(dead)}), 50)</script>`) },
+    // A redirect, and one that leads to it.
+    "/302": { status: 302, headers: { location: dead } },
+    "/301": { status: 301, headers: { location: "/302" } },
     "/on": { body: page("", `<script>setTimeout(() => (location.href = "/next"), 50)</script>`) },
     // On to about:blank at the load event, and a moment after a font has come.
     "/blank": { body: page("", `<script>addEventListener("load", () => (location.href = "about:blank"))</script>`) },
@@ -1478,12 +1481,15 @@ test("a page that moves itself on is read where it ends, and one that ends on an
   try {
     earlierKitIn(dir);
     const before = snapshot(dir);
-    for (const route of ["/meta", "/script"]) {
+    for (const route of ["/meta", "/script", "/302", "/301"]) {
       await assert.rejects(makeFontKit(`${origin}${route}`, { dir, timeLimit: 60_000 }), {
         message: `${origin}${route} led to ${dead}, which could not be opened (net::ERR_CONNECTION_REFUSED), so no kit was made. Check the page in a normal browser.`,
       });
       assert.deepEqual(snapshot(dir), before, route);
     }
+    // The address asked, when it is the one that cannot be opened.
+    await assert.rejects(makeFontKit(dead, { dir, timeLimit: 60_000 }), { message: `Could not open ${dead}: net::ERR_CONNECTION_REFUSED` });
+    assert.deepEqual(snapshot(dir), before, dead);
     const { kit } = await makeFontKit(`${origin}/on`, { dir: path.join(parent, "on"), timeLimit: 60_000 });
     assert.equal(kit.url, `${origin}/next`);
     assert.ok(kit.roles.code, "the code of the page it moved to was read");

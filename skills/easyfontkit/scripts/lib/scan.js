@@ -58,9 +58,14 @@ function record(cdp) {
   // The tab's own page as the server answered it: the last response its
   // main frame got, after any redirects, so a script that moves the page on
   // counts too. The frames inside a page get documents of their own.
-  const page = { frame: "", status: 0, url: "", failed: null };
+  const page = { frame: "", status: 0, url: "", requested: "", failed: null };
   cdp.on("Network.responseReceived", ({ frameId, type, response }) => {
     if (type === "Document" && response && page.frame && frameId === page.frame) Object.assign(page, { status: response.status, url: response.url });
+  });
+  // The address the tab's own page was last asked from, each redirect's
+  // included, so a redirect to an address that cannot be opened is named.
+  cdp.on("Network.requestWillBeSent", ({ frameId, type, request }) => {
+    if (type === "Document" && request && page.frame && frameId === page.frame) page.requested = request.url;
   });
   // A page that moves itself on, by a script or a meta refresh, to an
   // address that cannot be opened at all, like a host that does not resolve
@@ -209,6 +214,9 @@ function declarations(body) {
 
 const unquote = (text) => String(text || "").trim().replace(/^(['"])(.*)\1$/s, "$2").trim();
 
+// A request never carries the address's #fragment.
+const bare = (address) => String(address).replace(/#.*$/s, "");
+
 function resolve(url, base) {
   try {
     return new URL(url, base || undefined).href;
@@ -323,10 +331,10 @@ async function readFiles(fonts, rules, faces) {
 // Opens the page and reads it: the faces of each role, every font file it
 // loaded, its @font-face rules, the web fonts Chrome reports as loaded, the
 // families document.fonts holds, the status and address the server
-// answered the page with (answer), the address the page moved on to that
-// could not be opened (failed), and about:blank or the like when the page
-// moved itself on to that (left). pageUrl is the address of the page the
-// roles were read from, or the last web address the tab had.
+// answered the page with (answer), the address a redirect or the page led
+// on to that could not be opened (failed), and about:blank or the like when
+// the page moved itself on to that (left). pageUrl is the address of the
+// page the roles were read from, or the last web address the tab had.
 async function scanPage(cdp, url, log = () => {}) {
   const recorded = record(cdp);
   await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: 50_000_000 });
@@ -339,10 +347,15 @@ async function scanPage(cdp, url, log = () => {}) {
   try {
     pageUrl = await navigate(cdp, url);
   } catch (err) {
+    const nothing = (found) => ({ pageUrl: url, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [], ...found });
     // An error status with no page of its own makes Chrome show its own
     // error page and give a net:: code, which says less than the status.
-    if (recorded.page.status < 400) throw err;
-    return { pageUrl: url, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [] };
+    if (recorded.page.status >= 400) return nothing();
+    // A redirect that led to an address that could not be opened: that
+    // address failed, not the one asked, which answered.
+    const { requested } = recorded.page;
+    if (err.errorText && requested && bare(requested) !== bare(url)) return nothing({ failed: { url: requested, error: err.errorText } });
+    throw err;
   }
   await fontsReady(cdp);
   log("Reading the page");

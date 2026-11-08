@@ -637,9 +637,75 @@ test("a planted list of moves, or a files that is a link, cannot send a run outs
     fs.writeFileSync(path.join(linked, "FONTS.md"), "old");
     fs.writeFileSync(path.join(linked, "fonts.css"), "old");
     fs.symlinkSync(outside, path.join(linked, "files"));
-    assert.throws(() => earlierKit(linked), /files is not a folder/);
-    await assert.rejects(saveKit(linked, () => assert.fail("no kit")), /files is not a folder/);
+    const message = `No kit can be saved in ${linked}: ${path.join(linked, "files")} is a link, not a folder. Move it away, or pick another folder with --out.`;
+    assert.throws(() => earlierKit(linked), { message });
+    await assert.rejects(saveKit(linked, () => assert.fail("no kit")), { message });
     assert.deepEqual(fs.readdirSync(outside).sort(), ["keep.txt"]);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a leftover list of moves is never followed through a link, in its part folder or at the kit's files", { skip: process.platform === "win32" && "no symlinks of this kind on Windows" }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-links-"));
+  const own = ".easyfontkit-part-999999999-deadbeef";
+  const id = (file) => {
+    const stat = fs.lstatSync(file);
+    return { size: stat.size, mtimeMs: stat.mtimeMs };
+  };
+  const put = (file, text) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  };
+  // Each list passes as one a run writes, and would move a file in or out
+  // of the folder outside if its link were followed.
+  const setups = {
+    "the part": (dir, outside) => {
+      put(path.join(outside, "earlier", "fonts.json"), "outside");
+      fs.symlinkSync(outside, path.join(dir, own));
+      return [["fonts.json", `${own}/earlier/fonts.json`, id(path.join(outside, "earlier", "fonts.json"))]];
+    },
+    "the part's earlier": (dir, outside) => {
+      put(path.join(outside, "fonts.json"), "outside");
+      fs.mkdirSync(path.join(dir, own), { recursive: true });
+      fs.symlinkSync(outside, path.join(dir, own, "earlier"));
+      return [["fonts.json", `${own}/earlier/fonts.json`, id(path.join(outside, "fonts.json"))]];
+    },
+    "the part's earlier/files": (dir, outside) => {
+      put(path.join(outside, "mine.woff2"), "outside");
+      fs.mkdirSync(path.join(dir, own, "earlier"), { recursive: true });
+      fs.symlinkSync(outside, path.join(dir, own, "earlier", "files"));
+      return [["files/mine.woff2", `${own}/earlier/files/mine.woff2`, id(path.join(outside, "mine.woff2"))]];
+    },
+    "the part's files": (dir, outside) => {
+      put(path.join(dir, "files", "planted.sh"), "planted");
+      fs.mkdirSync(path.join(dir, own), { recursive: true });
+      fs.symlinkSync(outside, path.join(dir, own, "files"));
+      return [[`${own}/files/planted.sh`, "files/planted.sh", id(path.join(dir, "files", "planted.sh"))]];
+    },
+    "the kit's files": (dir, outside) => {
+      put(path.join(dir, own, "earlier", "files", "planted.sh"), "planted");
+      fs.symlinkSync(outside, path.join(dir, "files"));
+      return [["files/planted.sh", `${own}/earlier/files/planted.sh`, id(path.join(dir, own, "earlier", "files", "planted.sh"))]];
+    },
+  };
+  try {
+    for (const [n, [name, plant]] of Object.entries(setups).entries()) {
+      const dir = path.join(parent, `kit${n}`);
+      const outside = path.join(parent, `outside${n}`);
+      fs.mkdirSync(dir);
+      put(path.join(outside, "keep.txt"), "mine");
+      const moves = plant(dir, outside);
+      if (!fs.existsSync(path.join(dir, "files"))) fs.mkdirSync(path.join(dir, "files"));
+      fs.writeFileSync(path.join(dir, own, "moves.json"), JSON.stringify(moves));
+      const before = snapshot(outside);
+      if (name === "the kit's files") {
+        // Refused before the page is read, also next to a list of moves.
+        assert.throws(() => earlierKit(dir), /files is a link, not a folder/);
+      }
+      await assert.rejects(saveKit(dir, () => assert.fail("no kit")), /could not be put back together \(its list of moves cannot be followed\)/, name);
+      assert.deepEqual(snapshot(outside), before, name);
+    }
   } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }

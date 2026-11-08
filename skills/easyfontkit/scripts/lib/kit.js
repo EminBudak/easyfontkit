@@ -150,6 +150,18 @@ function earlierKit(dir) {
     throw err;
   }
   if (!names.length) return null;
+  // One lstat per name, so a run saving here cannot be refused for a name
+  // that moved between two separate reads. files must be a real folder, not
+  // a link: a link would send the kit's reads and moves outside the folder.
+  // Checked first, so a folder a killed run left half replaced gets the
+  // same check.
+  for (const name of ["FONTS.md", "fonts.css", "files"]) {
+    const stat = entry(path.join(dir, name));
+    if (!stat) continue;
+    const ok = name === "files" ? stat.isDirectory() : stat.isFile() || stat.isSymbolicLink();
+    const what = name !== "files" ? "not a file" : stat.isSymbolicLink() ? "a link, not a folder" : "not a folder";
+    if (!ok) throw new Error(`No kit can be saved in ${dir}: ${path.join(dir, name)} is ${what}. Move it away, or pick another folder with --out.`);
+  }
   let old = readKit(path.join(dir, "fonts.json"));
   if (!old) {
     if (swaps(dir).length) return { files: [], cut: true };
@@ -158,15 +170,6 @@ function earlierKit(dir) {
     // fonts.json now; read it once more before refusing the folder.
     old = readKit(path.join(dir, "fonts.json"));
     if (!old) throw new Error(`${dir} is not empty and holds no earlier font kit. Pick another folder with --out.`);
-  }
-  // One lstat per name, so a run saving here cannot be refused for a name
-  // that moved between two separate reads. files must be a real folder, not
-  // a link: a link would send the kit's reads and moves outside the folder.
-  for (const name of ["FONTS.md", "fonts.css", "files"]) {
-    const stat = entry(path.join(dir, name));
-    if (!stat) continue;
-    const ok = name === "files" ? stat.isDirectory() : stat.isFile() || stat.isSymbolicLink();
-    if (!ok) throw new Error(`No kit can be saved in ${dir}: ${path.join(dir, name)} is not a ${name === "files" ? "folder" : "file"}. Move it away, or pick another folder with --out.`);
   }
   return { files: [...new Set(kitFiles(old))].filter((name) => isFile(path.join(dir, "files", name))) };
 }
@@ -396,7 +399,9 @@ function undo(dir, moves, done = moves.length) {
 // folder and this part folder and nowhere else. A planted or edited list,
 // one that points outside the folder or at another name, is treated as
 // unreadable, so putBack keeps the part and refuses rather than moving or
-// removing anything the list names. The part itself is never a link.
+// removing anything the list names. Nor is any folder the moves pass
+// through a link: the part, its earlier, earlier/files and files, and the
+// kit's own files. A link there would carry the moves outside the folder.
 const partMove = (own) => {
   const safe = (name) => name && !name.includes("/") && !name.includes("\\") && name !== "." && name !== "..";
   return ([from, to]) => {
@@ -420,10 +425,10 @@ const partMove = (own) => {
   };
 };
 function readMoves(part) {
-  try {
-    if (fs.lstatSync(part).isSymbolicLink()) return null;
-  } catch {
-    return null;
+  const through = [part, path.join(part, "earlier"), path.join(part, "earlier", "files"), path.join(part, "files"), path.join(path.dirname(part), "files")];
+  for (const folder of through) {
+    const stat = entry(folder);
+    if (folder === part ? !stat || !stat.isDirectory() : stat && !stat.isDirectory()) return null;
   }
   try {
     const moves = JSON.parse(fs.readFileSync(path.join(part, MOVES), "utf8"));
@@ -497,7 +502,7 @@ function putBack(dir) {
   // the killed run.
   for (const { part } of swaps(dir)) {
     const moves = readMoves(part);
-    const left = moves ? undo(dir, moves) : "its list of moves cannot be read";
+    const left = moves ? undo(dir, moves) : "its list of moves cannot be followed";
     if (left) {
       throw new Error(`A run killed while it put its kit in ${dir} left the earlier kit there half moved, and it could not be put back together (${left}), so no kit was made. The earlier kit's files that could not go back are in ${path.join(part, "earlier")}; move them back by hand, or pick another folder with --out.`);
     }

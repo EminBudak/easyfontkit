@@ -105,7 +105,7 @@ npx easyfontkit <url> [options]
 
 Installed globally (`npm install -g easyfontkit`), the command is `easyfontkit`. npx keeps the copy an earlier run fetched, so `npx easyfontkit@latest` is how you get a newer version.
 
-It needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set `CHROME_PATH` to pick the browser. There are no npm dependencies and nothing is downloaded besides the page itself: easyfontkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile, and reads the font files with Node's own zlib.
+It needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set `CHROME_PATH` to pick the browser. There are no npm dependencies and no browser to download: easyfontkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile, and reads the font files with Node's own zlib. The browser's component updater is pointed at a closed port, so the browser does not download its own components during a run.
 
 ## How it works
 

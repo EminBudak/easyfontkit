@@ -2,7 +2,8 @@
 
 // The browser: a Chrome, Chromium, Edge or Brave already on this machine,
 // started headless with a throwaway profile and driven over the DevTools
-// protocol with the WebSocket built into Node 22. Nothing is downloaded.
+// protocol with the WebSocket built into Node 22. No browser is
+// downloaded, and the one started downloads none of its components.
 
 const fs = require("fs");
 const os = require("os");
@@ -89,17 +90,21 @@ function removeProfile({ profile, singleton }, maxRetries, retryDelay) {
 }
 
 // Chrome on Linux takes its temp folder from TMPDIR. There it is given the
-// profile, so what Chrome leaves in its temp folder when it is closed soon
-// after it starts, like the empty folder of a download it had begun, goes
-// with the profile. Chrome makes its socket in that folder too, and a
-// socket's path may not pass 107 bytes: the socket's own folder takes up to
-// 32 more, and /SingletonSocket 16. With a longer profile path, Chrome keeps
-// the temp folder it would have had.
+// profile, so anything else Chrome leaves in its temp folder when it is
+// closed soon after it starts goes with the profile too. Chrome makes its
+// socket in that folder as well, and a socket's path may not pass 107
+// bytes: the socket's own folder takes up to 32 more, and /SingletonSocket
+// 16. With a longer profile path, Chrome keeps the temp folder it would
+// have had.
 const ownTemp = (profile) => process.platform !== "darwin" && process.platform !== "win32" && Buffer.byteLength(profile) + 1 + 32 + 16 <= 107;
 
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
+// Chrome's component updater is sent to a closed port, so it downloads
+// nothing during a run: a download it had begun when a run ends early, as
+// on an error page, leaves an empty folder in the temp folder on every
+// system, which removing the profile does not reach.
 async function launch({ width, height }) {
   const binary = findChrome();
   if (!binary) {
@@ -119,6 +124,7 @@ async function launch({ width, height }) {
       "--no-default-browser-check",
       "--disable-extensions",
       "--disable-sync",
+      "--component-updater=url-source=http://127.0.0.1:9/",
       "--use-mock-keychain",
       "--password-store=basic",
       // Chrome refuses to start as root without it (a container, a CI box).

@@ -54,6 +54,23 @@ printf '%s\\n%s\\n' "$TMPDIR" "$profile" > ${JSON.stringify(seen)}
   }
 });
 
+test("Chrome's component updater is sent to a closed port, so it downloads nothing during a run", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-args-"));
+  const saved = process.env.CHROME_PATH;
+  // A browser that writes down what it was started with, then quits.
+  const seen = path.join(parent, "seen");
+  process.env.CHROME_PATH = path.join(parent, "chrome");
+  fs.writeFileSync(process.env.CHROME_PATH, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(seen)}\n`, { mode: 0o755 });
+  try {
+    await assert.rejects(launch({ width: 800, height: 600 }), /did not start/);
+    assert.ok(fs.readFileSync(seen, "utf8").split("\n").includes("--component-updater=url-source=http://127.0.0.1:9/"));
+  } finally {
+    if (saved === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = saved;
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a page whose server does not answer gets the run's time less a minute, and a message with its address", async () => {
   for (const [limit, seconds] of [
     [120_000, 60],

@@ -75,15 +75,15 @@ function summary({ dir, kit }) {
   return lines.join("\n");
 }
 
-// Ctrl-C, a kill or a closed terminal while the page is read: the browser
-// is killed and the process ends by the same signal, before the run has
-// written anything, so the kit's folder is left as it was. Once the kit is
-// in place, the run has ended well, and a stop that comes then ends the
-// process with 0, as it would have ended. The listeners stay until the
-// process ends, so a second copy of the signal, as npm and makersmcp's
-// supervisor pass one on, changes nothing. An error that ends the process
-// kills the browser too.
-const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+// Ctrl-C, Ctrl-\ (Ctrl-Break on Windows), a kill or a closed terminal while
+// the page is read: the browser is killed and the process ends by the same
+// signal, before the run has written anything, so the kit's folder is left
+// as it was. Once the kit is in place, the run has ended well, and a stop
+// that comes then ends the process with 0, as it would have ended. The
+// listeners stay until the process ends, so a second copy of the signal, as
+// npm and makersmcp's supervisor pass one on, changes nothing. An error that
+// ends the process kills the browser too.
+const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "win32" ? ["SIGBREAK"] : ["SIGQUIT"])];
 let stopping = false;
 function stopOnSignals() {
   for (const signal of SIGNALS) {

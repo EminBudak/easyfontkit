@@ -1064,21 +1064,22 @@ test("the part folder is made with mkdir, so the access a default ACL gives othe
   }
 });
 
-test("a stop signal kills the browser, leaves the folder as it was, says so and ends the run by that signal, also when a second one comes", { skip: noSignals }, async () => {
+test("a stop by SIGINT, SIGQUIT, SIGTERM or SIGHUP kills the browser, leaves the folder as it was, says so and ends the run by that signal, also when a second one comes", { skip: noSignals }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-signal-"));
   const groups = [];
   try {
     // A browser that starts and never answers, so a run waits for it, with
-    // a helper process that makes its profile again once it is removed, as
-    // Chrome's helpers can on their way out, and a socket folder in the temp
-    // folder that the profile links to, as Chrome's own.
+    // a socket folder in the temp folder that the profile links to, as
+    // Chrome's own, and with REMAKE set, a helper process that makes its
+    // profile again once it is removed, as Chrome's helpers can on their way
+    // out.
     const chrome = path.join(parent, "chrome");
     fs.writeFileSync(
       chrome,
       `#!/bin/sh
 for arg in "$@"; do case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}";; esac; done
 socket=$(mktemp -d "$TMPDIR/com.example.Chrome.XXXXXX") && : > "$socket/SingletonSocket" && ln -s "$socket/SingletonSocket" "$profile/SingletonSocket"
-(i=0; while [ -d "$profile" ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i + 1)); done; mkdir -p "$profile/Default") &
+[ -n "$REMAKE" ] && (i=0; while [ -d "$profile" ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i + 1)); done; mkdir -p "$profile/Default") &
 echo $$ > "$(dirname "$0")/chrome.pid"
 exec sleep 60
 `,
@@ -1102,15 +1103,18 @@ exec sleep 60
          return rmSync(target, ...rest);
        };`,
     );
-    const stop = async (dir, preload) => {
+    const stop = async (dir, preload, signal = "SIGTERM", remake = true) => {
       const tmp = fs.mkdtempSync(path.join(parent, "tmp-"));
       fs.rmSync(path.join(parent, "chrome.pid"), { force: true });
       // In a process group of its own, with its browser, so whatever is
-      // left of it can be stopped at the end.
+      // left of it can be stopped at the end. SIGQUIT ends a process with a
+      // core dump where the system writes them, into the folder it runs in:
+      // the test's own.
       const child = spawn(process.execPath, [...(preload ? ["--require", preload] : []), CLI, "acme.example", "--out", dir], {
+        cwd: parent,
         detached: true,
         stdio: ["ignore", "ignore", "pipe"],
-        env: { ...process.env, CHROME_PATH: chrome, TMPDIR: tmp },
+        env: { ...process.env, CHROME_PATH: chrome, TMPDIR: tmp, REMAKE: remake ? "1" : "" },
       });
       groups.push(child.pid);
       let stderr = "";
@@ -1125,17 +1129,20 @@ exec sleep 60
       while (!exited && !fs.existsSync(path.join(parent, "chrome.pid"))) await sleep(20);
       assert.equal(exited, false, stderr);
       const pid = Number(fs.readFileSync(path.join(parent, "chrome.pid"), "utf8"));
-      child.kill("SIGTERM");
-      const { signal } = await ended;
+      child.kill(signal);
+      const ended2 = await ended;
       for (let i = 0; i < 100 && !gone(pid); i++) await sleep(20);
-      return { signal, stderr, browserLeft: !gone(pid), profiles: fs.readdirSync(tmp) };
+      return { signal: ended2.signal, stderr, browserLeft: !gone(pid), profiles: fs.readdirSync(tmp) };
     };
     const dir = path.join(parent, "kit");
     earlierKitIn(dir);
     const before = snapshot(dir);
-    for (const preload of [null, twice]) {
-      const stopped = await stop(dir, preload);
-      assert.deepEqual(stopped, { signal: "SIGTERM", stderr: `easyfontkit: stopped by SIGTERM, so no kit was made. The earlier kit in ${dir} is as it was.\n`, browserLeft: false, profiles: [] });
+    // Ctrl-C, Ctrl-\, a kill and a closed terminal, sent to the kit alone.
+    // How soon a helper makes the profile again is a matter of time, not of
+    // the signal, so that is tried with SIGTERM only.
+    for (const [signal, preload] of [["SIGTERM", null], ["SIGTERM", twice], ["SIGINT", null], ["SIGQUIT", null], ["SIGHUP", null]]) {
+      const stopped = await stop(dir, preload, signal, signal === "SIGTERM");
+      assert.deepEqual(stopped, { signal, stderr: `easyfontkit: stopped by ${signal}, so no kit was made. The earlier kit in ${dir} is as it was.\n`, browserLeft: false, profiles: [] });
       assert.deepEqual(snapshot(dir), before);
     }
     const first = await stop(path.join(parent, "new", "kit"));

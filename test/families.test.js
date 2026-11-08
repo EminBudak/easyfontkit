@@ -83,4 +83,10 @@ test("a font on the visitor's computer keeps the name the CSS asks for it by", (
   const times = families.find((f) => f.name === "Times New Roman");
   assert.equal(times.category, "serif");
   assert.deepEqual(times.free.map((f) => f.family), ["Tinos"]);
+  // Arial Black is its own name, not Arial: it does not borrow Arial's
+  // metric-compatible match, which keeps Arial's line breaks and not its
+  // own. With no entry of its own it gets the plain default.
+  const black = families.find((f) => f.name === "Arial Black");
+  assert.deepEqual(black.free.map((f) => f.family), ["Inter"]);
+  assert.match(black.free[0].basis, /could not be measured/);
 });

@@ -64,6 +64,14 @@ function curated(name) {
   return CURATED.get(key(parts)) || CURATED.get(key(strip(parts))) || null;
 }
 
+// The same, but by the full name only: "Arial Black" does not drop "Black"
+// and take Arial's entry, whose match is metric-compatible with Arial, not
+// with Arial Black.
+function curatedExact(name) {
+  const parts = words(name);
+  return parts.length ? CURATED.get(key(parts)) || null : null;
+}
+
 // A family's name as people write it: Fontsource's own spelling when it
 // lists the family, else without the words a file adds ("Söhne VF" is
 // Söhne, "Lyon Text Web" is Lyon Text).
@@ -124,7 +132,9 @@ const FEW_WEIGHTS = 0.005;
 function freeMatches({ names = [], category = "sans", metrics = null, count = 3, stack = false, slab = false } = {}) {
   const kind = DEFAULTS[category] ? category : "sans";
   for (const name of names) {
-    const entry = curated(name);
+    // A name read from a CSS stack is taken as written: a weight word like
+    // "Black" is part of the name there, not a cut of a lighter family.
+    const entry = stack ? curatedExact(name) : curated(name);
     if (entry) return entry.free.map((id) => BY_ID.get(id)).filter(Boolean).map((font) => described(font, entry.basis));
     const listed = stack ? lookup(name) : null;
     if (listed) return [described(listed, "the site's font stack names it, and it is free")];

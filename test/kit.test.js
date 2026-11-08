@@ -281,6 +281,10 @@ test("an --out that is a broken link or a link loop is refused before the page i
     const run1 = cli(broken);
     assert.equal(run1.status, 1);
     assert.equal(run1.stderr, `easyfontkit: ${broken} is a link to a folder that is not there. Pick another folder with --out.\n`);
+    // And on the way to --out.
+    const below = cli(path.join(broken, "kit"));
+    assert.equal(below.status, 1);
+    assert.equal(below.stderr, `easyfontkit: ${broken} is a link to a folder that is not there, so ${path.join(broken, "kit")} cannot be made there. Pick another folder with --out.\n`);
     // A loop of links on the way to --out.
     fs.symlinkSync(path.join(parent, "b"), path.join(parent, "a"));
     fs.symlinkSync(path.join(parent, "a"), path.join(parent, "b"));

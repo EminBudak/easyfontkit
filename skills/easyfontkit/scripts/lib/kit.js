@@ -181,22 +181,6 @@ function checkFolder(dir) {
   const target = path.resolve(dir);
   const shownAt = (at) => (at === target ? dir : path.isAbsolute(dir) ? at : path.relative(process.cwd(), at) || ".");
   const thenAt = (at) => (at === target ? "" : `, so ${dir} cannot be made there`);
-  // A link whose target is missing passes the climb below (statSync follows
-  // it, finds nothing, and the parent is checked instead), so mkdir fails
-  // only once the page has been read. Refuse it now.
-  let link;
-  try {
-    link = fs.lstatSync(target).isSymbolicLink();
-  } catch {
-    link = false;
-  }
-  if (link) {
-    try {
-      fs.statSync(target);
-    } catch (err) {
-      if (err.code === "ENOENT") throw new Error(`${dir} is a link to a folder that is not there. Pick another folder with --out.`);
-    }
-  }
   let at = target;
   let stat;
   for (;;) {
@@ -206,6 +190,12 @@ function checkFolder(dir) {
     } catch (err) {
       // A path this run cannot use at all: a link loop, a name too long.
       if (err.code === "ELOOP" || err.code === "ENAMETOOLONG") throw new Error(`${dir} is not a folder this run can use. Pick another folder with --out.`);
+      // A link whose target is missing, at --out or on the way to it: statSync
+      // finds nothing there, as for a folder not made yet, but mkdir cannot
+      // make it, and would fail only once the page has been read.
+      if (err.code === "ENOENT" && entry(at) && entry(at).isSymbolicLink()) {
+        throw new Error(`${shownAt(at)} is a link to a folder that is not there${thenAt(at)}. Pick another folder with --out.`);
+      }
       // ENOTDIR: a file on the way. EACCES/EPERM: a folder on the way this
       // user may not enter. Both are found one level up, where the message
       // is plain, instead of as a raw system error later.

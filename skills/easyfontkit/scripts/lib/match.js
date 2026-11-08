@@ -58,26 +58,36 @@ function lookup(name) {
   return BY_KEY.get(key(parts)) || BY_KEY.get(key(strip(parts))) || null;
 }
 
-// Weights that are a design of their own under a family's name: Arial Black
-// is not Arial drawn heavier, and keeps neither its widths nor its line
-// breaks.
-const HEAVY = new Set(["black", "heavy", "extrablack", "ultrablack"]);
-const METRIC = /^metric-compatible/;
-
 // The hand-picked entry for a name: as written, else without the words a
 // file adds, dropped one at a time from the end ("Times New Roman Bold" is
-// Times New Roman, "Gotham Book" is Gotham). A heavy cut does not take an
-// entry whose match is metric-compatible with the lighter family: that
-// entry comes back as refused instead.
+// Times New Roman, "Gotham Book" is Gotham, "Arial Black" is Arial).
 function curated(name) {
   const parts = words(name);
   for (let n = parts.length; n > 0; n--) {
     const entry = CURATED.get(key(parts.slice(0, n)));
-    if (entry) return parts.slice(n).some((word) => HEAVY.has(word.toLowerCase())) && METRIC.test(entry.basis) ? { refused: entry } : { entry };
+    if (entry) return entry;
     const last = parts[n - 1];
     if (n === 1 || !(EXTRA.has(last.toLowerCase()) || /^\d+pt$/i.test(last))) break;
   }
-  return {};
+  return null;
+}
+
+// Cuts that are a design of their own under a family's name: Arial Black is
+// not Arial drawn heavier, nor Arial Narrow Arial drawn narrower, and
+// neither keeps Arial's widths or its line breaks. A name is such a cut when
+// a word after its first is a heavy weight or another width.
+const HEAVY = new Set(["black", "heavy", "extrablack", "ultrablack"]);
+const WIDTH = /^(semi|extra|ultra)?(narrow|condensed|compressed|extended|expanded)$/;
+const ownWidths = (name) => words(name).slice(1).some((word) => HEAVY.has(word.toLowerCase()) || WIDTH.test(word.toLowerCase()));
+
+// An entry without the free fonts that keep its family's widths, the ones
+// its metric list names, and with the reason for the others: null when it
+// has no others.
+function withoutMetric(entry) {
+  const metric = new Set(entry.metric || []);
+  if (!metric.size) return entry;
+  const free = entry.free.filter((id) => !metric.has(id));
+  return free.length ? { ...entry, free, basis: entry.basisWithoutMetric } : null;
 }
 
 // A family's name as people write it: Fontsource's own spelling when it
@@ -139,14 +149,15 @@ const FEW_WEIGHTS = 0.005;
 // slab: the font is a slab serif itself; slab serifs are matched only then.
 function freeMatches({ names = [], category = "sans", metrics = null, count = 3, stack = false, slab = false } = {}) {
   const kind = DEFAULTS[category] ? category : "sans";
-  // An entry a heavy cut refused stays refused for the names after it: in
-  // "Arial Black", Arial, the Arial that follows is its fallback, not its
-  // match.
-  const refused = new Set();
+  // A free font that keeps a family's widths holds for the family's own
+  // weights only: not for a cut drawn to other widths, nor for the names
+  // after one in a stack, which are its fallbacks. In "Arial Black", Arial
+  // or "Arial Black", Helvetica, no name gets Arimo.
+  let cut = false;
   for (const name of names) {
+    cut = cut || ownWidths(name);
     const found = curated(name);
-    if (found.refused) refused.add(found.refused);
-    const entry = found.entry && !refused.has(found.entry) ? found.entry : null;
+    const entry = found && cut ? withoutMetric(found) : found;
     if (entry) return entry.free.map((id) => BY_ID.get(id)).filter(Boolean).map((font) => described(font, entry.basis));
     const listed = stack ? lookup(name) : null;
     if (listed) return [described(listed, "the site's font stack names it, and it is free")];

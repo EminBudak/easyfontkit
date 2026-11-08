@@ -25,13 +25,21 @@ test("well-known paid fonts get their hand-picked free matches, by any of their 
   assert.match(freeMatches({ names: ["Arial"] })[0].basis, /metric-compatible/);
 });
 
-test("a heavy cut does not take the metric-compatible match of its lighter family, while other cuts keep their family's match", () => {
+test("a heavy, narrow or wide cut gets no free font that keeps its family's widths, nor do the fonts after it in a stack, while other cuts keep their family's match", () => {
   const stack = (names, category = "sans") => freeMatches({ names, category, stack: true });
   // Arial Black keeps neither Arial's widths nor its line breaks, so Arimo
-  // is not its match, also when Arial follows it as its fallback.
-  for (const names of [["Arial Black", "sans-serif"], ["Arial Black", "Arial", "sans-serif"], ["Arial Black", "Arial Bold", "Arial"]]) {
+  // is not its match, also when Arial follows it as its fallback, and so
+  // for Arial Narrow.
+  for (const names of [["Arial Black", "sans-serif"], ["Arial Black", "Arial", "sans-serif"], ["Arial Black", "Arial Bold", "Arial"], ["Arial Narrow", "Arial", "sans-serif"]]) {
     assert.deepEqual(families(stack(names)), ["Inter"], names.join(", "));
     assert.match(stack(names)[0].basis, /could not be measured/);
+  }
+  assert.deepEqual(families(stack(["Times New Roman Condensed", "Times New Roman", "serif"], "serif")), ["Source Serif 4"]);
+  // Helvetica's entry keeps Inter, a common substitute, and drops Arimo,
+  // which keeps only Helvetica's own widths.
+  for (const names of [["Helvetica Neue Black"], ["Helvetica Neue Black", "Helvetica Neue", "sans-serif"], ["Arial Black", "Helvetica", "sans-serif"], ["Helvetica Neue Condensed", "Helvetica Neue", "sans-serif"]]) {
+    assert.deepEqual(families(stack(names)), ["Inter"], names.join(", "));
+    assert.equal(stack(names)[0].basis, "a common substitute", names.join(", "));
   }
   // A file of it is measured instead.
   assert.match(freeMatches({ names: ["Arial Black"], metrics: { xHeight: 0.52, capHeight: 0.72, lowercaseWidth: 0.62 } })[0].basis, /^close in proportions/);
@@ -42,8 +50,21 @@ test("a heavy cut does not take the metric-compatible match of its lighter famil
   assert.deepEqual(families(stack(["Segoe UI Semibold", "sans-serif"])), ["Noto Sans", "Open Sans"]);
   assert.deepEqual(families(stack(["Helvetica Light", "sans-serif"])), ["Inter", "Arimo"]);
   assert.deepEqual(families(stack(["SFMono-Regular", "monospace"], "mono")), ["JetBrains Mono", "IBM Plex Mono"]);
+  assert.deepEqual(families(stack(["Courier New Bold", "monospace"], "mono")), ["Cousine"]);
   // A match that is only a common substitute holds for a heavy cut too.
   assert.deepEqual(families(stack(["Avenir Black", "sans-serif"])), ["Nunito Sans"]);
+  // A free family a stack names after a cut is still the match itself.
+  assert.deepEqual(families(stack(["Arial Narrow", "Roboto Condensed", "Arial"])), ["Roboto Condensed"]);
+});
+
+test("every hand-picked free font that keeps a family's widths is marked so, and an entry with others says why they were picked", () => {
+  const { fonts } = require("../skills/easyfontkit/scripts/data/lookalikes.json");
+  for (const entry of fonts) {
+    const metric = entry.metric || [];
+    for (const id of metric) assert.ok(entry.free.includes(id), `${entry.names[0]}: ${id}`);
+    if (/metric-compatible|keeps .*widths/.test(entry.basis)) assert.ok(metric.length, `${entry.names[0]} keeps widths`);
+    if (metric.length && entry.free.some((id) => !metric.includes(id))) assert.ok(entry.basisWithoutMetric, `${entry.names[0]} says why`);
+  }
 });
 
 test("a font stack that names a free family is matched with that family", () => {

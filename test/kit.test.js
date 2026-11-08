@@ -204,6 +204,22 @@ test("never writes into a folder that holds someone else's files, and reads an e
     fs.writeFileSync(path.join(empty, ".easyfontkit-lock"), "1");
     fs.writeFileSync(path.join(empty, ".easyfontkit-lock.stale"), "");
     assert.equal(earlierKit(empty), null);
+    // A folder that holds no kit is refused for that, also when something
+    // stands in it under the name of a kit file: moving that away would not
+    // make it a kit.
+    const site = path.join(dir, "site");
+    fs.mkdirSync(path.join(site, "FONTS.md"), { recursive: true });
+    fs.writeFileSync(path.join(site, "index.html"), "mine");
+    const none = { message: `${site} is not empty and holds no earlier font kit. Pick another folder with --out.` };
+    assert.throws(() => earlierKit(site), none);
+    fs.rmdirSync(path.join(site, "FONTS.md"));
+    fs.writeFileSync(path.join(site, "files"), "mine");
+    assert.throws(() => earlierKit(site), none);
+    if (process.platform !== "win32") {
+      fs.rmSync(path.join(site, "files"));
+      fs.symlinkSync(empty, path.join(site, "files"));
+      assert.throws(() => earlierKit(site), none);
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -250,6 +266,10 @@ test("a folder the kit cannot be saved in is refused before the browser starts",
     earlierKitIn(kit);
     fs.rmSync(path.join(kit, "FONTS.md"));
     fs.mkdirSync(path.join(kit, "FONTS.md"));
+    // The same folder where a kit file goes, in a folder that holds no kit.
+    const site = path.join(parent, "site");
+    fs.mkdirSync(path.join(site, "FONTS.md"), { recursive: true });
+    fs.writeFileSync(path.join(site, "index.html"), "mine");
     const before = snapshot(parent);
     const refused = {
       [path.join(locked, "kit")]: `This user may not write in ${locked}, so ${path.join(locked, "kit")} cannot be made there. Pick another folder with --out.`,
@@ -258,6 +278,7 @@ test("a folder the kit cannot be saved in is refused before the browser starts",
       [file]: `${file} is not a folder. Pick another folder with --out.`,
       [path.join(file, "kit")]: `${file} is not a folder, so ${path.join(file, "kit")} cannot be made there. Pick another folder with --out.`,
       [kit]: `No kit can be saved in ${kit}: ${path.join(kit, "FONTS.md")} is not a file. Move it away, or pick another folder with --out.`,
+      [site]: `${site} is not empty and holds no earlier font kit. Pick another folder with --out.`,
     };
     for (const [out, message] of Object.entries(refused)) {
       const run = cli(out);

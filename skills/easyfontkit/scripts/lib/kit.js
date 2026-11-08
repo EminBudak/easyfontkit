@@ -150,11 +150,21 @@ function earlierKit(dir) {
     throw err;
   }
   if (!names.length) return null;
-  // One lstat per name, so a run saving here cannot be refused for a name
-  // that moved between two separate reads. files must be a real folder, not
-  // a link: a link would send the kit's reads and moves outside the folder.
-  // Checked first, so a folder a killed run left half replaced gets the
-  // same check.
+  // First whether the folder holds a kit at all, so a folder that holds
+  // none is refused for that, whatever else is in it. A run saving here
+  // moves fonts.json into place before it removes its list of moves, so one
+  // that finished between the first read and the look for leftover lists
+  // has a fonts.json now; it is read once more before the folder is
+  // refused.
+  let old = readKit(path.join(dir, "fonts.json"));
+  const cut = !old && swaps(dir).length > 0;
+  if (!old && !cut) old = readKit(path.join(dir, "fonts.json"));
+  if (!old && !cut) throw new Error(`${dir} is not empty and holds no earlier font kit. Pick another folder with --out.`);
+  // Then what stands where the new kit puts its files, in a kit and in a
+  // folder a killed run left half replaced alike. One lstat per name, so a
+  // run saving here cannot be refused for a name that moved between two
+  // separate reads. files must be a real folder, not a link: a link would
+  // send the kit's reads and moves outside the folder.
   for (const name of ["FONTS.md", "fonts.css", "files"]) {
     const stat = entry(path.join(dir, name));
     if (!stat) continue;
@@ -162,15 +172,7 @@ function earlierKit(dir) {
     const what = name !== "files" ? "not a file" : stat.isSymbolicLink() ? "a link, not a folder" : "not a folder";
     if (!ok) throw new Error(`No kit can be saved in ${dir}: ${path.join(dir, name)} is ${what}. Move it away, or pick another folder with --out.`);
   }
-  let old = readKit(path.join(dir, "fonts.json"));
-  if (!old) {
-    if (swaps(dir).length) return { files: [], cut: true };
-    // A run saving here moves fonts.json into place before it removes its
-    // list of moves, so one that finished between the two reads above has a
-    // fonts.json now; read it once more before refusing the folder.
-    old = readKit(path.join(dir, "fonts.json"));
-    if (!old) throw new Error(`${dir} is not empty and holds no earlier font kit. Pick another folder with --out.`);
-  }
+  if (cut) return { files: [], cut: true };
   return { files: [...new Set(kitFiles(old))].filter((name) => isFile(path.join(dir, "files", name))) };
 }
 

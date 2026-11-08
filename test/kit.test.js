@@ -1310,6 +1310,44 @@ test("a bot check served instead of the page fails with a reason and leaves noth
   }
 });
 
+test("a page that moves itself on is read where it ends, and one that ends on an address that cannot be opened is refused, naming that address, and the earlier kit stays", { skip: noBrowser }, async () => {
+  // A port nothing listens on: one a server had, once it has closed.
+  const closed = await new Promise((resolve) => {
+    const probe = http.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+  const dead = `http://127.0.0.1:${closed}/`;
+  const page = (head, body) => `<!doctype html><html><head><title>Moves on</title>${head}</head><body><h1>Moves on</h1><p>This page sends the browser elsewhere.</p>${body}</body></html>`;
+  const { server, origin } = await serve({
+    "/meta": { body: page(`<meta http-equiv="refresh" content="0;url=${dead}">`, "") },
+    "/script": { body: page("", `<script>setTimeout(() => (location.href = ${JSON.stringify(dead)}), 50)</script>`) },
+    "/on": { body: page("", `<script>setTimeout(() => (location.href = "/next"), 50)</script>`) },
+    // Code only here, so a kit with code was read from this page.
+    "/next": { body: `<!doctype html><html><head><title>Next</title></head><body><h1>Next</h1><p>The page the other one leads to.</p><pre><code>npx acme init</code></pre></body></html>` },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-moved-"));
+  const dir = path.join(parent, "kit");
+  try {
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    for (const route of ["/meta", "/script"]) {
+      await assert.rejects(makeFontKit(`${origin}${route}`, { dir, timeLimit: 60_000 }), {
+        message: `${origin}${route} led to ${dead}, which could not be opened (net::ERR_CONNECTION_REFUSED), so no kit was made. Check the page in a normal browser.`,
+      });
+      assert.deepEqual(snapshot(dir), before, route);
+    }
+    const { kit } = await makeFontKit(`${origin}/on`, { dir: path.join(parent, "on"), timeLimit: 60_000 });
+    assert.equal(kit.url, `${origin}/next`);
+    assert.ok(kit.roles.code, "the code of the page it moved to was read");
+    assert.match(fs.readFileSync(path.join(parent, "on", "FONTS.md"), "utf8"), new RegExp(`^Read from ${origin}/next on `, "m"));
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a page that answers with an error is refused, naming the status and the address the run ended on, and the earlier kit stays", { skip: noBrowser }, async () => {
   // Error pages as servers send them, drawn in the browser's default font.
   const error = (title) => `<!doctype html><html><head><title>${title}</title></head><body><h1>${title}</h1><p>The page you asked for is not here.</p></body></html>`;

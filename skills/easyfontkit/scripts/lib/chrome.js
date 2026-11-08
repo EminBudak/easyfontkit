@@ -297,12 +297,19 @@ async function navigate(cdp, url) {
   const late = new Promise((resolve) => (timer = setTimeout(resolve, Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))));
   await Promise.race([loaded, late]);
   clearTimeout(timer);
+  return (await currentAddress(cdp)) || url;
+}
+
+// The address the tab shows now, from its history: with the #fragment, and
+// after any redirect, script or meta refresh that moved it on. Empty when
+// the browser does not say.
+async function currentAddress(cdp) {
   try {
     const { currentIndex, entries } = await cdp.send("Page.getNavigationHistory");
-    return (entries[currentIndex] || {}).url || url;
+    return (entries[currentIndex] || {}).url || "";
   } catch {
-    return url;
+    return "";
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, connect, openPage, navigate };
+module.exports = { findChrome, launch, killBrowsers, connect, openPage, navigate, currentAddress };

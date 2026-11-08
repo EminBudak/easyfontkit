@@ -857,12 +857,14 @@ function publicFamily(family) {
   };
 }
 
+// A response never carries the address's #fragment, so a change in that
+// alone is not a move to another page.
+const bare = (address) => address.replace(/#.*$/s, "");
+
 // A page that answers with an error status, after any redirects, is not the
 // page that was asked for, and its fonts are often only the browser's
-// defaults. What to try next depends on the status. A response never
-// carries the address's #fragment, so that is not a redirect.
+// defaults. What to try next depends on the status.
 function errorPage(asked, { status, url }) {
-  const bare = (address) => address.replace(/#.*$/s, "");
   const where = url && bare(url) !== bare(asked) ? `${asked} led to ${url}, which` : url || asked;
   const next =
     status >= 500 || status === 408 || status === 429
@@ -871,6 +873,13 @@ function errorPage(asked, { status, url }) {
         ? "The page may need a login, or the site may turn away headless browsers; check the page in a normal browser."
         : "Give the address of a page that loads without an error, like the site's home page.";
   return `${where} answered with an error, HTTP ${status}${STATUS_CODES[status] ? ` ${STATUS_CODES[status]}` : ""}, so no kit was made. ${next}`;
+}
+
+// A page that moved itself on to an address that could not be opened at
+// all ends on the browser's own error page, whose fonts are the browser's.
+function notOpened(asked, { url, error }) {
+  const where = bare(url) !== bare(asked) ? `${asked} led to ${url}, which` : asked;
+  return `${where} could not be opened${error ? ` (${error})` : ""}, so no kit was made. Check the page in a normal browser.`;
 }
 
 // The runs going on in this process, for a stop signal, and whether one has
@@ -905,6 +914,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       throw new Error(`${scan.pageUrl} answered with a bot check ("${scan.challenge}") instead of its page, so no kit was made. Open the site in a normal browser and try again later.`);
     }
     if (scan.answer.status >= 400) throw new Error(errorPage(url, scan.answer));
+    if (scan.failed) throw new Error(notOpened(url, scan.failed));
     if (!Object.keys(scan.roles).length && !scan.files.length) {
       throw new Error(`${scan.pageUrl} showed no text and loaded no fonts, so nothing was read. The site may turn away headless browsers; check the page in a normal browser.`);
     }

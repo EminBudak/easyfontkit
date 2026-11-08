@@ -8,7 +8,7 @@
 // to tie a CSS family to its files when a file hides its own names.
 
 const crypto = require("crypto");
-const { navigate } = require("./chrome");
+const { navigate, currentAddress } = require("./chrome");
 const { describeFont } = require("./sfnt");
 const { timeLeft, sleep } = require("./time");
 
@@ -58,9 +58,23 @@ function record(cdp) {
   // The tab's own page as the server answered it: the last response its
   // main frame got, after any redirects, so a script that moves the page on
   // counts too. The frames inside a page get documents of their own.
-  const page = { frame: "", status: 0, url: "" };
+  const page = { frame: "", status: 0, url: "", failed: null };
   cdp.on("Network.responseReceived", ({ frameId, type, response }) => {
     if (type === "Document" && response && page.frame && frameId === page.frame) Object.assign(page, { status: response.status, url: response.url });
+  });
+  // A page that moves itself on, by a script or a meta refresh, to an
+  // address that cannot be opened at all, like a host that does not resolve
+  // or a closed port, gets no response: the tab shows the browser's own
+  // error page for that address instead (failed), until a page that loads
+  // takes its place. The reason is the first one its load gave: the browser
+  // tries the address again a second later and then drops that try as
+  // canceled, which says nothing.
+  const errors = new Map();
+  cdp.on("Network.loadingFailed", ({ requestId, type, errorText, canceled }) => {
+    if (type === "Document" && !canceled && errorText && !errors.has(requestId)) errors.set(requestId, errorText);
+  });
+  cdp.on("Page.frameNavigated", ({ frame }) => {
+    if (frame && page.frame && frame.id === page.frame) page.failed = frame.unreachableUrl ? { url: frame.unreachableUrl, error: errors.get(frame.loaderId) || "" } : null;
   });
   return { fonts, faces, sheets, page };
 }
@@ -308,8 +322,10 @@ async function readFiles(fonts, rules, faces) {
 
 // Opens the page and reads it: the faces of each role, every font file it
 // loaded, its @font-face rules, the web fonts Chrome reports as loaded, the
-// families document.fonts holds, and the status and address the server
-// answered the page with (answer).
+// families document.fonts holds, the status and address the server
+// answered the page with (answer), and the address the page moved on to
+// that could not be opened (failed). pageUrl is the address of the page the
+// roles were read from.
 async function scanPage(cdp, url, log = () => {}) {
   const recorded = record(cdp);
   await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: 50_000_000 });
@@ -325,7 +341,7 @@ async function scanPage(cdp, url, log = () => {}) {
     // An error status with no page of its own makes Chrome show its own
     // error page and give a net:: code, which says less than the status.
     if (recorded.page.status < 400) throw err;
-    return { pageUrl: url, answer: { status: recorded.page.status, url: recorded.page.url }, title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [] };
+    return { pageUrl: url, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [] };
   }
   await fontsReady(cdp);
   log("Reading the page");
@@ -334,6 +350,9 @@ async function scanPage(cdp, url, log = () => {}) {
   await sleep(500);
   const title = String((await evaluate(cdp, "document.title")) || "").trim();
   const roles = await readRoles(cdp);
+  // A script or a meta refresh can have moved the tab on since the load
+  // event navigate() waited for: the page read is the one it shows now.
+  pageUrl = (await currentAddress(cdp)) || pageUrl;
   const loaded = (await evaluate(cdp, "[...document.fonts].filter((f) => f.status === 'loaded').map((f) => ({ family: f.family, weight: f.weight, style: f.style }))")) || [];
   const rules = await readRules(cdp, recorded.sheets, pageUrl);
   const faces = recorded.faces.map((face) => ({
@@ -345,9 +364,12 @@ async function scanPage(cdp, url, log = () => {}) {
     platformFamily: face.platformFontFamily || "",
   }));
   const { files, skipped } = await readFiles(recorded.fonts, rules, faces);
-  const challenge = !files.length && CHALLENGE_TITLE.test(title) ? title : "";
+  const { failed } = recorded.page;
+  // The browser's own error page is titled with the host it could not
+  // reach, which is not the site's bot check.
+  const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, answer, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
+  return { pageUrl, answer, failed, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
 }
 
 module.exports = { scanPage, fontFaceRules, decodeDataUrl };

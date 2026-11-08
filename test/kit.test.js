@@ -197,10 +197,12 @@ test("never writes into a folder that holds someone else's files, and reads an e
       fs.rmSync(path.join(dir, name), { recursive: true });
       if (fs.existsSync(kept)) fs.renameSync(kept, path.join(dir, name));
     }
-    // The lock and the part folders of runs do not count.
+    // The lock, the marker of a waiter taking a stale lock over and the
+    // part folders of runs do not count.
     const empty = path.join(dir, "empty");
     fs.mkdirSync(path.join(empty, ".easyfontkit-part-1-0000000a"), { recursive: true });
     fs.writeFileSync(path.join(empty, ".easyfontkit-lock"), "1");
+    fs.writeFileSync(path.join(empty, ".easyfontkit-lock.stale"), "");
     assert.equal(earlierKit(empty), null);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -711,6 +713,91 @@ test("a leftover list of moves is never followed through a link, in its part fol
       assert.deepEqual(snapshot(outside), before, name);
     }
   } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a lock: a run lets go only of its own, a stale one is taken over by one waiter at a time, and a marker a killed waiter left is cleared", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-own-"));
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const lockFile = path.join(dir, ".easyfontkit-lock");
+    const marker = `${lockFile}.stale`;
+    // Taken over by another run while this one saved: that run's lock stays.
+    await saveKit(dir, (part) => {
+      newKitIn(part, ["inter-400.woff2"]);
+      fs.writeFileSync(lockFile, "999999999");
+    });
+    assert.equal(fs.readFileSync(lockFile, "utf8"), "999999999");
+    // A stale lock, a killed run's, while another waiter holds the marker:
+    // this one waits for it.
+    const ended = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+    fs.writeFileSync(lockFile, ended);
+    fs.writeFileSync(marker, "");
+    const saving = saveKit(dir, (part) => newKitIn(part, ["inter-700.woff2"]));
+    await sleep(400);
+    assert.equal(fs.readFileSync(lockFile, "utf8"), ended, "the stale lock is left to the waiter with the marker");
+    fs.rmSync(marker);
+    await saving;
+    assert.equal(fs.existsSync(lockFile), false);
+    assert.deepEqual(fs.readdirSync(path.join(dir, "files")).sort(), ["inter-700.woff2", "notes.txt"]);
+    // A marker older than any wait was left by a waiter killed outright.
+    fs.writeFileSync(lockFile, ended);
+    fs.writeFileSync(marker, "");
+    const old = (Date.now() - 60_000) / 1000;
+    fs.utimesSync(marker, old, old);
+    const started = Date.now();
+    await saveKit(dir, (part) => newKitIn(part, ["inter-900.woff2"]));
+    assert.ok(Date.now() - started < 3_000, `saved after ${Date.now() - started} ms`);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a run being stopped gives up the wait for another run's lock at once and leaves the folder as it was", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-stopping-"));
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    // Held by this living process.
+    fs.writeFileSync(path.join(dir, ".easyfontkit-lock"), String(process.pid));
+    const before = snapshot(dir);
+    const script = `const { saveKit, stopRuns } = require(${JSON.stringify(require.resolve("../skills/easyfontkit/scripts/lib/kit"))});
+      stopRuns();
+      const started = Date.now();
+      saveKit(${JSON.stringify(dir)}, () => { throw new Error("written"); }).then(
+        () => console.log(JSON.stringify({ message: "saved" })),
+        (err) => console.log(JSON.stringify({ message: err.message, ms: Date.now() - started })),
+      );`;
+    const child = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 30_000 });
+    const { message, ms } = JSON.parse(child.stdout);
+    assert.equal(message, "stopped while waiting for another run to finish saving");
+    assert.ok(ms < 2_000, `gave up after ${ms} ms`);
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("an earlier kit whose fonts.json another run is moving in as it is read is not refused", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-reread-"));
+  const readFileSync = fs.readFileSync;
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    // The first read finds no fonts.json, as between a run's last move and
+    // the removal of its list of moves; the second finds it in place.
+    let misses = 1;
+    fs.readFileSync = (file, ...rest) => {
+      if (String(file) === path.join(dir, "fonts.json") && misses-- > 0) throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+      return readFileSync(file, ...rest);
+    };
+    assert.deepEqual(earlierKit(dir), { files: ["acme-400.woff2"] });
+    assert.equal(misses, -1, "fonts.json was read twice");
+  } finally {
+    fs.readFileSync = readFileSync;
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });

@@ -833,6 +833,87 @@ test("a run being stopped gives up the wait for another run's lock at once and l
   }
 });
 
+test("a lock and a part folder that name this process's own pid were left by an earlier process with that pid, as in a fresh container, and go at once", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-ownpid-"));
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const left = `.easyfontkit-part-${process.pid}-0000000a`;
+    for (const lock of [true, false]) {
+      if (lock) fs.writeFileSync(path.join(dir, ".easyfontkit-lock"), String(process.pid));
+      fs.mkdirSync(path.join(dir, left));
+      fs.writeFileSync(path.join(dir, left, "fonts.json"), "{}");
+      const started = Date.now();
+      await saveKit(dir, (part) => newKitIn(part, ["inter-400.woff2"]));
+      assert.ok(Date.now() - started < 3_000, `saved after ${Date.now() - started} ms`);
+      assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
+    }
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a lock is waited for while another user's run holds it or its run has only just made it, and taken over once it is older than any save", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-held-"));
+  const kill = process.kill;
+  const going = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const lockFile = path.join(dir, ".easyfontkit-lock");
+    // Held for 400 ms, then let go: the run waits for it.
+    const held = async (text) => {
+      fs.writeFileSync(lockFile, text);
+      const started = Date.now();
+      const saving = saveKit(dir, (part) => newKitIn(part, ["inter-400.woff2"]));
+      await sleep(400);
+      assert.equal(fs.readFileSync(lockFile, "utf8"), text, `the lock holding "${text}" is waited for`);
+      fs.rmSync(lockFile);
+      await saving;
+      assert.ok(Date.now() - started >= 400);
+    };
+    // Another user's process, which this user may not signal.
+    const other = 4_000_001;
+    process.kill = function (pid, signal) {
+      if (pid === other && signal === 0) throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+      return kill.apply(process, arguments);
+    };
+    await held(String(other));
+    process.kill = kill;
+    // Made a moment ago, before its run wrote its pid in it.
+    await held("");
+    // Taken over at once: one with no pid left for more than a few seconds,
+    // and one whose process lives on but is older than any save takes, as a
+    // pid that came round again on another process.
+    for (const [text, ago] of [["", 10_000], [String(going.pid), 180_000]]) {
+      fs.writeFileSync(lockFile, text);
+      const then = (Date.now() - ago) / 1000;
+      fs.utimesSync(lockFile, then, then);
+      const started = Date.now();
+      await saveKit(dir, (part) => newKitIn(part, ["inter-700.woff2"]));
+      assert.ok(Date.now() - started < 3_000, `saved after ${Date.now() - started} ms past a lock holding "${text}"`);
+      assert.equal(fs.existsSync(lockFile), false);
+    }
+  } finally {
+    process.kill = kill;
+    going.kill();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("an --out with a name too long for the system is refused before the page is read, with a plain message", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-long-"));
+  try {
+    const out = path.join(parent, "x".repeat(300), "kit");
+    const run = spawnSync(process.execPath, [CLI, "acme.example", "--out", out], { encoding: "utf8", env: { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") } });
+    assert.equal(run.status, 1);
+    assert.equal(run.stderr, `easyfontkit: ${out} is not a folder this run can use. Pick another folder with --out.\n`);
+    assert.deepEqual(fs.readdirSync(parent), []);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("an earlier kit whose fonts.json another run is moving in as it is read is not refused", () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-reread-"));
   const readFileSync = fs.readFileSync;
@@ -1116,6 +1197,55 @@ test("a stop that comes once the new kit is in place ends the run with 0, and th
       assert.equal(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8"), "new");
     }
   } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("an error nothing catches ends the run with the browser killed and its profile removed, and the folder as it was", { skip: noSignals }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-uncaught-"));
+  let child;
+  try {
+    // A browser that starts and never answers, with a socket folder in the
+    // temp folder that its profile links to, as Chrome's own.
+    const chrome = path.join(parent, "chrome");
+    fs.writeFileSync(
+      chrome,
+      `#!/bin/sh
+for arg in "$@"; do case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}";; esac; done
+socket=$(mktemp -d "$TMPDIR/com.example.Chrome.XXXXXX") && : > "$socket/SingletonSocket" && ln -s "$socket/SingletonSocket" "$profile/SingletonSocket"
+echo $$ > "$(dirname "$0")/chrome.pid"
+exec sleep 60
+`,
+      { mode: 0o755 },
+    );
+    // An error thrown once the browser is up, from a timer, where no code of
+    // the run can catch it.
+    const pidFile = path.join(parent, "chrome.pid");
+    const boom = path.join(parent, "boom.js");
+    fs.writeFileSync(boom, `const fs = require("fs"); const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(pidFile)})) { clearInterval(timer); throw new Error("boom"); } }, 20);`);
+    const tmp = fs.mkdtempSync(path.join(parent, "tmp-"));
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    // In a process group of its own, with its browser, so whatever is left
+    // of it can be stopped at the end.
+    child = spawn(process.execPath, ["--require", boom, CLI, "acme.example", "--out", dir], { detached: true, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, CHROME_PATH: chrome, TMPDIR: tmp } });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const code = await new Promise((resolve) => child.on("exit", resolve));
+    assert.equal(code, 1, stderr);
+    assert.match(stderr, /Error: boom/);
+    const pid = Number(fs.readFileSync(pidFile, "utf8"));
+    for (let i = 0; i < 100 && !gone(pid); i++) await sleep(20);
+    assert.equal(gone(pid), true, "the browser is killed");
+    assert.deepEqual(fs.readdirSync(tmp), [], "no profile or socket folder is left");
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // Nothing of its group is left.
+    }
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });

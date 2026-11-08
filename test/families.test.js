@@ -96,3 +96,24 @@ test("a font on the visitor's computer keeps the name the CSS asks for it by", (
   assert.deepEqual(bold.free.map((f) => f.family), ["Arimo"]);
   assert.match(bold.free[0].basis, /^metric-compatible with Arial/);
 });
+
+test("a font on the visitor's computer that the CSS names as one word, like a PostScript name, is named and grouped as its family", () => {
+  // Bootstrap's code stack, and a heading cut named next to its family.
+  const { roles, families } = buildFamilies({
+    pageUrl: PAGE,
+    roles: {
+      heading: [face("Liberation Sans", 120, '"HelveticaNeue-Bold", "Helvetica Neue", Helvetica, Arial, sans-serif', { custom: false, weight: "700" })],
+      body: [face("Liberation Sans", 400, '"Helvetica Neue", Helvetica, Arial, sans-serif', { custom: false })],
+      code: [face("DejaVu Sans Mono", 80, 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', { custom: false })],
+    },
+    files: [],
+    rules: [],
+    faces: [],
+    loaded: [],
+  });
+  assert.equal(roles.heading.family, "Helvetica Neue");
+  assert.equal(roles.heading.key, roles.body.key, "the heading cut is one family with the body's");
+  assert.equal(roles.code.family, "SF Mono");
+  assert.deepEqual(families.map((f) => f.name), ["Helvetica Neue", "SF Mono"]);
+  assert.deepEqual(families[1].free.map((f) => f.family), ["JetBrains Mono", "IBM Plex Mono"]);
+});

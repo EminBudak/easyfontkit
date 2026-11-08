@@ -11,38 +11,42 @@ const test = require("node:test");
 const { launch, navigate } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
 
-test("on Linux, Chrome's temp folder is its profile when the socket it makes there fits, so what it leaves there goes with the profile", { skip: ["darwin", "win32"].includes(process.platform) && "Chrome takes its temp folder from TMPDIR on Linux only" }, async () => {
+test("on Linux, Chrome's temp folder is its profile where the socket it makes there fits, and its profile given as \".\", with Chrome started in it, where its own temp folder is too long for the socket", { skip: ["darwin", "win32"].includes(process.platform) && "Chrome takes its temp folder from TMPDIR on Linux only" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-temp-"));
   const saved = { TMPDIR: process.env.TMPDIR, CHROME_PATH: process.env.CHROME_PATH };
-  // A browser that writes down the temp folder it was given and its
-  // profile, then quits.
+  // A browser that writes down the temp folder it was given, its profile
+  // and the folder it was started in, then quits.
   const seen = path.join(parent, "seen");
   process.env.CHROME_PATH = path.join(parent, "chrome");
   fs.writeFileSync(
     process.env.CHROME_PATH,
     `#!/bin/sh
 for arg in "$@"; do case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}";; esac; done
-printf '%s\\n%s\\n' "$TMPDIR" "$profile" > ${JSON.stringify(seen)}
+printf '%s\\n%s\\n%s\\n' "$TMPDIR" "$profile" "$(pwd -P)" > ${JSON.stringify(seen)}
 `,
     { mode: 0o755 },
   );
-  // A temp folder with a short path, given from inside the folder that
-  // holds it, and one too long for the socket.
+  // Temp folders given from inside the folder that holds them: one with a
+  // short path, one too long for the socket in the profile but not in a
+  // folder of Chrome's own there, and one too long for both.
   const cwd = process.cwd();
   fs.mkdirSync(path.join(parent, "t"));
-  fs.mkdirSync(path.join(parent, "x".repeat(60)));
+  fs.mkdirSync(path.join(parent, "y".repeat(40)));
+  fs.mkdirSync(path.join(parent, "x".repeat(70)));
   try {
     process.chdir(parent);
-    for (const [tmp, fits] of [
-      ["t", true],
-      [path.join(parent, "x".repeat(60)), false],
+    for (const [tmp, temp] of [
+      ["t", "profile"],
+      ["y".repeat(40), "own"],
+      ["x".repeat(70), "."],
     ]) {
       process.env.TMPDIR = tmp;
       await assert.rejects(launch({ width: 800, height: 600 }), /did not start/);
-      const [given, profile] = fs.readFileSync(seen, "utf8").split("\n");
-      assert.equal(path.dirname(profile), tmp);
-      assert.equal(given, fits ? profile : tmp);
-      assert.equal(fs.existsSync(profile), false, "the profile is removed");
+      const [given, profile, started] = fs.readFileSync(seen, "utf8").split("\n");
+      assert.equal(path.relative(parent, path.dirname(profile)), tmp);
+      assert.equal(given, { profile, own: tmp, ".": "." }[temp]);
+      assert.equal(started, temp === "." ? path.join(fs.realpathSync(path.dirname(profile)), path.basename(profile)) : fs.realpathSync(parent));
+      assert.equal(fs.existsSync(path.resolve(parent, profile)), false, "the profile is removed");
     }
   } finally {
     process.chdir(cwd);

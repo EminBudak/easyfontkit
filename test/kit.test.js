@@ -1454,10 +1454,12 @@ test("a run stopped while it reads the page leaves the earlier kit as it was, cl
     assert.equal(mine.length, 1);
     await sleep(1500);
     // Chrome's socket folder, which it removes only when it quits. On Linux
-    // the profile links to it from the start.
+    // the profile links to it from the start, from inside the profile when
+    // the temp folder's path is long.
     let socket = "";
     try {
-      socket = path.dirname(fs.readlinkSync(path.join(os.tmpdir(), mine[0], "SingletonSocket")));
+      const profile = path.join(os.tmpdir(), mine[0]);
+      socket = path.dirname(path.resolve(profile, fs.readlinkSync(path.join(profile, "SingletonSocket"))));
     } catch (err) {
       if (process.platform === "linux") throw err;
     }
@@ -1614,27 +1616,28 @@ test("a page that answers with an error is refused, naming the status and the ad
   }
 });
 
-test("a run refused for an error page leaves nothing in the temp folder, also one too long for Chrome to keep its temp files in the profile", { skip: noBrowser }, async (t) => {
+test("a run refused for an error page leaves nothing in the temp folder, also one too long for the socket Chrome makes there", { skip: noBrowser }, async () => {
   const { server, origin } = await serve({ "/missing": { status: 404, body: "<!doctype html><html><head><title>Not Found</title></head><body><h1>Not Found</h1></body></html>" } });
   // Over 32 bytes, so the profile's path leaves no room for the socket
-  // Chrome would make in it, and short enough for the one Chrome makes in
-  // its own folder there.
-  let tmp = fs.mkdtempSync(path.join(os.tmpdir(), "e"));
-  const base = tmp;
-  if (Buffer.byteLength(tmp) <= 32) {
-    tmp = path.join(tmp, "t".repeat(40 - Buffer.byteLength(tmp) - 1));
-    fs.mkdirSync(tmp);
-  }
+  // Chrome makes in it, and over 70, so a folder of Chrome's own there
+  // leaves none either.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "e"));
+  const folder = (letter, bytes) => {
+    const at = path.join(base, letter.repeat(Math.max(1, bytes - Buffer.byteLength(base) - 1)));
+    fs.mkdirSync(at);
+    return at;
+  };
   try {
-    if (Buffer.byteLength(tmp) + "/com.google.Chrome.XXXXXX/SingletonSocket".length > 107) return void t.skip("the temp folder's path leaves no room for Chrome's socket");
-    for (let i = 1; i <= 3; i++) {
-      const child = spawn(process.execPath, [CLI, `${origin}/missing`, "--out", path.join(tmp, "kit")], { env: { ...process.env, TMPDIR: tmp }, stdio: ["ignore", "ignore", "pipe"] });
-      let stderr = "";
-      child.stderr.on("data", (chunk) => (stderr += chunk));
-      const status = await new Promise((resolve) => child.on("close", resolve));
-      assert.equal(status, 1, stderr);
-      assert.match(stderr, /answered with an error, HTTP 404 Not Found/);
-      assert.deepEqual(fs.readdirSync(tmp), [], `run ${i}`);
+    for (const tmp of [folder("s", 40), folder("l", 100)]) {
+      for (let i = 1; i <= 2; i++) {
+        const child = spawn(process.execPath, [CLI, `${origin}/missing`, "--out", path.join(tmp, "kit")], { env: { ...process.env, TMPDIR: tmp }, stdio: ["ignore", "ignore", "pipe"] });
+        let stderr = "";
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        const status = await new Promise((resolve) => child.on("close", resolve));
+        assert.equal(status, 1, stderr);
+        assert.match(stderr, /answered with an error, HTTP 404 Not Found/);
+        assert.deepEqual(fs.readdirSync(tmp), [], `run ${i} in ${tmp}`);
+      }
     }
   } finally {
     server.close();

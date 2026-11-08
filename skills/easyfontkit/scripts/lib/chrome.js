@@ -67,7 +67,7 @@ const open = new Set();
 // that is killed cannot, so it is removed with the profile.
 function singletonOf(profile) {
   try {
-    const socket = fs.readlinkSync(path.join(profile, "SingletonSocket"));
+    const socket = path.resolve(profile, fs.readlinkSync(path.join(profile, "SingletonSocket")));
     const folder = path.dirname(socket);
     if (path.basename(socket) === "SingletonSocket" && fs.realpathSync(path.dirname(folder)) === fs.realpathSync(os.tmpdir())) return folder;
   } catch {
@@ -89,14 +89,24 @@ function removeProfile({ profile, singleton }, maxRetries, retryDelay) {
   }
 }
 
-// Chrome on Linux takes its temp folder from TMPDIR. There it is given the
-// profile, so anything else Chrome leaves in its temp folder when it is
-// closed soon after it starts goes with the profile too. Chrome makes its
-// socket in that folder as well, and a socket's path may not pass 107
-// bytes: the socket's own folder takes up to 32 more, and /SingletonSocket
-// 16. With a longer profile path, Chrome keeps the temp folder it would
-// have had.
-const ownTemp = (profile) => process.platform !== "darwin" && process.platform !== "win32" && Buffer.byteLength(profile) + 1 + 32 + 16 <= 107;
+// Chrome on Linux takes its temp folder from TMPDIR, and makes there the
+// socket that hands a second start of a profile over to the first one. A
+// socket's path may not pass 107 bytes: the socket's own folder takes up to
+// 32 more, and /SingletonSocket 16, and Chrome does not start when it does
+// not fit. Chrome is given its profile as its temp folder when that leaves
+// room for the socket, so anything else it leaves there when it is closed
+// soon after it starts goes with the profile too. Else it keeps the temp
+// folder it would have had, and when that leaves no room either, it is
+// started in its profile and given that as ".", which leaves room however
+// long the path is.
+const fits = (folder) => Buffer.byteLength(folder) + 1 + 32 + 16 <= 107;
+function tempOf(profile) {
+  if (process.platform === "darwin" || process.platform === "win32") return { profile };
+  if (fits(profile)) return { profile, env: { ...process.env, TMPDIR: profile } };
+  if (fits(os.tmpdir())) return { profile };
+  const whole = path.resolve(profile);
+  return { profile: whole, cwd: whole, env: { ...process.env, TMPDIR: "." } };
+}
 
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
@@ -110,7 +120,7 @@ async function launch({ width, height }) {
   if (!binary) {
     throw new Error("No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.");
   }
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-"));
+  const { profile, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
   const child = spawn(
     binary,
     [
@@ -131,7 +141,7 @@ async function launch({ width, height }) {
       ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
       "about:blank",
     ],
-    { stdio: "ignore", env: ownTemp(profile) ? { ...process.env, TMPDIR: profile } : process.env },
+    { stdio: "ignore", ...where },
   );
   let exited = false;
   child.on("exit", () => (exited = true));

@@ -58,18 +58,26 @@ function lookup(name) {
   return BY_KEY.get(key(parts)) || BY_KEY.get(key(strip(parts))) || null;
 }
 
+// Weights that are a design of their own under a family's name: Arial Black
+// is not Arial drawn heavier, and keeps neither its widths nor its line
+// breaks.
+const HEAVY = new Set(["black", "heavy", "extrablack", "ultrablack"]);
+const METRIC = /^metric-compatible/;
+
+// The hand-picked entry for a name: as written, else without the words a
+// file adds, dropped one at a time from the end ("Times New Roman Bold" is
+// Times New Roman, "Gotham Book" is Gotham). A heavy cut does not take an
+// entry whose match is metric-compatible with the lighter family: that
+// entry comes back as refused instead.
 function curated(name) {
   const parts = words(name);
-  if (!parts.length) return null;
-  return CURATED.get(key(parts)) || CURATED.get(key(strip(parts))) || null;
-}
-
-// The same, but by the full name only: "Arial Black" does not drop "Black"
-// and take Arial's entry, whose match is metric-compatible with Arial, not
-// with Arial Black.
-function curatedExact(name) {
-  const parts = words(name);
-  return parts.length ? CURATED.get(key(parts)) || null : null;
+  for (let n = parts.length; n > 0; n--) {
+    const entry = CURATED.get(key(parts.slice(0, n)));
+    if (entry) return parts.slice(n).some((word) => HEAVY.has(word.toLowerCase())) && METRIC.test(entry.basis) ? { refused: entry } : { entry };
+    const last = parts[n - 1];
+    if (n === 1 || !(EXTRA.has(last.toLowerCase()) || /^\d+pt$/i.test(last))) break;
+  }
+  return {};
 }
 
 // A family's name as people write it: Fontsource's own spelling when it
@@ -131,10 +139,14 @@ const FEW_WEIGHTS = 0.005;
 // slab: the font is a slab serif itself; slab serifs are matched only then.
 function freeMatches({ names = [], category = "sans", metrics = null, count = 3, stack = false, slab = false } = {}) {
   const kind = DEFAULTS[category] ? category : "sans";
+  // An entry a heavy cut refused stays refused for the names after it: in
+  // "Arial Black", Arial, the Arial that follows is its fallback, not its
+  // match.
+  const refused = new Set();
   for (const name of names) {
-    // A name read from a CSS stack is taken as written: a weight word like
-    // "Black" is part of the name there, not a cut of a lighter family.
-    const entry = stack ? curatedExact(name) : curated(name);
+    const found = curated(name);
+    if (found.refused) refused.add(found.refused);
+    const entry = found.entry && !refused.has(found.entry) ? found.entry : null;
     if (entry) return entry.free.map((id) => BY_ID.get(id)).filter(Boolean).map((font) => described(font, entry.basis));
     const listed = stack ? lookup(name) : null;
     if (listed) return [described(listed, "the site's font stack names it, and it is free")];

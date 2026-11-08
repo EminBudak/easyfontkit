@@ -60,7 +60,7 @@ Every file is saved either way, and FONTS.md says which is which. If a foundry w
 
 ## How the free match is picked
 
-Well-known paid fonts have hand-picked matches: Arimo for Arial and Helvetica, Tinos for Times New Roman, Carlito for Calibri, Montserrat for Gotham, EB Garamond for Garamond, JetBrains Mono for SF Mono, and a few more. Fonts like Arimo and Tinos are metric-compatible, so text breaks on the same lines.
+Well-known paid fonts have hand-picked matches: Arimo for Arial and Helvetica, Tinos for Times New Roman, Carlito for Calibri, Montserrat for Gotham, EB Garamond for Garamond, JetBrains Mono for SF Mono, and a few more. Fonts like Arimo and Tinos are metric-compatible, so text breaks on the same lines. That holds for the family's own weights, not for a heavy cut drawn as a design of its own: Arial Black does not get Arimo.
 
 Any other font is measured: its x-height, cap height and the average width of its lowercase, as shares of the em. easyfontkit compares those with every free sans, serif and monospaced font on Fontsource, measured the same way, and picks the three nearest. Fonts made for another script first, small caps cuts, condensed cuts and display faces are left out, a slab serif only stands in for another slab serif, and among near matches the more popular Google Fonts families come first. The result keeps sizes and line lengths close. It does not promise the same character, so look at it before you commit.
 

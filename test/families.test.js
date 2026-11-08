@@ -70,8 +70,9 @@ test("a font on the visitor's computer keeps the name the CSS asks for it by", (
   const { roles, families } = buildFamilies({
     pageUrl: PAGE,
     roles: {
-      heading: [face("Liberation Sans", 120, '"Arial Black", sans-serif', { custom: false, weight: "900" })],
+      heading: [face("Liberation Sans", 120, '"Arial Black", Arial, sans-serif', { custom: false, weight: "900" })],
       body: [face("Liberation Serif", 400, '"Times New Roman", Times, serif', { custom: false })],
+      button: [face("Liberation Sans", 60, '"Arial Bold", Arial, sans-serif', { custom: false, weight: "700" })],
     },
     files: [],
     rules: [],
@@ -85,8 +86,13 @@ test("a font on the visitor's computer keeps the name the CSS asks for it by", (
   assert.deepEqual(times.free.map((f) => f.family), ["Tinos"]);
   // Arial Black is its own name, not Arial: it does not borrow Arial's
   // metric-compatible match, which keeps Arial's line breaks and not its
-  // own. With no entry of its own it gets the plain default.
+  // own, also when Arial follows it in the stack. With no entry of its own
+  // it gets the plain default. Arial Bold is Arial, and keeps it.
   const black = families.find((f) => f.name === "Arial Black");
   assert.deepEqual(black.free.map((f) => f.family), ["Inter"]);
   assert.match(black.free[0].basis, /could not be measured/);
+  assert.equal(roles.button.family, "Arial Bold");
+  const bold = families.find((f) => f.name === "Arial Bold");
+  assert.deepEqual(bold.free.map((f) => f.family), ["Arimo"]);
+  assert.match(bold.free[0].basis, /^metric-compatible with Arial/);
 });

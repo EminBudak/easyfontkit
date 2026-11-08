@@ -78,10 +78,11 @@ function summary({ dir, kit }) {
 // Ctrl-C, a kill or a closed terminal while the page is read: the browser
 // is killed and the process ends by the same signal, before the run has
 // written anything, so the kit's folder is left as it was. Once the kit is
-// in place, the run has ended well and the process ends as it would have.
-// The listeners stay until the process is about to end, so a second copy
-// of the signal, as npm and makersmcp's supervisor pass one on, changes
-// nothing. An error that ends the process kills the browser too.
+// in place, the run has ended well, and a stop that comes then ends the
+// process with 0, as it would have ended. The listeners stay until the
+// process ends, so a second copy of the signal, as npm and makersmcp's
+// supervisor pass one on, changes nothing. An error that ends the process
+// kills the browser too.
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
 let stopping = false;
 function stopOnSignals() {
@@ -127,7 +128,11 @@ async function main() {
       timeLimit: options.timeout * 1000,
       log: options.json ? () => {} : (line) => process.stderr.write(`${line}...\n`),
     });
-    process.stdout.write(options.json ? JSON.stringify(result.kit, null, 2) + "\n" : summary(result) + "\n");
+    // Ended here once the kit is printed: left to end by itself, Node puts
+    // the signals back to their default action as it winds down, and a stop
+    // that came in those few milliseconds would end a run whose kit is
+    // already in place by that signal instead of with 0.
+    process.stdout.write(options.json ? JSON.stringify(result.kit, null, 2) + "\n" : summary(result) + "\n", () => process.exit(0));
   } catch (err) {
     // A stopped run has said so, and ends by its signal.
     if (stopping) return;

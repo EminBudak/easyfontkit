@@ -1072,6 +1072,54 @@ exec sleep 60
   }
 });
 
+test("a stop that comes once the new kit is in place ends the run with 0, and the new kit stays", { skip: noSignals }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-late-"));
+  try {
+    // A run whose page is read at once: its kit is saved as makeFontKit
+    // saves one.
+    const quick = path.join(parent, "quick.js");
+    fs.writeFileSync(
+      quick,
+      `const fs = require("fs");
+       const path = require("path");
+       const kit = require(${JSON.stringify(require.resolve("../skills/easyfontkit/scripts/lib/kit"))});
+       kit.makeFontKit = async (url, { dir }) => {
+         const made = { version: 1, url: "https://acme.example/", capturedAt: new Date().toISOString(), generator: "easyfontkit test", roles: {}, families: [], notes: [] };
+         await kit.saveKit(dir, (part) => {
+           fs.writeFileSync(path.join(part, "fonts.json"), JSON.stringify(made));
+           fs.writeFileSync(path.join(part, "FONTS.md"), "new");
+           fs.writeFileSync(path.join(part, "fonts.css"), "new");
+         });
+         return { dir, kit: made };
+       };`,
+    );
+    const dir = path.join(parent, "kit");
+    // The stop comes every millisecond from the moment the kit is printed
+    // until the process has ended, so one comes while it winds down.
+    for (let i = 1; i <= 10; i++) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      earlierKitIn(dir);
+      const ended = await new Promise((resolve) => {
+        const child = spawn(process.execPath, ["--require", quick, CLI, "acme.example", "--out", dir], { stdio: ["ignore", "pipe", "ignore"] });
+        let stdout = "";
+        let timer;
+        child.stdout.on("data", (chunk) => {
+          stdout += chunk;
+          if (!timer && stdout.includes("Saved")) timer = setInterval(() => child.kill("SIGTERM"), 1);
+        });
+        child.on("exit", (code, signal) => {
+          clearInterval(timer);
+          resolve({ code, signal, printed: stdout.includes("Saved") });
+        });
+      });
+      assert.deepEqual(ended, { code: 0, signal: null, printed: true }, `run ${i}`);
+      assert.equal(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8"), "new");
+    }
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("the skill folder carries its own version, the same as the package's", () => {
   assert.equal(require("../skills/easyfontkit/scripts/lib/version"), require("../package.json").version);
 });

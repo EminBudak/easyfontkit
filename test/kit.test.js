@@ -1011,19 +1011,41 @@ test("a disk that runs out at the lock or while the folders are made leaves noth
   }
 });
 
-test("prepareDir, kept for code written against 0.1.1, refuses what makeFontKit refuses, makes a missing folder and leaves an earlier kit as it was", () => {
+test("prepareDir does what it did in 0.1.1: it makes a missing folder and clears an earlier kit's own files, while the user's stay, and refuses what makeFontKit refuses", () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-prepare-"));
   try {
+    // An earlier kit, with a file of the user's in its files folder.
     const dir = path.join(parent, "kit");
     earlierKitIn(dir);
-    const before = snapshot(dir);
     prepareDir(dir);
-    assert.deepEqual(snapshot(dir), before);
+    assert.deepEqual(fs.readdirSync(dir), ["files"]);
+    assert.deepEqual(fs.readdirSync(path.join(dir, "files")), ["notes.txt"]);
+    // Without one, the files folder goes too, and code that writes its kit
+    // as it did with 0.1.1 can make it again.
+    fs.rmSync(dir, { recursive: true });
+    earlierKitIn(dir);
+    fs.rmSync(path.join(dir, "files", "notes.txt"));
+    prepareDir(dir);
+    assert.deepEqual(fs.readdirSync(dir), []);
+    fs.mkdirSync(path.join(dir, "files"));
     const fresh = path.join(parent, "new", "kit");
     prepareDir(fresh);
     assert.deepEqual(fs.readdirSync(fresh), []);
+    // A folder of someone else's is refused, and left as it was.
     fs.writeFileSync(path.join(fresh, "notes.txt"), "mine");
     assert.throws(() => prepareDir(fresh), /not empty and holds no earlier font kit/);
+    assert.deepEqual(fs.readdirSync(fresh), ["notes.txt"]);
+    // So is a folder a run killed outright left half replaced: its earlier
+    // fonts.json is aside, in that run's part folder.
+    const cut = path.join(parent, "cut");
+    earlierKitIn(cut);
+    const own = ".easyfontkit-part-12345-0000000c";
+    fs.mkdirSync(path.join(cut, own, "earlier"), { recursive: true });
+    fs.renameSync(path.join(cut, "fonts.json"), path.join(cut, own, "earlier", "fonts.json"));
+    fs.writeFileSync(path.join(cut, own, "moves.json"), "[]");
+    const before = snapshot(cut);
+    assert.throws(() => prepareDir(cut), { message: `A run killed while it put its kit in ${cut} left the earlier kit there half moved. The next easyfontkit run that saves a kit there puts it back together first; or pick another folder with --out.` });
+    assert.deepEqual(snapshot(cut), before);
   } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }

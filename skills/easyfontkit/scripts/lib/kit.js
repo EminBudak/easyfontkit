@@ -214,14 +214,28 @@ function checkFolder(dir) {
   return earlierKit(dir);
 }
 
-// What 0.1.1 exported for code that requires the package, kept for it: a
-// folder the kit cannot be saved in is refused, as makeFontKit refuses it
-// before it reads the page, and a missing one is made. It no longer clears
-// an earlier kit there: a new kit takes its place only once it is whole.
-// makeFontKit itself does not use it.
+// The kit's folder made ready for a kit written straight into it, as 0.1.1
+// exported it for code that writes a kit itself: a folder the kit cannot be
+// saved in is refused, as makeFontKit refuses it, a missing one is made, and
+// an earlier kit's own files are removed, with its files folder when
+// nothing else is in it, while the user's files stay. makeFontKit does not
+// call it, since a run that then failed would lose the earlier kit. A
+// folder a run killed outright left half replaced holds no whole kit to
+// clear, and is refused as 0.1.1 refused it, so the earlier kit's files that
+// run moved aside can still be put back.
 function prepareDir(dir) {
-  checkFolder(dir);
+  const earlier = checkFolder(dir);
+  if (earlier && earlier.cut) {
+    throw new Error(`A run killed while it put its kit in ${dir} left the earlier kit there half moved. The next easyfontkit run that saves a kit there puts it back together first; or pick another folder with --out.`);
+  }
   fs.mkdirSync(dir, { recursive: true });
+  if (!earlier) return;
+  for (const name of [...earlier.files.map((file) => path.join("files", file)), "fonts.json", "FONTS.md", "fonts.css"]) fs.rmSync(path.join(dir, name), { force: true });
+  try {
+    fs.rmdirSync(path.join(dir, "files"));
+  } catch {
+    // Missing, or holding files of the user's.
+  }
 }
 
 // The names in the kit's files folder that the earlier kit does not list:

@@ -432,12 +432,21 @@ const partMove = (own) => {
     return false;
   };
 };
+// Nor is a list followed unless it and its part folder are this user's
+// own, as a run of this user's leaves them: someone else who may write in
+// the kit's folder, but not in its files folder, could put there a list
+// that names only moves a run makes, and have the run move the user's files
+// into that part folder and remove them with it. Windows gives no owner to
+// compare.
+const mine = (stat) => !process.getuid || stat.uid === process.getuid();
 function readMoves(part) {
   const through = [part, path.join(part, "earlier"), path.join(part, "earlier", "files"), path.join(part, "files"), path.join(path.dirname(part), "files")];
   for (const folder of through) {
     const stat = entry(folder);
-    if (folder === part ? !stat || !stat.isDirectory() : stat && !stat.isDirectory()) return null;
+    if (folder === part ? !stat || !stat.isDirectory() || !mine(stat) : stat && !stat.isDirectory()) return null;
   }
+  const list = entry(path.join(part, MOVES));
+  if (!list || !list.isFile() || !mine(list)) return null;
   try {
     const moves = JSON.parse(fs.readFileSync(path.join(part, MOVES), "utf8"));
     if (!Array.isArray(moves) || !moves.every((move) => Array.isArray(move))) return null;

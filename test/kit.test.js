@@ -673,6 +673,37 @@ test("a planted list of moves, or a files that is a link, cannot send a run outs
   }
 });
 
+test("a leftover list of moves is followed only when it and its part folder are this user's own", { skip: !process.getuid && "no owners to compare on Windows" }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-owner-"));
+  const lstatSync = fs.lstatSync;
+  try {
+    // A list that names only a move a run makes, put there by someone else
+    // who may write in the kit's folder: it would move the user's files
+    // folder into its part folder, which is then removed.
+    const own = ".easyfontkit-part-999999999-deadbeef";
+    for (const planted of [own, `${own}/moves.json`]) {
+      const dir = path.join(parent, planted.endsWith(".json") ? "list" : "part");
+      earlierKitIn(dir);
+      fs.mkdirSync(path.join(dir, own));
+      fs.writeFileSync(path.join(dir, own, "moves.json"), JSON.stringify([[`${own}/files`, "files", { names: fs.readdirSync(path.join(dir, "files")).sort() }]]));
+      const before = snapshot(dir);
+      fs.lstatSync = (file, ...rest) => {
+        const stat = lstatSync(file, ...rest);
+        return String(file) === path.join(dir, planted) ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: stat.uid + 1 }) : stat;
+      };
+      try {
+        await assert.rejects(saveKit(dir, () => assert.fail("no kit")), /could not be put back together \(its list of moves cannot be followed\)/, planted);
+      } finally {
+        fs.lstatSync = lstatSync;
+      }
+      assert.deepEqual(snapshot(dir), before, planted);
+    }
+  } finally {
+    fs.lstatSync = lstatSync;
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a leftover list of moves is never followed through a link, in its part folder or at the kit's files", { skip: process.platform === "win32" && "no symlinks of this kind on Windows" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-links-"));
   const own = ".easyfontkit-part-999999999-deadbeef";

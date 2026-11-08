@@ -324,7 +324,13 @@ async function lock(dir) {
         fs.writeSync(fd, mine);
       } catch (err) {
         fs.closeSync(fd);
-        unlock();
+        // This run made it a moment ago and could not write its pid in it,
+        // as on a full disk, so it is removed as it is.
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          // Gone already.
+        }
         throw err;
       }
       fs.closeSync(fd);
@@ -500,16 +506,28 @@ function putBack(dir) {
   }
 }
 
+// The first folder mkdir -p would make for target: the highest one on its
+// path that is not there yet, or "" when target is there.
+function firstMissing(target) {
+  let missing = "";
+  for (let at = target; !entry(at); at = path.dirname(at)) {
+    missing = at;
+    if (path.dirname(at) === at) break;
+  }
+  return missing;
+}
+
 // The folders made for a kit that was not saved, from the kit's folder up
-// to the first one made, as long as they are empty.
+// to the first one made, as long as they are empty. One a mkdir that failed
+// partway did not get to is passed over.
 function removeMade(dir, made) {
   for (let at = path.resolve(dir); ; at = path.dirname(at)) {
     try {
       fs.rmdirSync(at);
-    } catch {
-      return;
+    } catch (err) {
+      if (err.code !== "ENOENT") return;
     }
-    if (at === path.resolve(made)) return;
+    if (at === path.resolve(made) || path.dirname(at) === at) return;
   }
 }
 
@@ -534,14 +552,24 @@ function tidy(dir, part) {
 // is done, never halfway. The folder is read again here, as it can have
 // changed while the page was read.
 async function saveKit(dir, write) {
-  // Resolved once, so a .. in --out cannot make mkdirSync report a folder
-  // off the path removeMade walks and leave the run's own folder behind
-  // while removing one that was already there.
-  const made = fs.mkdirSync(path.resolve(dir), { recursive: true });
+  let made;
   let unlock = null;
   let part = "";
   let earlier = null;
   try {
+    // Resolved once, so a .. in --out cannot make mkdirSync report a folder
+    // off the path removeMade walks and leave the run's own folder behind
+    // while removing one that was already there. A mkdir that fails partway,
+    // as on a full disk, reports nothing, so the first folder it would make
+    // is found before.
+    const target = path.resolve(dir);
+    const missing = firstMissing(target);
+    try {
+      made = fs.mkdirSync(target, { recursive: true });
+    } catch (err) {
+      made = missing;
+      throw err;
+    }
     // The wait yields to the event loop; the rest runs without a pause, so a
     // stop signal is handled before the save starts or after it is done,
     // never halfway. The folder is read here, under the lock, as the one
@@ -559,9 +587,18 @@ async function saveKit(dir, write) {
     if (made) removeMade(dir, made);
     // The new kit is written beside the earlier one before it takes its
     // place, so a replacing run needs room for both. A disk or quota that
-    // runs out is said plainly, and the earlier kit is untouched.
+    // runs out is said plainly, and the earlier kit is untouched. One that
+    // runs out before the folder was read here, at the lock, finds the
+    // earlier kit by reading it now.
     if (err.code === "ENOSPC" || err.code === "EDQUOT") {
-      throw new Error(`There is no room on the disk to write the new kit${earlier ? " beside the earlier one" : ""} in ${dir}, so no kit was made.${earlier ? " The earlier kit there is as it was." : ""}`);
+      let had = earlier;
+      try {
+        had = had || earlierKit(dir);
+      } catch {
+        // Not a kit: nothing to say about it.
+      }
+      const kept = had && !had.cut;
+      throw new Error(`There is no room on the disk to write the new kit${kept ? " beside the earlier one" : ""} in ${dir}, so no kit was made.${kept ? " The earlier kit there is as it was." : ""}`);
     }
     throw err;
   }

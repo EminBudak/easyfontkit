@@ -715,6 +715,45 @@ test("a leftover list of moves is never followed through a link, in its part fol
   }
 });
 
+test("a disk that runs out at the lock or while the folders are made leaves nothing behind and says so", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-nospace-"));
+  const { writeSync, mkdirSync } = fs;
+  const full = () => Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+  try {
+    // The lock is made, but its pid cannot be written.
+    fs.writeSync = () => {
+      fs.writeSync = writeSync;
+      throw full();
+    };
+    const fresh = path.join(parent, "fresh", "kit");
+    await assert.rejects(saveKit(fresh, () => assert.fail("no kit")), { message: `There is no room on the disk to write the new kit in ${fresh}, so no kit was made.` });
+    assert.equal(fs.existsSync(path.join(parent, "fresh")), false);
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    fs.writeSync = () => {
+      fs.writeSync = writeSync;
+      throw full();
+    };
+    await assert.rejects(saveKit(dir, () => assert.fail("no kit")), {
+      message: `There is no room on the disk to write the new kit beside the earlier one in ${dir}, so no kit was made. The earlier kit there is as it was.`,
+    });
+    assert.deepEqual(snapshot(dir), before);
+    // mkdir makes the first folder of a new path, then runs out.
+    const deep = path.join(parent, "deep", "er", "kit");
+    fs.mkdirSync = (...args) => {
+      fs.mkdirSync = mkdirSync;
+      mkdirSync(path.join(parent, "deep"));
+      throw full();
+    };
+    await assert.rejects(saveKit(deep, () => assert.fail("no kit")), { message: `There is no room on the disk to write the new kit in ${deep}, so no kit was made.` });
+    assert.deepEqual(fs.readdirSync(parent).sort(), ["kit"]);
+  } finally {
+    Object.assign(fs, { writeSync, mkdirSync });
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a leftover list of moves is put back even when its run's pid is in use again", async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-reuse-"));
   // A living process whose pid the killed run's part folder names.

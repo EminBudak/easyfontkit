@@ -13,7 +13,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { Worker } = require("node:worker_threads");
-const { makeFontKit, normalizeUrl, earlierKit, saveKit } = require("../skills/easyfontkit/scripts/lib/kit");
+const { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit } = require("../skills/easyfontkit/scripts/lib/kit");
 const { findChrome } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { fixture, interAs } = require("./helpers");
 
@@ -837,6 +837,24 @@ test("a disk that runs out at the lock or while the folders are made leaves noth
     assert.deepEqual(fs.readdirSync(parent).sort(), ["kit"]);
   } finally {
     Object.assign(fs, { writeSync, mkdirSync });
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("prepareDir, kept for code written against 0.1.1, refuses what makeFontKit refuses, makes a missing folder and leaves an earlier kit as it was", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-prepare-"));
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    prepareDir(dir);
+    assert.deepEqual(snapshot(dir), before);
+    const fresh = path.join(parent, "new", "kit");
+    prepareDir(fresh);
+    assert.deepEqual(fs.readdirSync(fresh), []);
+    fs.writeFileSync(path.join(fresh, "notes.txt"), "mine");
+    assert.throws(() => prepareDir(fresh), /not empty and holds no earlier font kit/);
+  } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });

@@ -212,6 +212,16 @@ function checkFolder(dir) {
   return earlierKit(dir);
 }
 
+// What 0.1.1 exported for code that requires the package, kept for it: a
+// folder the kit cannot be saved in is refused, as makeFontKit refuses it
+// before it reads the page, and a missing one is made. It no longer clears
+// an earlier kit there: a new kit takes its place only once it is whole.
+// makeFontKit itself does not use it.
+function prepareDir(dir) {
+  checkFolder(dir);
+  fs.mkdirSync(dir, { recursive: true });
+}
+
 // The names in the kit's files folder that the earlier kit does not list:
 // the user's own, which a new font file never takes. Compared without case,
 // as macOS and Windows disks compare them.
@@ -924,4 +934,4 @@ function stopRuns() {
   return stopped;
 }
 
-module.exports = { makeFontKit, normalizeUrl, earlierKit, saveKit, stopRuns, slug };
+module.exports = { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit, stopRuns, slug };

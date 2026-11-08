@@ -312,9 +312,11 @@ function takeOver(file, holder) {
 // first makes the lock file, with its pid in it, and the second waits for it
 // to go, at most LOCK_WAIT. The wait yields to the event loop, so a stop
 // signal that arrives during it ends the run before anything is written,
-// as it would at any other point. Gives the function that lets go of the
-// lock, which removes it only while it is still this run's.
-async function lock(dir) {
+// as it would at any other point. The folder itself can go during the
+// wait, as the run that made it removes it when its own save fails: then
+// remake() makes it again for this run. Gives the function that lets go of
+// the lock, which removes it only while it is still this run's.
+async function lock(dir, remake) {
   const file = path.join(dir, LOCK);
   const mine = String(process.pid);
   const unlock = () => {
@@ -324,13 +326,24 @@ async function lock(dir) {
       // Gone already, or no longer ours.
     }
   };
-  for (let waited = 0; ; waited += 50) {
-    let fd;
+  const take = () => {
     try {
-      fd = fs.openSync(file, "wx");
+      return fs.openSync(file, "wx");
     } catch (err) {
-      if (err.code !== "EEXIST") throw err;
+      if (err.code === "EEXIST") return undefined;
+      if (err.code !== "ENOENT") throw err;
     }
+    remake();
+    try {
+      return fs.openSync(file, "wx");
+    } catch (err) {
+      // Taken, or gone again: tried again after the pause.
+      if (err.code === "EEXIST" || err.code === "ENOENT") return undefined;
+      throw err;
+    }
+  };
+  for (let waited = 0; ; waited += 50) {
+    const fd = take();
     if (fd !== undefined) {
       try {
         fs.writeSync(fd, mine);
@@ -584,18 +597,23 @@ async function saveKit(dir, write) {
     // as on a full disk, reports nothing, so the first folder it would make
     // is found before.
     const target = path.resolve(dir);
-    const missing = firstMissing(target);
-    try {
-      made = fs.mkdirSync(target, { recursive: true });
-    } catch (err) {
-      made = missing;
-      throw err;
-    }
+    // Made again, and then this run's, when it goes while this run waits
+    // for the lock.
+    const makeFolder = () => {
+      const missing = firstMissing(target);
+      try {
+        made = made || fs.mkdirSync(target, { recursive: true });
+      } catch (err) {
+        made = made || missing;
+        throw err;
+      }
+    };
+    makeFolder();
     // The wait yields to the event loop; the rest runs without a pause, so a
     // stop signal is handled before the save starts or after it is done,
     // never halfway. The folder is read here, under the lock, as the one
     // read before the page may be out of date now.
-    unlock = await lock(dir);
+    unlock = await lock(dir, makeFolder);
     putBack(dir);
     earlier = earlierKit(dir);
     part = makePart(dir);

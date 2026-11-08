@@ -539,6 +539,43 @@ test("a run still saving into the folder is waited for, and a lock a killed run 
   }
 });
 
+test("a run that waits for another run's lock makes the folder again when that run fails and removes it, and the folder is then its own", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-gone-"));
+  // The other run, still going.
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], { stdio: "ignore" });
+  try {
+    for (const fails of [false, true]) {
+      // The other run made the new folder and holds its lock while this run
+      // waits for it.
+      const dir = path.join(parent, "new", "kit");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, ".easyfontkit-lock"), String(other.pid));
+      const saving = saveKit(dir, (part) => {
+        if (fails) throw new Error("no kit");
+        newKitIn(part, ["inter-400.woff2"]);
+      });
+      await sleep(200);
+      // Its save fails: it lets go of the lock and removes the folders it made.
+      fs.rmSync(path.join(dir, ".easyfontkit-lock"));
+      fs.rmdirSync(dir);
+      fs.rmdirSync(path.join(parent, "new"));
+      if (!fails) {
+        await saving;
+        assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
+        assert.deepEqual(fs.readdirSync(path.join(dir, "files")), ["inter-400.woff2"]);
+        fs.rmSync(path.join(parent, "new"), { recursive: true });
+      } else {
+        // This run made them again, so its own failure removes them.
+        await assert.rejects(saving, /no kit/);
+        assert.deepEqual(fs.readdirSync(parent), []);
+      }
+    }
+  } finally {
+    other.kill();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it waits for another run's lock leaves the folder as it was and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({ "/": { body: `<!doctype html><html><head><title>Fast</title></head><body><h1>Fast</h1><p>Loads at once.</p></body></html>` } });
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-wait-"));

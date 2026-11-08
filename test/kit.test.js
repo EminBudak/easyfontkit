@@ -166,14 +166,14 @@ test("addresses: bare domains get https, anything else is refused", () => {
   assert.throws(() => normalizeUrl(""), /Give a website address/);
 });
 
-test("never writes into a folder that holds someone else's files, and reads an earlier kit without changing it", () => {
+test("never writes into a folder that holds someone else's files, and reads an earlier kit without changing it", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-dir-"));
   try {
     assert.equal(earlierKit(path.join(dir, "missing")), null);
     assert.equal(earlierKit(dir), null);
     fs.writeFileSync(path.join(dir, "notes.txt"), "mine");
     assert.throws(() => earlierKit(dir), /not empty and holds no earlier font kit/);
-    assert.throws(() => saveKit(dir, () => assert.fail("nothing is written")), /not empty and holds no earlier font kit/);
+    await assert.rejects(saveKit(dir, () => assert.fail("nothing is written")), /not empty and holds no earlier font kit/);
     assert.deepEqual(fs.readdirSync(dir), ["notes.txt"]);
     // An earlier kit's font files, by name only and only as files: a folder
     // under a name it lists is not the kit's.
@@ -207,7 +207,7 @@ test("never writes into a folder that holds someone else's files, and reads an e
   }
 });
 
-test("a run that fails leaves the earlier kit exactly as it was, and a first run that fails makes no folder", () => {
+test("a run that fails leaves the earlier kit exactly as it was, and a first run that fails makes no folder", async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-keep-"));
   const env = { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") };
   try {
@@ -222,7 +222,7 @@ test("a run that fails leaves the earlier kit exactly as it was, and a first run
     assert.equal(spawnSync(process.execPath, [CLI, "acme.example", "--out", deep], { env }).status, 1);
     assert.deepEqual(fs.readdirSync(parent).sort(), ["kit"]);
     // A save that fails removes the folders made for it, too.
-    assert.throws(() => saveKit(deep, () => assert.fail("no kit")), /no kit/);
+    await assert.rejects(saveKit(deep, () => assert.fail("no kit")), /no kit/);
     assert.deepEqual(fs.readdirSync(parent).sort(), ["kit"]);
   } finally {
     fs.rmSync(parent, { recursive: true, force: true });
@@ -264,7 +264,7 @@ test("a folder the kit cannot be saved in is refused before the browser starts",
   }
 });
 
-test("the new kit goes in only whole: a step that fails puts the earlier kit back", () => {
+test("the new kit goes in only whole: a step that fails puts the earlier kit back", async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-swap-"));
   try {
     const dir = path.join(parent, "kit");
@@ -273,7 +273,7 @@ test("the new kit goes in only whole: a step that fails puts the earlier kit bac
     // shows the moves in its own.
     const before = snapshot(dir, { folderTimes: false });
     let inTheWay;
-    assert.throws(
+    await assert.rejects(
       () =>
         saveKit(dir, (part, own) => {
           assert.deepEqual(own, ["notes.txt"]);
@@ -334,27 +334,29 @@ fs.openSync = (file, ...rest) => {
   }
 };
 const { saveKit } = require(kitjs);
-let result = "ok";
-try {
-  saveKit(dir, (part) => {
-    fs.writeFileSync(path.join(part, "fonts.json"), JSON.stringify({ version: 1, generator: "easyfontkit " + tag, families: [{ files: names.map((name) => ({ file: "files/" + name })) }] }));
-    fs.writeFileSync(path.join(part, "FONTS.md"), tag);
-    fs.writeFileSync(path.join(part, "fonts.css"), tag);
-    fs.mkdirSync(path.join(part, "files"));
-    for (const name of names) fs.writeFileSync(path.join(part, "files", name), tag);
-    Atomics.add(shared, 3, 1);
-    while (Atomics.load(shared, 3) < 2 && !free()) Atomics.wait(shared, 3, Atomics.load(shared, 3), 5);
-    fs.lstatSync = (...args) => turn(() => lstatSync(...args));
-    fs.renameSync = (...args) => turn(() => renameSync(...args));
-  });
-} catch (err) {
-  result = err.message;
-}
-fs.lstatSync = lstatSync;
-fs.renameSync = renameSync;
-Atomics.store(shared, 1 + id, 1);
-Atomics.notify(shared, 0);
-parentPort.postMessage(result);
+(async () => {
+  let result = "ok";
+  try {
+    await saveKit(dir, (part) => {
+      fs.writeFileSync(path.join(part, "fonts.json"), JSON.stringify({ version: 1, generator: "easyfontkit " + tag, families: [{ files: names.map((name) => ({ file: "files/" + name })) }] }));
+      fs.writeFileSync(path.join(part, "FONTS.md"), tag);
+      fs.writeFileSync(path.join(part, "fonts.css"), tag);
+      fs.mkdirSync(path.join(part, "files"));
+      for (const name of names) fs.writeFileSync(path.join(part, "files", name), tag);
+      Atomics.add(shared, 3, 1);
+      while (Atomics.load(shared, 3) < 2 && !free()) Atomics.wait(shared, 3, Atomics.load(shared, 3), 5);
+      fs.lstatSync = (...args) => turn(() => lstatSync(...args));
+      fs.renameSync = (...args) => turn(() => renameSync(...args));
+    });
+  } catch (err) {
+    result = err.message;
+  }
+  fs.lstatSync = lstatSync;
+  fs.renameSync = renameSync;
+  Atomics.store(shared, 1 + id, 1);
+  Atomics.notify(shared, 0);
+  parentPort.postMessage(result);
+})();
 `;
 
 test("two runs that save into one folder at the same moment take turns: both end well, and the folder holds the second one's kit whole", async () => {
@@ -405,13 +407,13 @@ test("a run still saving into the folder is waited for, and a lock a killed run 
     const holder = spawn(process.execPath, ["-e", `const fs = require("fs"); fs.writeFileSync(${JSON.stringify(lockFile)}, String(process.pid), { flag: "wx" }); console.log("locked"); setTimeout(() => fs.rmSync(${JSON.stringify(lockFile)}), 400);`], { stdio: ["ignore", "pipe", "inherit"] });
     await new Promise((resolve) => holder.stdout.once("data", resolve));
     const started = Date.now();
-    saveKit(dir, (part) => newKitIn(part, ["inter-400.woff2"]));
+    await saveKit(dir, (part) => newKitIn(part, ["inter-400.woff2"]));
     assert.ok(Date.now() - started >= 250, `saved after ${Date.now() - started} ms, while the other run held the lock`);
     assert.equal(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8"), "new\n");
     // A lock whose process has ended.
     const ended = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
     fs.writeFileSync(lockFile, ended);
-    saveKit(dir, (part) => newKitIn(part, ["inter-700.woff2"]));
+    await saveKit(dir, (part) => newKitIn(part, ["inter-700.woff2"]));
     assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
     assert.deepEqual(fs.readdirSync(path.join(dir, "files")).sort(), ["inter-700.woff2", "notes.txt"]);
   } finally {
@@ -419,7 +421,46 @@ test("a run still saving into the folder is waited for, and a lock a killed run 
   }
 });
 
-test("a run killed outright while it moves its kit in leaves the earlier kit for the next run to put back", { skip: noSignals }, () => {
+test("a run stopped while it waits for another run's lock leaves the folder as it was and ends by the signal", { skip: noBrowser || noSignals }, async () => {
+  const { server, origin } = await serve({ "/": { body: `<!doctype html><html><head><title>Fast</title></head><body><h1>Fast</h1><p>Loads at once.</p></body></html>` } });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-wait-"));
+  const dir = path.join(parent, "kit");
+  let child;
+  let holder;
+  try {
+    earlierKitIn(dir);
+    // Another process holds the folder's lock while the run waits for it.
+    const lockFile = path.join(dir, ".easyfontkit-lock");
+    holder = spawn(process.execPath, ["-e", `const fs = require("fs"); fs.writeFileSync(${JSON.stringify(lockFile)}, String(process.pid), { flag: "wx" }); console.log("held"); setTimeout(() => {}, 30_000);`], { stdio: ["ignore", "pipe", "inherit"] });
+    await new Promise((resolve) => holder.stdout.once("data", resolve));
+    const before = snapshot(dir);
+    // In a process group of its own, as makersmcp runs a kit. The run reads
+    // the page, then waits for the lock; the stop reaches it during the wait.
+    child = spawn(process.execPath, [CLI, origin, "--out", dir], { detached: true, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    const ended = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+    const waiting = new Promise((resolve) => child.stderr.on("data", (chunk) => /Reading the font files/.test((stderr += chunk)) && resolve()));
+    await Promise.race([waiting, ended]);
+    assert.match(stderr, /Reading the font files/, stderr);
+    await sleep(200);
+    process.kill(-child.pid, "SIGTERM");
+    const { signal } = await ended;
+    assert.equal(signal, "SIGTERM");
+    assert.ok(stderr.endsWith(`\neasyfontkit: stopped by SIGTERM, so no kit was made. The earlier kit in ${dir} is as it was.\n`), stderr);
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // Nothing of its group is left.
+    }
+    if (holder) holder.kill("SIGKILL");
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
+test("a run killed outright while it moves its kit in leaves the earlier kit for the next run to put back", { skip: noSignals }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-killed-"));
   try {
     // Killed with SIGKILL right after its KILL_AT-th rename.
@@ -433,7 +474,7 @@ test("a run killed outright while it moves its kit in leaves the earlier kit for
          fs.writeFileSync(path.join(part, "fonts.json"), JSON.stringify({ version: 1, generator: "easyfontkit killed", families: [{ files: [{ file: "files/inter-400.woff2" }, { file: "files/acme-400.woff2" }] }] }));
          fs.writeFileSync(path.join(part, "FONTS.md"), "killed"); fs.writeFileSync(path.join(part, "fonts.css"), "killed");
          fs.mkdirSync(path.join(part, "files")); for (const name of ["inter-400.woff2", "acme-400.woff2"]) fs.writeFileSync(path.join(part, "files", name), "killed");
-       });`,
+       }).catch((err) => { process.stderr.write(String((err && err.message) || err)); process.exit(1); });`,
     );
     for (const first of [false, true]) {
       let k = 1;
@@ -449,10 +490,10 @@ test("a run killed outright while it moves its kit in leaves the earlier kit for
         // The next run puts back what the killed one had moved before its
         // own kit is written: here that fails, so the folder is the earlier
         // kit exactly, or empty when there was none.
-        assert.throws(() => saveKit(dir, () => assert.fail("no kit")), /no kit/, `killed after rename ${k}`);
+        await assert.rejects(saveKit(dir, () => assert.fail("no kit")), /no kit/, `killed after rename ${k}`);
         assert.deepEqual(snapshot(dir, { folderTimes: false }), before || [], `killed after rename ${k}`);
         // And one that ends well leaves its own kit whole.
-        saveKit(dir, (part) => newKitIn(part, ["inter-400.woff2"]));
+        await saveKit(dir, (part) => newKitIn(part, ["inter-400.woff2"]));
         assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"], `killed after rename ${k}`);
         assert.deepEqual(fs.readdirSync(path.join(dir, "files")).sort(), first ? ["inter-400.woff2"] : ["inter-400.woff2", "notes.txt"]);
       }
@@ -470,7 +511,7 @@ test("a run killed outright while it moves its kit in leaves the earlier kit for
     }
     fs.writeFileSync(path.join(dir, "FONTS.md"), "edited");
     const part = fs.readdirSync(dir).find((name) => name.startsWith(".easyfontkit-part-"));
-    assert.throws(() => saveKit(dir, () => assert.fail("no kit")), {
+    await assert.rejects(saveKit(dir, () => assert.fail("no kit")), {
       message: `A run killed while it put its kit in ${dir} left the earlier kit there half moved, and it could not be put back together (FONTS.md is taken), so no kit was made. The earlier kit's files that could not go back are in ${path.join(dir, part, "earlier")}; move them back by hand, or pick another folder with --out.`,
     });
     assert.equal(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8"), "edited");
@@ -480,7 +521,67 @@ test("a run killed outright while it moves its kit in leaves the earlier kit for
   }
 });
 
-test("a run that ends well leaves its kit, the user's files, and the part folders of runs still going", () => {
+test("a planted list of moves, or a files that is a link, cannot send a run outside its folder", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-plant-"));
+  try {
+    const outside = path.join(parent, "outside");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "keep.txt"), "mine");
+    // A list of moves that points outside the folder, or at any name other
+    // than the ones a run writes, is not the kit's own: it is refused, and
+    // nothing it names is moved or removed.
+    const dir = path.join(parent, "kit");
+    const own = ".easyfontkit-part-999999999-deadbeef";
+    fs.mkdirSync(path.join(dir, own, "payload"), { recursive: true });
+    fs.writeFileSync(path.join(dir, own, "payload", "x.txt"), "planted");
+    fs.writeFileSync(path.join(dir, own, "moves.json"), JSON.stringify([["../escaped", `${own}/payload`, { names: ["x.txt"] }]]));
+    await assert.rejects(saveKit(dir, () => assert.fail("no kit")), /could not be put back together/);
+    assert.equal(fs.existsSync(path.join(parent, "escaped")), false, "nothing was moved out of the folder");
+    assert.deepEqual(fs.readdirSync(outside).sort(), ["keep.txt"]);
+    // A files that is a link is refused before the folder is read, so the
+    // kit never follows it to delete or write the files it points at.
+    const linked = path.join(parent, "linked");
+    fs.mkdirSync(linked);
+    fs.writeFileSync(path.join(linked, "fonts.json"), JSON.stringify({ version: 1, generator: "easyfontkit 0.1.1", families: [{ files: [{ file: "files/keep.txt" }] }] }));
+    fs.writeFileSync(path.join(linked, "FONTS.md"), "old");
+    fs.writeFileSync(path.join(linked, "fonts.css"), "old");
+    fs.symlinkSync(outside, path.join(linked, "files"));
+    assert.throws(() => earlierKit(linked), /files is not a folder/);
+    await assert.rejects(saveKit(linked, () => assert.fail("no kit")), /files is not a folder/);
+    assert.deepEqual(fs.readdirSync(outside).sort(), ["keep.txt"]);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a leftover list of moves is put back even when its run's pid is in use again", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-reuse-"));
+  // A living process whose pid the killed run's part folder names.
+  const going = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+  try {
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const before = snapshot(dir, { folderTimes: false });
+    // A kit half moved in, then killed right after its first move: the
+    // earlier fonts.json went aside. The part names a pid that now belongs
+    // to another, living process.
+    const own = `.easyfontkit-part-${going.pid}-deadbeef`;
+    fs.mkdirSync(path.join(dir, own, "earlier"), { recursive: true });
+    fs.renameSync(path.join(dir, "fonts.json"), path.join(dir, own, "earlier", "fonts.json"));
+    const st = fs.lstatSync(path.join(dir, own, "earlier", "fonts.json"));
+    fs.writeFileSync(path.join(dir, own, "moves.json"), JSON.stringify([["fonts.json", `${own}/earlier/fonts.json`, { size: st.size, mtimeMs: st.mtimeMs }]]));
+    assert.equal(gone(going.pid), false, "the pid is in use");
+    // The next run puts the earlier kit back first, whatever the pid says;
+    // here its own write fails, so the folder is the earlier kit exactly.
+    await assert.rejects(saveKit(dir, () => assert.fail("no kit")), /no kit/);
+    assert.deepEqual(snapshot(dir, { folderTimes: false }), before, "the earlier kit is whole again");
+  } finally {
+    going.kill();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a run that ends well leaves its kit, the user's files, and the part folders of runs still going", async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-tidy-"));
   const going = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
   try {
@@ -495,7 +596,7 @@ test("a run that ends well leaves its kit, the user's files, and the part folder
     fs.mkdirSync(path.join(dir, live));
     // A file of the user's under the name a new font file would take.
     fs.writeFileSync(path.join(dir, "files", "Inter-400.woff2"), "mine");
-    saveKit(dir, (part, own) => {
+    await saveKit(dir, (part, own) => {
       assert.deepEqual(own.sort(), ["Inter-400.woff2", "notes.txt"]);
       newKitIn(part, ["inter-400-2.woff2"]);
     });
@@ -509,12 +610,12 @@ test("a run that ends well leaves its kit, the user's files, and the part folder
   }
 });
 
-test("the part folder is made with mkdir, so the access a default ACL gives others reaches it", { skip: process.platform === "win32" && "no modes on Windows" }, () => {
+test("the part folder is made with mkdir, so the access a default ACL gives others reaches it", { skip: process.platform === "win32" && "no modes on Windows" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-mode-"));
   const umask = process.umask(0o027);
   try {
     let mode = 0;
-    saveKit(path.join(parent, "kit"), (part) => {
+    await saveKit(path.join(parent, "kit"), (part) => {
       mode = fs.statSync(part).mode & 0o777;
       newKitIn(part);
     });

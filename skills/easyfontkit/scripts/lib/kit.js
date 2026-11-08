@@ -882,6 +882,13 @@ function notOpened(asked, { url, error }) {
   return `${where} could not be opened${error ? ` (${error})` : ""}, so no kit was made. Check the page in a normal browser.`;
 }
 
+// A page that moved itself on to about:blank shows nothing, and the font
+// files it had loaded before it went are not the fonts of a page.
+function wentBlank(asked, { pageUrl, left }) {
+  const where = bare(pageUrl) !== bare(asked) ? `${asked} led to ${pageUrl}, which` : asked;
+  return `${where} moved itself on to ${left}, an empty page, so no kit was made. Check the page in a normal browser.`;
+}
+
 // The runs going on in this process, for a stop signal, and whether one has
 // come: a run waiting for another to let go of a folder's lock gives up at
 // once when it has, so the folder is left as it was.
@@ -915,6 +922,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     }
     if (scan.answer.status >= 400) throw new Error(errorPage(url, scan.answer));
     if (scan.failed) throw new Error(notOpened(url, scan.failed));
+    if (scan.left) throw new Error(wentBlank(url, scan));
     if (!Object.keys(scan.roles).length && !scan.files.length) {
       throw new Error(`${scan.pageUrl} showed no text and loaded no fonts, so nothing was read. The site may turn away headless browsers; check the page in a normal browser.`);
     }

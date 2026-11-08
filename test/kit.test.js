@@ -1447,7 +1447,7 @@ test("a bot check served instead of the page fails with a reason and leaves noth
   }
 });
 
-test("a page that moves itself on is read where it ends, and one that ends on an address that cannot be opened is refused, naming that address, and the earlier kit stays", { skip: noBrowser }, async () => {
+test("a page that moves itself on is read where it ends, and one that ends on an address that cannot be opened or on about:blank is refused, naming the address, and the earlier kit stays", { skip: noBrowser }, async () => {
   // A port nothing listens on: one a server had, once it has closed.
   const closed = await new Promise((resolve) => {
     const probe = http.createServer().listen(0, "127.0.0.1", () => {
@@ -1461,7 +1461,15 @@ test("a page that moves itself on is read where it ends, and one that ends on an
     "/meta": { body: page(`<meta http-equiv="refresh" content="0;url=${dead}">`, "") },
     "/script": { body: page("", `<script>setTimeout(() => (location.href = ${JSON.stringify(dead)}), 50)</script>`) },
     "/on": { body: page("", `<script>setTimeout(() => (location.href = "/next"), 50)</script>`) },
-    "/blank": { body: page("", `<script>setTimeout(() => (location.href = "about:blank"), 50)</script>`) },
+    // On to about:blank at the load event, and a moment after a font has come.
+    "/blank": { body: page("", `<script>addEventListener("load", () => (location.href = "about:blank"))</script>`) },
+    "/blank-font": {
+      body: page(
+        `<style>@font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); } p { font-family: "Body Sans", sans-serif; }</style>`,
+        `<script>document.fonts.ready.then(() => setTimeout(() => (location.href = "about:blank"), 300))</script>`,
+      ),
+    },
+    "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
     // Code only here, so a kit with code was read from this page.
     "/next": { body: `<!doctype html><html><head><title>Next</title></head><body><h1>Next</h1><p>The page the other one leads to.</p><pre><code>npx acme init</code></pre></body></html>` },
   });
@@ -1480,8 +1488,14 @@ test("a page that moves itself on is read where it ends, and one that ends on an
     assert.equal(kit.url, `${origin}/next`);
     assert.ok(kit.roles.code, "the code of the page it moved to was read");
     assert.match(fs.readFileSync(path.join(parent, "on", "FONTS.md"), "utf8"), new RegExp(`^Read from ${origin}/next on `, "m"));
-    // A blank page has no web address: the run keeps the one it had.
-    await assert.rejects(makeFontKit(`${origin}/blank`, { dir: path.join(parent, "blank"), timeLimit: 60_000 }), { message: `${origin}/blank showed no text and loaded no fonts, so nothing was read. The site may turn away headless browsers; check the page in a normal browser.` });
+    // A page that moves itself on to about:blank shows nothing, also when it
+    // loaded a font first, and the message names the address asked.
+    for (const route of ["/blank", "/blank-font"]) {
+      await assert.rejects(makeFontKit(`${origin}${route}`, { dir, timeLimit: 60_000 }), {
+        message: `${origin}${route} moved itself on to about:blank, an empty page, so no kit was made. Check the page in a normal browser.`,
+      });
+      assert.deepEqual(snapshot(dir), before, route);
+    }
   } finally {
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });

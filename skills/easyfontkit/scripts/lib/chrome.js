@@ -281,7 +281,8 @@ async function openPage(base, { width, height }) {
 // the process alive for the rest of the 30 s after the kit is done. The
 // server gets the run's time to answer, less a minute for reading the
 // page: 30 s at least, and never more than the run has left. Returns the
-// address the tab ended on, after any redirects.
+// address the tab ended on, after any redirects, or the one asked when the
+// tab has moved on to one that is not a web address, like about:blank.
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   const answer = Math.max(1_000, Math.min(Math.max(30_000, timeLeft() - 60_000), timeLeft()));
@@ -297,7 +298,8 @@ async function navigate(cdp, url) {
   const late = new Promise((resolve) => (timer = setTimeout(resolve, Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))));
   await Promise.race([loaded, late]);
   clearTimeout(timer);
-  return (await currentAddress(cdp)) || url;
+  const now = await currentAddress(cdp);
+  return /^https?:/i.test(now) ? now : url;
 }
 
 // The address the tab shows now, from its history: with the #fragment, and

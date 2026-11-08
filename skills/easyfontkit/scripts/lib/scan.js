@@ -323,9 +323,10 @@ async function readFiles(fonts, rules, faces) {
 // Opens the page and reads it: the faces of each role, every font file it
 // loaded, its @font-face rules, the web fonts Chrome reports as loaded, the
 // families document.fonts holds, the status and address the server
-// answered the page with (answer), and the address the page moved on to
-// that could not be opened (failed). pageUrl is the address of the page the
-// roles were read from.
+// answered the page with (answer), the address the page moved on to that
+// could not be opened (failed), and about:blank or the like when the page
+// moved itself on to that (left). pageUrl is the address of the page the
+// roles were read from, or the last web address the tab had.
 async function scanPage(cdp, url, log = () => {}) {
   const recorded = record(cdp);
   await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: 50_000_000 });
@@ -341,7 +342,7 @@ async function scanPage(cdp, url, log = () => {}) {
     // An error status with no page of its own makes Chrome show its own
     // error page and give a net:: code, which says less than the status.
     if (recorded.page.status < 400) throw err;
-    return { pageUrl: url, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [] };
+    return { pageUrl: url, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [] };
   }
   await fontsReady(cdp);
   log("Reading the page");
@@ -351,11 +352,13 @@ async function scanPage(cdp, url, log = () => {}) {
   const title = String((await evaluate(cdp, "document.title")) || "").trim();
   const roles = await readRoles(cdp);
   // A script or a meta refresh can have moved the tab on since the load
-  // event navigate() waited for: the page read is the one it shows now. A
-  // page that has moved on to about:blank or the like has no web address of
-  // its own, and keeps the one it had.
+  // event navigate() waited for: the page read is the one it shows now. One
+  // that has moved on to about:blank shows nothing, and the roles were read
+  // from that: left says where it went, and pageUrl stays the last web
+  // address the tab had.
   const now = await currentAddress(cdp);
   if (/^https?:/i.test(now)) pageUrl = now;
+  const left = /^about:/i.test(now) ? now : "";
   const loaded = (await evaluate(cdp, "[...document.fonts].filter((f) => f.status === 'loaded').map((f) => ({ family: f.family, weight: f.weight, style: f.style }))")) || [];
   const rules = await readRules(cdp, recorded.sheets, pageUrl);
   const faces = recorded.faces.map((face) => ({
@@ -372,7 +375,7 @@ async function scanPage(cdp, url, log = () => {}) {
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, answer, failed, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
+  return { pageUrl, answer, failed, left, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
 }
 
 module.exports = { scanPage, fontFaceRules, decodeDataUrl };

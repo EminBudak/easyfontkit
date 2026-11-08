@@ -15,9 +15,10 @@ closest free font for each one that is not free. FONTS.md is for people
 and coding agents, fonts.css for pages, fonts.json for tools.
 
 A page that answers with an error status, like a 404, or that ends on an
-address that cannot be opened gets no kit. The folder has to be new, empty
-or hold an earlier kit, which a new run replaces once the new kit is
-whole. A run that fails or is stopped leaves the folder as it was.
+address that cannot be opened or on about:blank gets no kit. The folder
+has to be new, empty or hold an earlier kit, which a new run replaces once
+the new kit is whole. A run that fails or is stopped leaves the folder as
+it was.
 
 Options:
   --out <dir>      where to save (default: ./easyfontkit-<host>)

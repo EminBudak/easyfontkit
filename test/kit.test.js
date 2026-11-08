@@ -238,6 +238,10 @@ test("a folder the kit cannot be saved in is refused before the browser starts",
     const locked = path.join(parent, "locked");
     fs.mkdirSync(locked);
     fs.chmodSync(locked, 0o555);
+    // A folder this user may not enter, found on the way up to --out.
+    const noenter = path.join(parent, "noenter");
+    fs.mkdirSync(noenter);
+    fs.chmodSync(noenter, 0o600);
     const file = path.join(parent, "notes.txt");
     fs.writeFileSync(file, "mine");
     const kit = path.join(parent, "kit");
@@ -248,6 +252,7 @@ test("a folder the kit cannot be saved in is refused before the browser starts",
     const refused = {
       [path.join(locked, "kit")]: `This user may not write in ${locked}, so ${path.join(locked, "kit")} cannot be made there. Pick another folder with --out.`,
       [locked]: `This user may not write in ${locked}. Pick another folder with --out.`,
+      [path.join(noenter, "kit")]: `This user may not write in ${noenter}, so ${path.join(noenter, "kit")} cannot be made there. Pick another folder with --out.`,
       [file]: `${file} is not a folder. Pick another folder with --out.`,
       [path.join(file, "kit")]: `${file} is not a folder, so ${path.join(file, "kit")} cannot be made there. Pick another folder with --out.`,
       [kit]: `No kit can be saved in ${kit}: ${path.join(kit, "FONTS.md")} is not a file. Move it away, or pick another folder with --out.`,
@@ -260,6 +265,29 @@ test("a folder the kit cannot be saved in is refused before the browser starts",
     assert.deepEqual(snapshot(parent), before);
   } finally {
     fs.chmodSync(path.join(parent, "locked"), 0o755);
+    fs.chmodSync(path.join(parent, "noenter"), 0o755);
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("an --out that is a broken link or a link loop is refused before the page is read", { skip: process.platform === "win32" && "no symlinks of this kind on Windows" }, () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-link-"));
+  const env = { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") };
+  const cli = (out) => spawnSync(process.execPath, [CLI, "acme.example", "--out", out], { encoding: "utf8", env });
+  try {
+    // A link to a folder that is not there.
+    const broken = path.join(parent, "broken");
+    fs.symlinkSync(path.join(parent, "nowhere", "kit"), broken);
+    const run1 = cli(broken);
+    assert.equal(run1.status, 1);
+    assert.equal(run1.stderr, `easyfontkit: ${broken} is a link to a folder that is not there. Pick another folder with --out.\n`);
+    // A loop of links on the way to --out.
+    fs.symlinkSync(path.join(parent, "b"), path.join(parent, "a"));
+    fs.symlinkSync(path.join(parent, "a"), path.join(parent, "b"));
+    const run2 = cli(path.join(parent, "a", "kit"));
+    assert.equal(run2.status, 1);
+    assert.equal(run2.stderr, `easyfontkit: ${path.join(parent, "a", "kit")} is not a folder this run can use. Pick another folder with --out.\n`);
+  } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });

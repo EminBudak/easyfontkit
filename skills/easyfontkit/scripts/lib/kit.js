@@ -176,6 +176,24 @@ function earlierKit(dir) {
 // make it or write in it. Gives what earlierKit gives.
 function checkFolder(dir) {
   const target = path.resolve(dir);
+  const shownAt = (at) => (at === target ? dir : path.isAbsolute(dir) ? at : path.relative(process.cwd(), at) || ".");
+  const thenAt = (at) => (at === target ? "" : `, so ${dir} cannot be made there`);
+  // A link whose target is missing passes the climb below (statSync follows
+  // it, finds nothing, and the parent is checked instead), so mkdir fails
+  // only once the page has been read. Refuse it now.
+  let link;
+  try {
+    link = fs.lstatSync(target).isSymbolicLink();
+  } catch {
+    link = false;
+  }
+  if (link) {
+    try {
+      fs.statSync(target);
+    } catch (err) {
+      if (err.code === "ENOENT") throw new Error(`${dir} is a link to a folder that is not there. Pick another folder with --out.`);
+    }
+  }
   let at = target;
   let stat;
   for (;;) {
@@ -183,18 +201,20 @@ function checkFolder(dir) {
       stat = fs.statSync(at);
       break;
     } catch (err) {
-      // ENOTDIR: a file on the way, found one level up.
-      if ((err.code !== "ENOENT" && err.code !== "ENOTDIR") || path.dirname(at) === at) throw err;
+      // A path this run cannot use at all: a link loop, a name too long.
+      if (err.code === "ELOOP" || err.code === "ENAMETOOLONG") throw new Error(`${dir} is not a folder this run can use. Pick another folder with --out.`);
+      // ENOTDIR: a file on the way. EACCES/EPERM: a folder on the way this
+      // user may not enter. Both are found one level up, where the message
+      // is plain, instead of as a raw system error later.
+      if (!["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(err.code) || path.dirname(at) === at) throw err;
       at = path.dirname(at);
     }
   }
-  const shown = at === target ? dir : path.isAbsolute(dir) ? at : path.relative(process.cwd(), at) || ".";
-  const then = at === target ? "" : `, so ${dir} cannot be made there`;
-  if (!stat.isDirectory()) throw new Error(`${shown} is not a folder${then}. Pick another folder with --out.`);
+  if (!stat.isDirectory()) throw new Error(`${shownAt(at)} is not a folder${thenAt(at)}. Pick another folder with --out.`);
   try {
     fs.accessSync(at, fs.constants.W_OK | fs.constants.X_OK | (at === target ? fs.constants.R_OK : 0));
   } catch {
-    throw new Error(`This user may not write in ${shown}${then}. Pick another folder with --out.`);
+    throw new Error(`This user may not write in ${shownAt(at)}${thenAt(at)}. Pick another folder with --out.`);
   }
   return earlierKit(dir);
 }

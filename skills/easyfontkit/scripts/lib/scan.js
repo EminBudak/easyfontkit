@@ -351,8 +351,11 @@ async function scanPage(cdp, url, log = () => {}) {
   const title = String((await evaluate(cdp, "document.title")) || "").trim();
   const roles = await readRoles(cdp);
   // A script or a meta refresh can have moved the tab on since the load
-  // event navigate() waited for: the page read is the one it shows now.
-  pageUrl = (await currentAddress(cdp)) || pageUrl;
+  // event navigate() waited for: the page read is the one it shows now. A
+  // page that has moved on to about:blank or the like has no web address of
+  // its own, and keeps the one it had.
+  const now = await currentAddress(cdp);
+  if (/^https?:/i.test(now)) pageUrl = now;
   const loaded = (await evaluate(cdp, "[...document.fonts].filter((f) => f.status === 'loaded').map((f) => ({ family: f.family, weight: f.weight, style: f.style }))")) || [];
   const rules = await readRules(cdp, recorded.sheets, pageUrl);
   const faces = recorded.faces.map((face) => ({

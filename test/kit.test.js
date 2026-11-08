@@ -1454,6 +1454,7 @@ test("a page that moves itself on is read where it ends, and one that ends on an
     "/meta": { body: page(`<meta http-equiv="refresh" content="0;url=${dead}">`, "") },
     "/script": { body: page("", `<script>setTimeout(() => (location.href = ${JSON.stringify(dead)}), 50)</script>`) },
     "/on": { body: page("", `<script>setTimeout(() => (location.href = "/next"), 50)</script>`) },
+    "/blank": { body: page("", `<script>setTimeout(() => (location.href = "about:blank"), 50)</script>`) },
     // Code only here, so a kit with code was read from this page.
     "/next": { body: `<!doctype html><html><head><title>Next</title></head><body><h1>Next</h1><p>The page the other one leads to.</p><pre><code>npx acme init</code></pre></body></html>` },
   });
@@ -1472,6 +1473,8 @@ test("a page that moves itself on is read where it ends, and one that ends on an
     assert.equal(kit.url, `${origin}/next`);
     assert.ok(kit.roles.code, "the code of the page it moved to was read");
     assert.match(fs.readFileSync(path.join(parent, "on", "FONTS.md"), "utf8"), new RegExp(`^Read from ${origin}/next on `, "m"));
+    // A blank page has no web address: the run keeps the one it had.
+    await assert.rejects(makeFontKit(`${origin}/blank`, { dir: path.join(parent, "blank"), timeLimit: 60_000 }), { message: `${origin}/blank showed no text and loaded no fonts, so nothing was read. The site may turn away headless browsers; check the page in a normal browser.` });
   } finally {
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });

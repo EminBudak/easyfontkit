@@ -88,6 +88,15 @@ function removeProfile({ profile, singleton }, maxRetries, retryDelay) {
   }
 }
 
+// Chrome on Linux takes its temp folder from TMPDIR. There it is given the
+// profile, so what Chrome leaves in its temp folder when it is closed soon
+// after it starts, like the empty folder of a download it had begun, goes
+// with the profile. Chrome makes its socket in that folder too, and a
+// socket's path may not pass 107 bytes: the socket's own folder takes up to
+// 32 more, and /SingletonSocket 16. With a longer profile path, Chrome keeps
+// the temp folder it would have had.
+const ownTemp = (profile) => process.platform !== "darwin" && process.platform !== "win32" && Buffer.byteLength(profile) + 1 + 32 + 16 <= 107;
+
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
@@ -116,7 +125,7 @@ async function launch({ width, height }) {
       ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
       "about:blank",
     ],
-    { stdio: "ignore" },
+    { stdio: "ignore", env: ownTemp(profile) ? { ...process.env, TMPDIR: profile } : process.env },
   );
   let exited = false;
   child.on("exit", () => (exited = true));

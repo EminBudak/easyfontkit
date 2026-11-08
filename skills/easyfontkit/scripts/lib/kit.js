@@ -449,7 +449,7 @@ function putInPlace(dir, part, earlier) {
     }
   } catch (err) {
     const left = undo(dir, moves, done);
-    if (!left) throw new Error(`The new kit could not be put in place in ${dir} (${err.message}), so the earlier kit there is as it was.`);
+    if (!left) throw new Error(`The new kit could not be put in place in ${dir} (${err.message}), ${earlier ? "so the earlier kit there is as it was." : "so nothing was saved there."}`);
     const error = new Error(`The new kit could not be put in place in ${dir} (${err.message}), and some of the earlier kit's files could not be moved back (${left}): they are in ${path.join(part, "earlier")}. The next run that saves a kit there tries again to put them back.`);
     // The part folder holds them, with its list of moves, and stays.
     error.keepPart = true;
@@ -519,9 +519,13 @@ function tidy(dir, part) {
 // is done, never halfway. The folder is read again here, as it can have
 // changed while the page was read.
 async function saveKit(dir, write) {
-  const made = fs.mkdirSync(dir, { recursive: true });
+  // Resolved once, so a .. in --out cannot make mkdirSync report a folder
+  // off the path removeMade walks and leave the run's own folder behind
+  // while removing one that was already there.
+  const made = fs.mkdirSync(path.resolve(dir), { recursive: true });
   let unlock = null;
   let part = "";
+  let earlier = null;
   try {
     // The wait yields to the event loop; the rest runs without a pause, so a
     // stop signal is handled before the save starts or after it is done,
@@ -529,7 +533,7 @@ async function saveKit(dir, write) {
     // read before the page may be out of date now.
     unlock = await lock(dir);
     putBack(dir);
-    const earlier = earlierKit(dir);
+    earlier = earlierKit(dir);
     part = makePart(dir);
     write(part, ownFiles(dir, earlier));
     putInPlace(dir, part, earlier);
@@ -538,6 +542,12 @@ async function saveKit(dir, write) {
     if (part && !err.keepPart) remove(part);
     if (unlock) unlock();
     if (made) removeMade(dir, made);
+    // The new kit is written beside the earlier one before it takes its
+    // place, so a replacing run needs room for both. A disk or quota that
+    // runs out is said plainly, and the earlier kit is untouched.
+    if (err.code === "ENOSPC" || err.code === "EDQUOT") {
+      throw new Error(`There is no room on the disk to write the new kit${earlier ? " beside the earlier one" : ""} in ${dir}, so no kit was made.${earlier ? " The earlier kit there is as it was." : ""}`);
+    }
     throw err;
   }
   unlock();

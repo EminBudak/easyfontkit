@@ -264,6 +264,69 @@ test("a folder the kit cannot be saved in is refused before the browser starts",
   }
 });
 
+test("a first run that fails removes only the folders it made, even with a .. in the path", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-made-"));
+  try {
+    // A folder that was already there, named on the far side of the ..
+    fs.mkdirSync(path.join(parent, "keep"));
+    // --out as the user might give it, with a .. that resolves back through
+    // a folder this run makes.
+    const out = `${path.join(parent, "gone")}${path.sep}..${path.sep}keep${path.sep}kit`;
+    await assert.rejects(saveKit(out, () => assert.fail("no kit")), /no kit/);
+    assert.equal(fs.existsSync(path.join(parent, "keep")), true, "a folder that was already there is left");
+    assert.deepEqual(fs.readdirSync(path.join(parent, "keep")), [], "and left empty, as it was");
+    assert.equal(fs.existsSync(path.join(parent, "gone")), false, "the folder the run made is removed");
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a disk with no room for the new kit is reported plainly, and the earlier kit is left as it was", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-full-"));
+  try {
+    const full = () => {
+      const err = new Error("ENOSPC: no space left on device, write");
+      err.code = "ENOSPC";
+      throw err;
+    };
+    const dir = path.join(parent, "kit");
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    await assert.rejects(saveKit(dir, () => full()), {
+      message: `There is no room on the disk to write the new kit beside the earlier one in ${dir}, so no kit was made. The earlier kit there is as it was.`,
+    });
+    assert.deepEqual(snapshot(dir), before);
+    // A first run with no earlier kit says it plainly too, and makes no folder.
+    const fresh = path.join(parent, "fresh", "kit");
+    await assert.rejects(saveKit(fresh, () => full()), {
+      message: `There is no room on the disk to write the new kit in ${fresh}, so no kit was made.`,
+    });
+    assert.equal(fs.existsSync(path.join(parent, "fresh")), false);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("the message for a kit that could not be put in place says nothing was saved when the folder had no kit", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-first-"));
+  try {
+    const dir = path.join(parent, "kit");
+    // A first run: something comes where a new file goes while the page is
+    // read, so the kit cannot be put in place. There was no earlier kit.
+    await assert.rejects(
+      saveKit(dir, (part, own) => {
+        assert.deepEqual(own, []);
+        newKitIn(part, ["inter-400.woff2"]);
+        fs.writeFileSync(path.join(dir, "FONTS.md"), "in the way");
+      }),
+      { message: `The new kit could not be put in place in ${dir} (FONTS.md is in the way), so nothing was saved there.` },
+    );
+    assert.equal(fs.existsSync(path.join(dir, "fonts.json")), false, "no kit was saved");
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("the new kit goes in only whole: a step that fails puts the earlier kit back", async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-swap-"));
   try {

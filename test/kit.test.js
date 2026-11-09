@@ -1469,6 +1469,38 @@ test("the page's address goes into fonts.css only inside its comment, also when 
   }
 });
 
+test("a unicode-range in the page's own CSS goes into fonts.css only when it is one", { skip: noBrowser }, async () => {
+  const routes = {
+    "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+    "/evil.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+  };
+  const { server, origin } = await serve(routes);
+  // A range that ends in an open quote, then a line with a src of its own:
+  // copied as written, it would end the range in fonts.css and give the
+  // family a file from elsewhere.
+  routes["/"] = {
+    body: `<!doctype html><html><head><title>Range</title><link rel="preload" href="/inter.woff2" as="font" type="font/woff2" crossorigin>
+      <style>@font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); unicode-range: U+0-FF "\n; src: url(${origin}/evil.woff2) }
+      h1, p { font-family: "Body Sans", sans-serif; }</style></head>
+      <body><h1>Range</h1><p>A family whose range carries a file from elsewhere.</p></body></html>`,
+  };
+  const range = /^U\+[0-9A-F?]+(-[0-9A-F]+)?(, ?U\+[0-9A-F?]+(-[0-9A-F]+)?)*$/i;
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-range-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(origin, { dir, timeLimit: 60_000 });
+    const files = kit.families.flatMap((family) => family.files);
+    assert.ok(files.some((file) => file.url === `${origin}/inter.woff2`), "the file the rule names is saved");
+    for (const file of files) assert.ok(!file.unicodeRange || range.test(file.unicodeRange), `${file.url}: ${file.unicodeRange}`);
+    const css = fs.readFileSync(path.join(dir, "fonts.css"), "utf8");
+    assert.doesNotMatch(css, /evil/, css);
+    for (const line of css.split("\n").filter((text) => text.includes("unicode-range"))) assert.match(line.replace(/^ {2}unicode-range: (.*);$/, "$1"), range, line);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page leaves the earlier kit as it was, closes its browser and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

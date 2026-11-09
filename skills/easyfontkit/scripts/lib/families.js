@@ -57,6 +57,19 @@ const cssDisplay = (name) => (/^[a-z0-9-]+$/.test(name) ? name : cleanName(name)
 // it is SF Mono, and Helvetica Neue with the rest of its family.
 const systemName = (family) => SYSTEM_NAMES[lower(family)] || (/\s/.test(family) ? family : cssDisplay(family));
 
+// A unicode-range as fonts.css can carry it: code points and ranges of them,
+// apart by commas, else nothing. The rules read from a style sheet's text
+// keep what the page wrote there, and copied as it is, a range with a quote
+// or a semicolon in it could end its line in fonts.css and add declarations
+// of the page's choosing, like a src from elsewhere.
+const RANGE = /^u\+[0-9a-f?]{1,6}(-[0-9a-f]{1,6})?$/i;
+function unicodeRange(text) {
+  const parts = String(text || "")
+    .split(",")
+    .map((part) => part.trim());
+  return parts.every((part) => RANGE.test(part)) ? parts.join(", ") : "";
+}
+
 // The CSS families each file is declared under: by its address in the
 // @font-face rules, and by Chrome's own report of the web fonts it loaded.
 function declareFiles(files, rules, faces) {
@@ -69,7 +82,7 @@ function declareFiles(files, rules, faces) {
     file.cssFamilies = [...new Set(declared.map((rule) => rule.family).filter(Boolean))];
     // The characters the site loads this file for: a family split into
     // latin and latin-ext files needs it to pick the right one.
-    file.unicodeRange = (declared.find((rule) => rule.unicodeRange) || {}).unicodeRange || "";
+    file.unicodeRange = declared.map((rule) => unicodeRange(rule.unicodeRange)).find(Boolean) || "";
   }
 }
 

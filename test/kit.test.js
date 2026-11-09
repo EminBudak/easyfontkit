@@ -1568,13 +1568,19 @@ test("a run stopped while it reads the page leaves the earlier kit as it was, cl
 test("a bot check served instead of the page fails with a reason and leaves nothing behind", { skip: noBrowser }, async () => {
   const html = "<!doctype html><html><head><title>Just a moment...</title></head><body><p>Checking your browser.</p></body></html>";
   // Also with the error status a bot check often comes with: it is still
-  // told as a bot check.
-  const { server, origin } = await serve({ "/": { body: html }, "/403": { status: 403, body: html } });
+  // told as a bot check, with its status, and after a redirect with the
+  // address it led to.
+  const { server, origin } = await serve({ "/": { body: html }, "/403": { status: 403, body: html }, "/to-403": { status: 302, headers: { location: "/403" } } });
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-out-"));
   const dir = path.join(parent, "kit");
+  const rest = "instead of its page, so no kit was made. Open the site in a normal browser and try again later.";
   try {
-    for (const url of [origin, `${origin}/403`]) {
-      await assert.rejects(makeFontKit(url, { dir, timeLimit: 60_000 }), /answered with a bot check \("Just a moment\.\.\."\)/);
+    for (const [url, message] of [
+      [origin, `${origin}/ answered with a bot check ("Just a moment...") ${rest}`],
+      [`${origin}/403`, `${origin}/403 answered with a bot check ("Just a moment..."), HTTP 403 Forbidden, ${rest}`],
+      [`${origin}/to-403`, `${origin}/to-403 led to ${origin}/403, which answered with a bot check ("Just a moment..."), HTTP 403 Forbidden, ${rest}`],
+    ]) {
+      await assert.rejects(makeFontKit(url, { dir, timeLimit: 60_000 }), { message });
       assert.equal(fs.existsSync(dir), false, "no folder left behind");
     }
   } finally {

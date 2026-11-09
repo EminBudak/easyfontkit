@@ -911,6 +911,12 @@ function where(asked, to, first) {
 
 const httpStatus = (status) => `HTTP ${status}${STATUS_CODES[status] ? ` ${STATUS_CODES[status]}` : ""}`;
 
+// A bot check served instead of the page, with the error status it often
+// comes with.
+function botCheck(asked, { pageUrl, first, challenge, answer }) {
+  return `${where(asked, pageUrl, first)} answered with a bot check ("${challenge}")${answer.status >= 400 ? `, ${httpStatus(answer.status)},` : ""} instead of its page, so no kit was made. Open the site in a normal browser and try again later.`;
+}
+
 // A page that answers with an error status, after any redirects, is not the
 // page that was asked for, and its fonts are often only the browser's
 // defaults. What to try next depends on the status.
@@ -967,9 +973,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       await chrome.close();
     }
     // Nothing waits from here to the end.
-    if (scan.challenge) {
-      throw new Error(`${scan.pageUrl} answered with a bot check ("${scan.challenge}") instead of its page, so no kit was made. Open the site in a normal browser and try again later.`);
-    }
+    if (scan.challenge) throw new Error(botCheck(url, scan));
     if (scan.answer.status >= 400) throw new Error(errorPage(url, scan));
     if (scan.failed) throw new Error(notOpened(url, scan));
     if (scan.left) throw new Error(wentBlank(url, scan));

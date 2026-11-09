@@ -1633,6 +1633,28 @@ test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its
   }
 });
 
+test("a page that waits for a style sheet that never comes draws nothing and is refused, naming the style sheet, and the earlier kit stays", { skip: noBrowser }, async () => {
+  const { server, origin } = await serve({
+    "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },
+    "/held.css": { hold: true },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-stalls-"));
+  const dir = path.join(parent, "kit");
+  try {
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    const started = Date.now();
+    await assert.rejects(makeFontKit(origin, { dir, timeLimit: 60_000 }), {
+      message: `${origin}/ stayed blank: it waits for its style sheet ${origin}/held.css, which did not come, so no kit was made. Try again later, or check the page in a normal browser.`,
+    });
+    assert.ok(Date.now() - started < 40_000, `refused after ${Date.now() - started} ms`);
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a bot check served instead of the page fails with a reason and leaves nothing behind", { skip: noBrowser }, async () => {
   const html = "<!doctype html><html><head><title>Just a moment...</title></head><body><p>Checking your browser.</p></body></html>";
   // Also with the error status a bot check often comes with: it is still

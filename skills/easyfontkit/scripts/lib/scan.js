@@ -86,7 +86,16 @@ function record(cdp) {
   cdp.on("Page.frameNavigated", ({ frame }) => {
     if (frame && page.frame && frame.id === page.frame) page.failed = frame.unreachableUrl ? { url: frame.unreachableUrl, error: errors.get(frame.loaderId) || "" } : null;
   });
-  return { fonts, faces, sheets, page };
+  // The style sheets the tab's own page has asked for and not got yet: the
+  // browser draws nothing of a page until those in its head have come.
+  const due = new Map();
+  cdp.on("Network.requestWillBeSent", ({ requestId, frameId, type, request }) => {
+    if (type === "Stylesheet" && request && page.frame && frameId === page.frame) due.set(requestId, request.url);
+  });
+  const arrived = ({ requestId }) => due.delete(requestId);
+  cdp.on("Network.loadingFinished", arrived);
+  cdp.on("Network.loadingFailed", arrived);
+  return { fonts, faces, sheets, page, due };
 }
 
 async function evaluate(cdp, expression, timeoutMs = 10_000) {
@@ -109,7 +118,11 @@ async function metrics(cdp) {
   };
 }
 
-const wheel = (cdp, x, y, deltaY) => cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY });
+// A step of the scroll is taken once the page has drawn: one that a page
+// has not taken in this long, it does not take, as with a page that waits
+// for a style sheet that never comes, or one whose scripts hold it.
+const WHEEL_WAIT = 10_000;
+const wheel = (cdp, x, y, deltaY) => cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY }, WHEEL_WAIT);
 
 // Down a screen at a time, so sections that render only when scrolled to
 // (and the fonts they use, often the code font) load. If the page does not
@@ -338,10 +351,12 @@ async function readFiles(fonts, rules, faces) {
 // families document.fonts holds, the status and address the server
 // answered the page with (answer), the address the page was first asked
 // from as Chrome wrote it (first), the address a redirect or the page led
-// on to that could not be opened or did not answer (failed), and
-// about:blank or the like when the page moved itself on to that (left).
-// pageUrl is the address of the page the roles were read from, or the last
-// page the server sent the tab when it has moved on to about:blank.
+// on to that could not be opened or did not answer (failed), about:blank or
+// the like when the page moved itself on to that (left), and for a page that
+// did not draw, so it could not be scrolled, the style sheet it waited for,
+// if one had not come (stalled). pageUrl is the address of the page the
+// roles were read from, or the last page the server sent the tab when it has
+// moved on to about:blank.
 async function scanPage(cdp, url, log = () => {}) {
   const recorded = record(cdp);
   await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: 50_000_000 });
@@ -349,27 +364,34 @@ async function scanPage(cdp, url, log = () => {}) {
   await cdp.send("CSS.enable");
   const { frameTree } = await cdp.send("Page.getFrameTree");
   recorded.page.frame = frameTree.frame.id;
+  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [], ...found });
   log(`Opening ${url}`);
   let pageUrl;
   try {
     pageUrl = await navigate(cdp, url);
   } catch (err) {
     const { status, requested, first } = recorded.page;
-    const nothing = (found) => ({ pageUrl: url, first, answer: { status, url: recorded.page.url }, failed: null, left: "", title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [], ...found });
     // An error status with no page of its own makes Chrome show its own
     // error page and give a net:: code, which says less than the status.
-    if (status >= 400) return nothing();
+    if (status >= 400) return nothing(url);
     // A redirect that led to an address that could not be opened, or whose
     // server did not answer: that address failed, not the one asked, which
     // answered.
     if ((err.errorText || err.noAnswer) && requested && first && bare(requested) !== bare(first)) {
-      return nothing({ failed: { url: requested, error: err.errorText || "", noAnswer: err.noAnswer || 0 } });
+      return nothing(url, { failed: { url: requested, error: err.errorText || "", noAnswer: err.noAnswer || 0 } });
     }
     throw err;
   }
   await fontsReady(cdp);
   log("Reading the page");
-  await walk(cdp);
+  try {
+    await walk(cdp);
+  } catch (err) {
+    if (!err.timedOut) throw err;
+    // Read as it stands, the page would give the browser's default fonts,
+    // as the ones it asks for come with the style sheet it waits for.
+    return nothing(pageUrl, { stalled: { sheet: [...recorded.due.values()][0] || "" } });
+  }
   await fontsReady(cdp);
   await sleep(500);
   const title = String((await evaluate(cdp, "document.title")) || "").trim();
@@ -400,7 +422,7 @@ async function scanPage(cdp, url, log = () => {}) {
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, first: recorded.page.first, answer, failed, left, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
+  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
 }
 
 module.exports = { scanPage, fontFaceRules, decodeDataUrl };

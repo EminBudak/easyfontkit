@@ -951,6 +951,15 @@ function wentBlank(asked, { pageUrl, first, left }) {
   return `${where(asked, pageUrl, first)} moved itself on to ${left}, an empty page, so no kit was made. Check the page in a normal browser.`;
 }
 
+// A page that did not draw, so that it could not be scrolled: mostly one
+// that waits for a style sheet that does not come, which holds back the
+// fonts it asks for too. Read as it stands, it would give the browser's
+// default fonts.
+function stalledPage(asked, { pageUrl, first, stalled: { sheet } }) {
+  const what = sheet ? `stayed blank: it waits for its style sheet ${sheet}, which did not come` : "stopped answering the browser while it was read";
+  return `${where(asked, pageUrl, first)} ${what}, so no kit was made. Try again later, or check the page in a normal browser.`;
+}
+
 // The runs going on in this process, for a stop signal, and whether one has
 // come: a run waiting for another to let go of a folder's lock gives up at
 // once when it has, so the folder is left as it was.
@@ -983,6 +992,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     if (scan.answer.status >= 400) throw new Error(errorPage(url, scan));
     if (scan.failed) throw new Error(notOpened(url, scan));
     if (scan.left) throw new Error(wentBlank(url, scan));
+    if (scan.stalled) throw new Error(stalledPage(url, scan));
     if (!Object.keys(scan.roles).length && !scan.files.length) {
       throw new Error(`${scan.pageUrl} showed no text and loaded no fonts, so nothing was read. The site may turn away headless browsers; check the page in a normal browser.`);
     }

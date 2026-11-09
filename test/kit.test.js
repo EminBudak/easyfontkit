@@ -543,17 +543,38 @@ test("a run that waits for another run's lock makes the folder again when that r
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-gone-"));
   // The other run, still going.
   const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], { stdio: "ignore" });
+  const mkdirSync = fs.mkdirSync;
   try {
-    for (const fails of [false, true]) {
+    for (const [fails, madeBy] of [
+      [false, "the other run"],
+      [true, "the other run"],
+      [false, "this run"],
+      [true, "this run"],
+    ]) {
       // The other run made the new folder and holds its lock while this run
-      // waits for it.
+      // waits for it. Or this run made it, and the other run, whose mkdir of
+      // the same path came at the same moment, takes the lock at once and
+      // counts the folder as its own.
       const dir = path.join(parent, "new", "kit");
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, ".easyfontkit-lock"), String(other.pid));
+      const lockIn = () => fs.writeFileSync(path.join(dir, ".easyfontkit-lock"), String(other.pid));
+      if (madeBy === "the other run") {
+        fs.mkdirSync(dir, { recursive: true });
+        lockIn();
+      } else {
+        fs.mkdirSync = (target, ...rest) => {
+          const made = mkdirSync(target, ...rest);
+          if (path.resolve(String(target)) === dir) {
+            fs.mkdirSync = mkdirSync;
+            lockIn();
+          }
+          return made;
+        };
+      }
       const saving = saveKit(dir, (part) => {
         if (fails) throw new Error("no kit");
         newKitIn(part, ["inter-400.woff2"]);
       });
+      fs.mkdirSync = mkdirSync;
       await sleep(200);
       // Its save fails: it lets go of the lock and removes the folders it made.
       fs.rmSync(path.join(dir, ".easyfontkit-lock"));
@@ -561,16 +582,17 @@ test("a run that waits for another run's lock makes the folder again when that r
       fs.rmdirSync(path.join(parent, "new"));
       if (!fails) {
         await saving;
-        assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
+        assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"], madeBy);
         assert.deepEqual(fs.readdirSync(path.join(dir, "files")), ["inter-400.woff2"]);
         fs.rmSync(path.join(parent, "new"), { recursive: true });
       } else {
         // This run made them again, so its own failure removes them.
-        await assert.rejects(saving, /no kit/);
-        assert.deepEqual(fs.readdirSync(parent), []);
+        await assert.rejects(saving, /no kit/, madeBy);
+        assert.deepEqual(fs.readdirSync(parent), [], madeBy);
       }
     }
   } finally {
+    fs.mkdirSync = mkdirSync;
     other.kill();
     fs.rmSync(parent, { recursive: true, force: true });
   }

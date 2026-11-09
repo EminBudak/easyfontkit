@@ -612,13 +612,19 @@ async function saveKit(dir, write) {
     // is found before.
     const target = path.resolve(dir);
     // Made again, and then this run's, when it goes while this run waits
-    // for the lock.
+    // for the lock, also when this run had made it before: two runs that
+    // make the same new path at the same moment can each count part of it
+    // as their own, and the one that fails removes that part. made is the
+    // highest folder this run has made, which is the shortest path.
+    const highest = (folder) => {
+      if (folder && (!made || folder.length < made.length)) made = folder;
+    };
     const makeFolder = () => {
       const missing = firstMissing(target);
       try {
-        made = made || fs.mkdirSync(target, { recursive: true });
+        highest(fs.mkdirSync(target, { recursive: true }));
       } catch (err) {
-        made = made || missing;
+        highest(missing);
         throw err;
       }
     };

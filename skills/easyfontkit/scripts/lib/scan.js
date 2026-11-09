@@ -57,10 +57,12 @@ function record(cdp) {
   cdp.on("CSS.styleSheetAdded", ({ header }) => header && header.origin === "regular" && sheets.set(header.styleSheetId, header));
   // The tab's own page as the server answered it: the last response its
   // main frame got, after any redirects, so a script that moves the page on
-  // counts too. The frames inside a page get documents of their own.
-  const page = { frame: "", status: 0, url: "", first: "", requested: "", failed: null };
+  // counts too. The frames inside a page get documents of their own, and a
+  // blob: address a page made for itself is no answer of a server's and has
+  // no host to name the kit by.
+  const page = { frame: "", status: 0, url: "", shown: "", first: "", requested: "", failed: null };
   cdp.on("Network.responseReceived", ({ frameId, type, response }) => {
-    if (type === "Document" && response && page.frame && frameId === page.frame) Object.assign(page, { status: response.status, url: response.url });
+    if (type === "Document" && response && page.frame && frameId === page.frame && /^https?:/i.test(response.url)) Object.assign(page, { status: response.status, url: response.url });
   });
   // The address the tab's own page was first asked from, as Chrome writes
   // it, and the one it was last asked from, each redirect's included, so a
@@ -83,8 +85,13 @@ function record(cdp) {
   cdp.on("Network.loadingFailed", ({ requestId, type, errorText, canceled }) => {
     if (type === "Document" && !canceled && errorText && !errors.has(requestId)) errors.set(requestId, errorText);
   });
+  // The last web address the tab showed goes with it: a response alone says
+  // less, as one that was a download, which the browser refuses, leaves the
+  // tab where it was.
   cdp.on("Page.frameNavigated", ({ frame }) => {
-    if (frame && page.frame && frame.id === page.frame) page.failed = frame.unreachableUrl ? { url: frame.unreachableUrl, error: errors.get(frame.loaderId) || "" } : null;
+    if (!frame || !page.frame || frame.id !== page.frame) return;
+    page.failed = frame.unreachableUrl ? { url: frame.unreachableUrl, error: errors.get(frame.loaderId) || "" } : null;
+    if (/^https?:/i.test(frame.url)) page.shown = frame.url;
   });
   // The style sheets the tab's own page has asked for and not got yet: the
   // browser draws nothing of a page until those in its head have come.
@@ -355,8 +362,9 @@ async function readFiles(fonts, rules, faces) {
 // the like when the page moved itself on to that (left), and for a page that
 // did not draw, so it could not be scrolled, the style sheet it waited for,
 // if one had not come (stalled). pageUrl is the address of the page the
-// roles were read from, or the last page the server sent the tab when it has
-// moved on to about:blank.
+// roles were read from, or the last web address the tab showed when it has
+// moved on to about:blank or to a blob: address, so it is always a web
+// address.
 async function scanPage(cdp, url, log = () => {}) {
   const recorded = record(cdp);
   await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: 50_000_000 });
@@ -399,12 +407,14 @@ async function scanPage(cdp, url, log = () => {}) {
   // A script or a meta refresh can have moved the tab on since the load
   // event navigate() waited for: the page read is the one it shows now. One
   // that has moved on to about:blank shows nothing, and the roles were read
-  // from that: left says where it went, and pageUrl is the last page the
-  // server sent the tab, also after a redirect, and also when it went at its
-  // load event, as Chrome then keeps no web address in the tab's history.
+  // from that: left says where it went, and pageUrl is the last web address
+  // the tab showed, also after a redirect, and also when it went at its load
+  // event, as Chrome then keeps no web address in the tab's history. A blob:
+  // address is read, and has no host of its own, so it is named by the page
+  // that made it, in the same way.
   const now = await currentAddress(cdp);
   if (/^https?:/i.test(now)) pageUrl = now;
-  else if (recorded.page.url) pageUrl = recorded.page.url;
+  else if (recorded.page.shown) pageUrl = recorded.page.shown;
   const left = /^about:/i.test(now) ? now : "";
   const loaded = (await evaluate(cdp, "[...document.fonts].filter((f) => f.status === 'loaded').map((f) => ({ family: f.family, weight: f.weight, style: f.style }))")) || [];
   const rules = await readRules(cdp, recorded.sheets, pageUrl);

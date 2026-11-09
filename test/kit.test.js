@@ -1786,6 +1786,55 @@ test("two addresses that redirect to each other are told as the address asked, a
   }
 });
 
+test("a page that moves itself on to a blob: address it made is read there and named by its last web address", { skip: noBrowser }, async () => {
+  // Code only inside the blob, so a kit with code was read from it.
+  const blob = `URL.createObjectURL(new Blob(["<!doctype html><title>Inside</title><h1>Inside</h1><p>Text the script made.</p><pre><code>npx acme init</code></pre>"], { type: "text/html" }))`;
+  const page = (script) => `<!doctype html><html><head><title>Makes a blob</title></head><body><h1>Makes a blob</h1><p>This page goes on to a page it made.</p><script>${script}</script></body></html>`;
+  const { server, origin } = await serve({
+    "/timed": { body: page(`setTimeout(() => (location.href = ${blob}), 300)`) },
+    "/at-load": { body: page(`addEventListener("load", () => (location.href = ${blob}))`) },
+    "/moved": { status: 302, headers: { location: "/timed" } },
+    "/not-found": { status: 404, body: page(`setTimeout(() => (location.href = ${blob}), 300)`) },
+    // A file the browser refuses to save does not move the tab, so it is
+    // not the page named when the page goes on.
+    "/file.bin": { type: "application/octet-stream", headers: { "content-disposition": 'attachment; filename="from-the-site.txt"' }, body: "written by the site\n" },
+    "/file-then-blob": { body: page(`setTimeout(() => (location.href = "/file.bin"), 100); setTimeout(() => (location.href = ${blob}), 800)`) },
+    "/file-then-blank": { body: page(`setTimeout(() => (location.href = "/file.bin"), 100); setTimeout(() => (location.href = "about:blank"), 800)`) },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-blob-"));
+  // A home of its own, as these pages ask for a file.
+  const env = { ...process.env, HOME: parent };
+  try {
+    for (const [route, named] of [
+      ["/timed", "/timed"],
+      ["/at-load", "/at-load"],
+      ["/moved", "/timed"],
+      ["/file-then-blob", "/file-then-blob"],
+    ]) {
+      const dir = path.join(parent, route.slice(1));
+      const cli = await run([`${origin}${route}`, "--out", dir], env);
+      assert.equal(cli.status, 0, cli.stderr);
+      assert.match(cli.stdout, /^Saved the fonts of 127\.0\.0\.1 to /, route);
+      const kit = JSON.parse(fs.readFileSync(path.join(dir, "fonts.json"), "utf8"));
+      assert.equal(kit.url, `${origin}${named}`, route);
+      assert.ok(kit.roles.code, "the code of the page it made was read");
+      const fontsMd = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+      assert.ok(fontsMd.startsWith(`# Fonts of 127.0.0.1\n\nRead from ${origin}${named} on `), fontsMd.slice(0, 200));
+      assert.ok(fs.readFileSync(path.join(dir, "fonts.css"), "utf8").startsWith(`/* Fonts of 127.0.0.1, read from ${origin}${named} on `));
+    }
+    // The server's answer stands: a blob's own 200 is not the page's.
+    await assert.rejects(makeFontKit(`${origin}/not-found`, { dir: path.join(parent, "not-found"), timeLimit: 60_000 }), {
+      message: `${origin}/not-found answered with an error, HTTP 404 Not Found, so no kit was made. Give the address of a page that loads without an error, like the site's home page.`,
+    });
+    const blank = await run([`${origin}/file-then-blank`, "--out", path.join(parent, "file-then-blank")], env);
+    assert.equal(blank.status, 1, blank.stdout);
+    assert.ok(blank.stderr.includes(`easyfontkit: ${origin}/file-then-blank moved itself on to about:blank, an empty page, so no kit was made. Check the page in a normal browser.\n`), blank.stderr);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 // A page that sends the browser to a file served as an attachment, as a
 // download link does. Chrome on Linux saves a download in the Downloads
 // folder of the home it runs with, where nothing removes it.

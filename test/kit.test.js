@@ -1836,7 +1836,7 @@ test("a page that moves itself on to a blob: address it made is read there and n
 });
 
 test("fonts whose names are too long for a file name still get a kit, with short file names that stay apart", { skip: noBrowser }, async () => {
-  const family = "Verylongfamilyname".repeat(17);
+  const family = "Verylongfamilyname ".repeat(17).trim();
   const cssFamily = "Verylongcssname".repeat(20);
   assert.ok(family.length > 300 && cssFamily.length >= 300);
   const font = (names) => ({ type: "font/ttf", body: interAs({ names }) });
@@ -1854,7 +1854,8 @@ test("fonts whose names are too long for a file name still get a kit, with short
         pre, code { font-family: "${cssFamily}", monospace; }
       </style></head><body><h1>Tools for teams</h1><h2>Plan and launch</h2><p>Every part of the work stays where the team can see it.</p><pre><code>npx acme init</code></pre></body></html>`,
     },
-    // A family's name from its file, and one the same but for its end.
+    // A family's name from its file, and one the same but for its end, which
+    // lies past the cut, so both are cut to the same file name.
     "/family.ttf": font({ 1: family, 2: "Regular" }),
     "/same-start.ttf": font({ 1: `${family} Two`, 2: "Regular" }),
     // A style's name from its file.
@@ -1869,11 +1870,18 @@ test("fonts whose names are too long for a file name still get a kit, with short
     const names = fs.readdirSync(path.join(dir, "files"));
     assert.equal(names.length, 4, names.join("\n"));
     for (const name of names) assert.ok(Buffer.byteLength(name) <= 150, name);
+    // Only a number keeps the two families cut to one name apart.
+    const cut = `${"verylongfamilyname-".repeat(4)}very-400`;
+    assert.deepEqual(names.filter((name) => name.endsWith("-2.ttf")), [`${cut}-2.ttf`], names.join("\n"));
+    assert.ok(names.includes(`${cut}.ttf`), names.join("\n"));
     // The kit lists each file under the name it was saved with.
     const listed = kit.families.flatMap((one) => one.files.map((file) => path.basename(file.file)));
     assert.deepEqual(listed.sort(), names.sort());
-    // The names in the kit itself stay whole.
-    assert.ok(kit.families.some((one) => one.name.replace(/ /g, "") === family), kit.families.map((one) => one.name).join("\n"));
+    // The names in the kit itself stay whole, one written as a single word
+    // with its words set apart.
+    const whole = kit.families.map((one) => one.name);
+    for (const name of [family, `${family} Two`]) assert.ok(whole.includes(name), whole.join("\n"));
+    assert.ok(whole.some((name) => name.replace(/ /g, "") === cssFamily), whole.join("\n"));
     assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
   } finally {
     server.close();

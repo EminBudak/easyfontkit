@@ -1760,6 +1760,32 @@ test("a page that moves itself on is read where it ends, and one that ends on an
   }
 });
 
+test("two addresses that redirect to each other are told as the address asked, as each of them answers, also when a script or a meta refresh leads to them, and the earlier kit stays", { skip: noBrowser }, async () => {
+  const page = (head, body) => `<!doctype html><html><head><title>Moves on</title>${head}</head><body><h1>Moves on</h1><p>This page sends the browser elsewhere.</p>${body}</body></html>`;
+  const { server, origin } = await serve({
+    "/a": { status: 302, headers: { location: "/b" } },
+    "/b": { status: 302, headers: { location: "/a" } },
+    // A redirect into the loop, and a page that loads and then goes there.
+    "/in": { status: 302, headers: { location: "/a" } },
+    "/script": { body: page("", `<script>setTimeout(() => (location.href = "/a"), 50)</script>`) },
+    "/meta": { body: page(`<meta http-equiv="refresh" content="0;url=/a">`, "") },
+    "/at-load": { body: page("", `<script>addEventListener("load", () => (location.href = "/a"))</script>`) },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-loop-"));
+  const dir = path.join(parent, "kit");
+  try {
+    earlierKitIn(dir);
+    const before = snapshot(dir);
+    for (const route of ["/a", "/b", "/in", "/script", "/meta", "/at-load"]) {
+      await assert.rejects(makeFontKit(`${origin}${route}`, { dir, timeLimit: 60_000 }), { message: `Could not open ${origin}${route}: net::ERR_TOO_MANY_REDIRECTS` });
+      assert.deepEqual(snapshot(dir), before, route);
+    }
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 // A page that sends the browser to a file served as an attachment, as a
 // download link does. Chrome on Linux saves a download in the Downloads
 // folder of the home it runs with, where nothing removes it.

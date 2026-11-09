@@ -939,9 +939,11 @@ function errorPage(asked, { answer: { status, url }, first }) {
 // A page that moved itself on to an address that could not be opened at
 // all ends on the browser's own error page, whose fonts are the browser's.
 // A redirect can also lead to a server that takes the connection and never
-// answers.
+// answers. In a redirect loop every address answers, and Chrome gives up at
+// whichever one it has reached, so the one to name is the one asked.
 function notOpened(asked, { failed: { url, error, noAnswer }, first }) {
   if (noAnswer) return `${where(asked, url, first)} did not answer in ${noAnswer} s, so no kit was made. The site may be down or slow; try again later, or give it more time with --timeout.`;
+  if (error === "net::ERR_TOO_MANY_REDIRECTS") return `Could not open ${asked}: ${error}`;
   return `${where(asked, url, first)} could not be opened${error ? ` (${error})` : ""}, so no kit was made. Check the page in a normal browser.`;
 }
 

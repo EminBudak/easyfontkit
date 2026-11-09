@@ -86,6 +86,19 @@ function summary({ dir, kit }) {
 // ends the process kills the browser too.
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "win32" ? ["SIGBREAK"] : ["SIGQUIT"])];
 let stopping = false;
+
+// Written at once: a pipe can be asynchronous, and the process ends right
+// after. One that nobody reads any more, as when the program that started
+// the run has gone, or a terminal that has closed, fails the write, and the
+// stop goes on all the same.
+function say(fd, text) {
+  try {
+    fs.writeSync(fd, text);
+  } catch {
+    // Nobody is reading.
+  }
+}
+
 function stopOnSignals() {
   for (const signal of SIGNALS) {
     process.on(signal, () => {
@@ -93,9 +106,7 @@ function stopOnSignals() {
       stopping = true;
       const stopped = stopRuns();
       if (!stopped.length) return void process.stdout.write("", () => process.exit(0));
-      // Written at once: a pipe can be asynchronous, and the process ends
-      // right after.
-      for (const run of stopped) fs.writeSync(2, `easyfontkit: stopped by ${signal}, so no kit was made.${run.earlier ? ` The earlier kit in ${run.dir} is as it was.` : ""}\n`);
+      for (const run of stopped) say(2, `easyfontkit: stopped by ${signal}, so no kit was made.${run.earlier ? ` The earlier kit in ${run.dir} is as it was.` : ""}\n`);
       for (const name of SIGNALS) process.removeAllListeners(name);
       const code = 128 + os.constants.signals[signal];
       try {
@@ -121,6 +132,10 @@ async function main() {
   }
   if (options.help) return void process.stdout.write(`${USAGE}\n`);
   if (options.version) return void process.stdout.write(`${version}\n`);
+  // A progress line nobody reads any more, as when the reader stops after
+  // the first line, does not stop the run: what came of it is in its exit
+  // status and on stdout.
+  process.stderr.on("error", () => {});
   stopOnSignals();
   try {
     const result = await makeFontKit(options.url, {

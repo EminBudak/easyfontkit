@@ -1184,7 +1184,7 @@ exec sleep 60
          return rmSync(target, ...rest);
        };`,
     );
-    const stop = async (dir, preload, signal = "SIGTERM", remake = true) => {
+    const stop = async (dir, preload, signal = "SIGTERM", remake = true, deaf = false) => {
       const tmp = fs.mkdtempSync(path.join(parent, "tmp-"));
       fs.rmSync(path.join(parent, "chrome.pid"), { force: true });
       // In a process group of its own, with its browser, so whatever is
@@ -1210,6 +1210,12 @@ exec sleep 60
       while (!exited && !fs.existsSync(path.join(parent, "chrome.pid"))) await sleep(20);
       assert.equal(exited, false, stderr);
       const pid = Number(fs.readFileSync(path.join(parent, "chrome.pid"), "utf8"));
+      // Nobody reads what it says any more, as when the program that
+      // started it has gone.
+      if (deaf) {
+        child.stderr.destroy();
+        await sleep(50);
+      }
       child.kill(signal);
       const ended2 = await ended;
       for (let i = 0; i < 100 && !gone(pid); i++) await sleep(20);
@@ -1226,6 +1232,9 @@ exec sleep 60
       assert.deepEqual(stopped, { signal, stderr: `easyfontkit: stopped by ${signal}, so no kit was made. The earlier kit in ${dir} is as it was.\n`, browserLeft: false, profiles: [] });
       assert.deepEqual(snapshot(dir), before);
     }
+    const deaf = await stop(dir, null, "SIGTERM", false, true);
+    assert.deepEqual(deaf, { signal: "SIGTERM", stderr: "", browserLeft: false, profiles: [] }, "a stop whose message nobody reads");
+    assert.deepEqual(snapshot(dir), before);
     const first = await stop(path.join(parent, "new", "kit"));
     assert.equal(first.stderr, "easyfontkit: stopped by SIGTERM, so no kit was made.\n");
     assert.equal(fs.existsSync(path.join(parent, "new")), false);
@@ -1441,6 +1450,28 @@ test("a page's fonts: each role's face, every file saved as served, each license
     assert.ok(fs.readFileSync(path.join(dir, "files", "inter-400-2.woff2")).equals(fixture("inter-latin-400.woff2")));
     assert.equal(fs.readFileSync(path.join(dir, "files", "Inter-400.woff2"), "utf8"), "mine");
     assert.equal(fs.readFileSync(path.join(dir, "files", "notes.txt"), "utf8"), "mine");
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a run whose progress lines nobody reads any more still makes its kit", { skip: noBrowser }, async () => {
+  const { server, origin } = await serve(PAGE);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-deaf-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const child = spawn(process.execPath, [CLI, origin, "--out", dir], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    const ended = new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
+    // Gone once the run has said it opens the page, as a reader that stops
+    // after the first line.
+    await new Promise((resolve) => child.stderr.once("data", resolve));
+    child.stderr.destroy();
+    assert.deepEqual(await ended, { code: 0, signal: null });
+    assert.match(stdout, /^Saved the fonts of 127\.0\.0\.1 to /);
     assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
   } finally {
     server.close();

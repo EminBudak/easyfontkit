@@ -1600,8 +1600,14 @@ test("a page that moves itself on is read where it ends, and one that ends on an
     "/302": { status: 302, headers: { location: dead } },
     "/301": { status: 301, headers: { location: "/302" } },
     "/on": { body: page("", `<script>setTimeout(() => (location.href = "/next"), 50)</script>`) },
-    // On to about:blank at the load event, and a moment after a font has come.
+    // A redirect to an address whose server takes the connection and never
+    // answers.
+    "/to-hang": { status: 302, headers: { location: "/hang" } },
+    "/hang": { hold: true },
+    // On to about:blank at the load event, also after a redirect, and a
+    // moment after a font has come.
     "/blank": { body: page("", `<script>addEventListener("load", () => (location.href = "about:blank"))</script>`) },
+    "/to-blank": { status: 302, headers: { location: "/blank" } },
     "/blank-font": {
       body: page(
         `<style>@font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); } p { font-family: "Body Sans", sans-serif; }</style>`,
@@ -1623,18 +1629,31 @@ test("a page that moves itself on is read where it ends, and one that ends on an
       });
       assert.deepEqual(snapshot(dir), before, route);
     }
-    // The address asked, when it is the one that cannot be opened.
-    await assert.rejects(makeFontKit(dead, { dir, timeLimit: 60_000 }), { message: `Could not open ${dead}: net::ERR_CONNECTION_REFUSED` });
-    assert.deepEqual(snapshot(dir), before, dead);
+    // The address asked, when it is the one that cannot be opened, also one
+    // that Chrome writes otherwise than it was given.
+    for (const asked of [dead, `${dead}a|b`]) {
+      await assert.rejects(makeFontKit(asked, { dir, timeLimit: 60_000 }), { message: `Could not open ${asked}: net::ERR_CONNECTION_REFUSED` });
+      assert.deepEqual(snapshot(dir), before, asked);
+    }
+    // A short run, so the server it waits for has ten seconds at most.
+    await assert.rejects(makeFontKit(`${origin}/to-hang`, { dir, timeLimit: 10_000 }), {
+      message: new RegExp(`^${origin}/to-hang led to ${origin}/hang, which did not answer in \\d+ s, so no kit was made\\. The site may be down or slow; try again later, or give it more time with --timeout\\.$`),
+    });
+    assert.deepEqual(snapshot(dir), before, "/to-hang");
     const { kit } = await makeFontKit(`${origin}/on`, { dir: path.join(parent, "on"), timeLimit: 60_000 });
     assert.equal(kit.url, `${origin}/next`);
     assert.ok(kit.roles.code, "the code of the page it moved to was read");
     assert.match(fs.readFileSync(path.join(parent, "on", "FONTS.md"), "utf8"), new RegExp(`^Read from ${origin}/next on `, "m"));
     // A page that moves itself on to about:blank shows nothing, also when it
-    // loaded a font first, and the message names the address asked.
-    for (const route of ["/blank", "/blank-font"]) {
+    // loaded a font first, and the message names the address asked, and the
+    // one a redirect led to.
+    for (const [route, which] of [
+      ["/blank", ""],
+      ["/blank-font", ""],
+      ["/to-blank", `led to ${origin}/blank, which `],
+    ]) {
       await assert.rejects(makeFontKit(`${origin}${route}`, { dir, timeLimit: 60_000 }), {
-        message: `${origin}${route} moved itself on to about:blank, an empty page, so no kit was made. Check the page in a normal browser.`,
+        message: `${origin}${route} ${which}moved itself on to about:blank, an empty page, so no kit was made. Check the page in a normal browser.`,
       });
       assert.deepEqual(snapshot(dir), before, route);
     }
@@ -1670,8 +1689,10 @@ test("a page that answers with an error is refused, naming the status and the ad
     assert.equal(cli.stderr, `easyfontkit: ${missing}\n`);
     assert.deepEqual(snapshot(dir), before);
     const refused = {
-      // A #fragment is not sent to the server, so it is not a redirect.
-      "/missing#top": missing,
+      // A #fragment is not sent to the server, so it is not a redirect; nor
+      // is a | that Chrome writes as %7C.
+      "/missing#top": `${origin}/missing#top answered with an error, HTTP 404 Not Found, so no kit was made. ${elsewhere}`,
+      "/old|page": `${origin}/old|page answered with an error, HTTP 404 Not Found, so no kit was made. ${elsewhere}`,
       "/moved": `${origin}/moved led to ${origin}/gone/page.html, which answered with an error, HTTP 404 Not Found, so no kit was made. ${elsewhere}`,
       // No page of its own: Chrome shows its error page, and the status says more.
       "/empty": `${origin}/empty answered with an error, HTTP 404 Not Found, so no kit was made. ${elsewhere}`,

@@ -94,6 +94,7 @@ test("a page whose server does not answer gets the run's time less a minute, and
     };
     await assert.rejects(navigate(cdp, "https://acme.example/"), {
       message: `Could not open https://acme.example/: no answer in ${seconds} s. The site may be down or slow; try again later, or give it more time with --timeout.`,
+      noAnswer: seconds,
     });
     assert.ok(Math.abs(given - seconds * 1000) < 1_000, `${given} ms for a ${limit} ms run`);
   }

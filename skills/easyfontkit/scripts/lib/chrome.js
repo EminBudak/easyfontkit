@@ -292,7 +292,9 @@ async function openPage(base, { width, height }) {
 // server gets the run's time to answer, less a minute for reading the
 // page: 30 s at least, and never more than the run has left. Returns the
 // address the tab ended on, after any redirects, or the one asked when the
-// tab has moved on to one that is not a web address, like about:blank.
+// tab has moved on to one that is not a web address, like about:blank. An
+// error says how many seconds a server that did not answer had (noAnswer),
+// as the one that did not can be one a redirect led to.
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   const answer = Math.max(1_000, Math.min(Math.max(30_000, timeLeft() - 60_000), timeLeft()));
@@ -301,7 +303,8 @@ async function navigate(cdp, url) {
     ({ errorText } = await cdp.send("Page.navigate", { url }, answer));
   } catch (err) {
     if (!err.timedOut) throw err;
-    throw new Error(`Could not open ${url}: no answer in ${Math.round(answer / 1000)} s. The site may be down or slow; try again later, or give it more time with --timeout.`);
+    const seconds = Math.round(answer / 1000);
+    throw Object.assign(new Error(`Could not open ${url}: no answer in ${seconds} s. The site may be down or slow; try again later, or give it more time with --timeout.`), { noAnswer: seconds });
   }
   if (errorText) throw Object.assign(new Error(`Could not open ${url}: ${errorText}`), { errorText });
   let timer;

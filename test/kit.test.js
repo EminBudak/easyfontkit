@@ -1426,6 +1426,49 @@ test("a page's fonts: each role's face, every file saved as served, each license
   }
 });
 
+// fonts.css as a style sheet reads it: its comments, and the rules outside
+// them.
+function cssParts(css) {
+  const comments = css.match(/\/\*[\s\S]*?\*\//g) || [];
+  return { comments, rules: css.replace(/\/\*[\s\S]*?\*\//g, "") };
+}
+
+test("the page's address goes into fonts.css only inside its comment, also when the page puts */ in it", { skip: noBrowser }, async () => {
+  const font = `<style>@font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); } h1, p { font-family: "Body Sans", sans-serif; }</style>`;
+  const page = (title, body = "") => `<!doctype html><html><head><title>${title}</title>${font}</head><body><h1>${title}</h1><p>A page whose address carries a style sheet of its own.</p>${body}</body></html>`;
+  const routes = {
+    "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+    "/evil.css": { type: "text/css", body: "body { background: red; }" },
+  };
+  const { server, origin } = await serve(routes);
+  const evil = `*/@import'${origin}/evil.css';/*`;
+  // A #fragment the page sets on itself once it has loaded, and a redirect
+  // to a path with the same in it.
+  routes["/hash"] = { body: page("Hash", `<script>addEventListener("load", () => setTimeout(() => (location.hash = ${JSON.stringify(evil)}), 300))</script>`) };
+  routes["/moved"] = { status: 302, headers: { location: `/x/${evil}` } };
+  routes[`/x/${evil}`] = { body: page("Moved") };
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-css-"));
+  try {
+    for (const [route, ended] of [
+      ["/hash", `/hash#${evil}`],
+      ["/moved", `/x/${evil}`],
+    ]) {
+      const dir = path.join(parent, route.slice(1));
+      const { kit } = await makeFontKit(`${origin}${route}`, { dir, timeLimit: 60_000 });
+      assert.equal(kit.url, `${origin}${ended}`, "fonts.json keeps the address as it is");
+      const css = fs.readFileSync(path.join(dir, "fonts.css"), "utf8");
+      const { comments, rules } = cssParts(css);
+      assert.equal(comments.length, 1, css);
+      assert.ok(comments[0].includes(`read from ${origin}${ended.replace(/\*/g, "%2A")} on `), comments[0]);
+      assert.ok(css.startsWith(comments[0]), "the comment is the one at the top");
+      assert.doesNotMatch(rules, /@import|evil/, css);
+    }
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page leaves the earlier kit as it was, closes its browser and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

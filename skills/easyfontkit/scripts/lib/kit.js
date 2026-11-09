@@ -725,6 +725,12 @@ function freePick(family) {
   return free ? { name: free.family, free } : null;
 }
 
+// The page's address goes into a CSS comment, and the page sets it: a path,
+// a redirect or a #fragment with */ in it would end the comment and put
+// rules of the page's choosing, like an @import, at the top of fonts.css.
+// Each * is written as %2A, which is the same address, so none can.
+const inComment = (text) => String(text).replace(/\*/g, "%2A");
+
 function writeCss(kit, families, dir) {
   const byKey = new Map(families.map((family) => [family.key, family]));
   const host = new URL(kit.url).hostname.replace(/^www\./, "");
@@ -738,7 +744,7 @@ function writeCss(kit, families, dir) {
   }
   const imports = freeImports([...picks.values()].map(({ free, used }) => ({ free, weights: freeWeights(free, [...used]) })));
   const lines = [
-    `/* Fonts of ${host}, read from ${kit.url} on ${kit.capturedAt.slice(0, 10)} by easyfontkit ${version}.`,
+    `/* Fonts of ${inComment(host)}, read from ${inComment(kit.url)} on ${kit.capturedAt.slice(0, 10)} by easyfontkit ${version}.`,
     "   Each font file the page loaded has a @font-face rule below, under its",
     "   family's name. --font-heading, --font-body, --font-button and --font-code",
     "   are the site's own fonts; the -free ones are the closest free fonts.",

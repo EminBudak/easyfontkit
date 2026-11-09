@@ -14,7 +14,8 @@ const { spawn, spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { Worker } = require("node:worker_threads");
 const { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit } = require("../skills/easyfontkit/scripts/lib/kit");
-const { findChrome } = require("../skills/easyfontkit/scripts/lib/chrome");
+const { findChrome, launch, openPage } = require("../skills/easyfontkit/scripts/lib/chrome");
+const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
 const { fixture, interAs } = require("./helpers");
 
 const CLI = path.resolve(__dirname, "../skills/easyfontkit/scripts/easyfontkit.js");
@@ -41,9 +42,9 @@ function serve(routes) {
 
 // The CLI's answer, and how long the process went on after it had printed
 // its result.
-function run(args) {
+function run(args, env = process.env) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CLI, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [CLI, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let printedAt = 0;
@@ -1754,6 +1755,104 @@ test("a page that moves itself on is read where it ends, and one that ends on an
       assert.deepEqual(snapshot(dir), before, route);
     }
   } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+// A page that sends the browser to a file served as an attachment, as a
+// download link does. Chrome on Linux saves a download in the Downloads
+// folder of the home it runs with, where nothing removes it.
+const noDownloads = noBrowser || (process.platform !== "linux" && "Chrome reads where it saves a download from HOME on Linux only");
+const savedIn = (home) =>
+  fs
+    .readdirSync(home, { recursive: true })
+    .map(String)
+    .filter((name) => /from-the-site|\.crdownload$/.test(name));
+function attachment(onAsked) {
+  return {
+    type: "application/octet-stream",
+    headers: { "content-disposition": 'attachment; filename="from-the-site.txt"' },
+    get body() {
+      onAsked();
+      return "written by the site\n";
+    },
+  };
+}
+const startsDownload = (script) => `<!doctype html><html><head><title>Download</title></head><body><h1>Download</h1><p>A page that gets a file.</p><a id="file" href="/file.bin">The file</a><script>${script}</script></body></html>`;
+
+test("a page cannot make the browser save a file and is read where it stays, and an address that is a file gets no kit and saves nothing", { skip: noDownloads }, async () => {
+  let asked = 0;
+  const { server, origin } = await serve({
+    "/script": { body: startsDownload(`setTimeout(() => (location.href = "/file.bin"), 300)`) },
+    "/click": { body: startsDownload(`setTimeout(() => document.getElementById("file").click(), 300)`) },
+    "/file.bin": attachment(() => asked++),
+    "/to-file": { status: 302, headers: { location: "/file.bin" } },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-download-"));
+  const home = path.join(parent, "home");
+  fs.mkdirSync(home);
+  const env = { ...process.env, HOME: home };
+  delete env.XDG_CONFIG_HOME;
+  delete env.XDG_DOWNLOAD_DIR;
+  try {
+    for (const route of ["/script", "/click"]) {
+      const was = asked;
+      const dir = path.join(parent, route.slice(1));
+      const cli = await run([`${origin}${route}`, "--out", dir], env);
+      assert.equal(cli.status, 0, cli.stderr);
+      assert.ok(asked > was, `${route} sent the browser to the file`);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "fonts.json"), "utf8")).url, `${origin}${route}`, "the page stayed where it was");
+      assert.deepEqual(savedIn(home), [], route);
+    }
+    for (const [route, message] of [
+      ["/file.bin", `Could not open ${origin}/file.bin: net::ERR_ABORTED`],
+      ["/to-file", `${origin}/to-file led to ${origin}/file.bin, which could not be opened (net::ERR_ABORTED), so no kit was made. Check the page in a normal browser.`],
+    ]) {
+      const was = asked;
+      const dir = path.join(parent, `asked${route.replace(/\W/g, "-")}`);
+      const cli = await run([`${origin}${route}`, "--out", dir], env);
+      assert.equal(cli.status, 1, cli.stdout);
+      assert.ok(cli.stderr.includes(`easyfontkit: ${message}\n`), cli.stderr);
+      assert.ok(asked > was, `${route} sent the browser to the file`);
+      assert.equal(fs.existsSync(dir), false, "nothing written");
+      assert.deepEqual(savedIn(home), [], route);
+    }
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("the browser stays told to save nothing until it is closed, also once the connection to its tab has closed", { skip: noDownloads }, async () => {
+  let asked = 0;
+  const { server, origin } = await serve({
+    "/": { body: startsDownload(`setTimeout(() => (location.href = "/file.bin"), 400)`) },
+    "/file.bin": attachment(() => asked++),
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-download-"));
+  const saved = Object.fromEntries(["HOME", "XDG_CONFIG_HOME", "XDG_DOWNLOAD_DIR"].map((name) => [name, process.env[name]]));
+  process.env.HOME = parent;
+  delete process.env.XDG_CONFIG_HOME;
+  delete process.env.XDG_DOWNLOAD_DIR;
+  const screen = { width: 800, height: 600 };
+  let chrome;
+  try {
+    setTimeLimit(60_000);
+    chrome = await launch(screen);
+    const cdp = await openPage(chrome.base, screen);
+    await cdp.send("Page.navigate", { url: `${origin}/` });
+    cdp.close();
+    for (let waited = 0; waited < 10_000 && !asked; waited += 50) await sleep(50);
+    assert.ok(asked, "the page sent the browser to the file");
+    await sleep(1_000);
+    assert.deepEqual(savedIn(parent), []);
+  } finally {
+    if (chrome) await chrome.close();
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   }

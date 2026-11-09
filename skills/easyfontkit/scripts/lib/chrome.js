@@ -232,6 +232,30 @@ function endAll(processes, profile) {
   return ended;
 }
 
+// The connection to the browser as a whole, for what is said to all of it.
+async function browserConnection(base) {
+  const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
+  return connect(webSocketDebuggerUrl);
+}
+
+// A page cannot make the browser save a file: a download it starts, by a
+// link, a script or a frame that goes to an attachment, is refused before
+// anything is written, in the user's Downloads folder or anywhere else, and
+// the page stays where it is. Said to the whole browser over a connection
+// of its own, which stays open until the browser has ended: Chrome forgets
+// it as soon as the connection that said it closes, and the connection to
+// the tab closes first. A run goes on in a browser that does not take it.
+// Gives that connection, or null when there is none.
+async function denyDownloads(base) {
+  try {
+    const browser = await browserConnection(base);
+    await browser.send("Browser.setDownloadBehavior", { behavior: "deny" }, 5_000).catch(() => {});
+    return browser;
+  } catch {
+    return null;
+  }
+}
+
 // Chrome on Linux takes its temp folder from TMPDIR, and makes there the
 // socket that hands a second start of a profile over to the first one. A
 // socket's path may not pass 107 bytes: the socket's own folder takes up to
@@ -297,6 +321,7 @@ async function launch({ width, height }) {
   const started = { child, profile, singleton: "", crashHandler: null };
   open.add(started);
   let base = "";
+  let denying = null;
   // Chrome is asked to quit first: killed outright, its helper processes go
   // on writing to the profile for a while. Those still there once it has
   // quit are killed, with its crash handler, and the profile is removed once
@@ -310,8 +335,7 @@ async function launch({ width, height }) {
     if (base && !exited) {
       let asked = false;
       try {
-        const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
-        const browser = await connect(webSocketDebuggerUrl);
+        const browser = await browserConnection(base);
         asked = true;
         await browser.send("Browser.close", {}, 3_000).catch(() => {});
       } catch {
@@ -321,6 +345,7 @@ async function launch({ width, height }) {
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
+    if (denying) denying.close();
     endAll(processes, profile);
     open.delete(started);
     started.singleton = started.singleton || singletonOf(profile);
@@ -337,6 +362,7 @@ async function launch({ width, height }) {
         // Known from the start: by the time the browser is stopped, its
         // helpers can have ended.
         started.crashHandler = crashHandlerOf(processesOf(child));
+        denying = await denyDownloads(base);
         return { base, close };
       }
     } catch {

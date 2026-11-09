@@ -117,3 +117,37 @@ test("a font on the visitor's computer that the CSS names as one word, like a Po
   assert.deepEqual(families.map((f) => f.name), ["Helvetica Neue", "SF Mono"]);
   assert.deepEqual(families[1].free.map((f) => f.family), ["JetBrains Mono", "IBM Plex Mono"]);
 });
+
+test("a heavy cut the CSS names as one word, like Arial-Black, is a family of its own, and the free match of each family does not hang on the order of the roles", () => {
+  const read = (heading, body) =>
+    buildFamilies({
+      pageUrl: PAGE,
+      roles: {
+        heading: [face("Liberation Sans", 120, heading, { custom: false, weight: "700" })],
+        body: [face("Liberation Sans", 400, body, { custom: false })],
+      },
+      files: [],
+      rules: [],
+      faces: [],
+      loaded: [],
+    });
+  const match = ({ families }, name) => families.find((f) => f.name === name).free.map((f) => f.family);
+  for (const [heading, body, names] of [
+    ["Arial-Black, sans-serif", "Arial, sans-serif", ["Arial Black", "Arial"]],
+    ["Arial, sans-serif", "Arial-Black, sans-serif", ["Arial", "Arial Black"]],
+    ["Arial-BlackItalic, sans-serif", "Arial, sans-serif", ["Arial Black", "Arial"]],
+  ]) {
+    const kit = read(heading, body);
+    assert.deepEqual([kit.roles.heading.family, kit.roles.body.family], names, `${heading} over ${body}`);
+    assert.deepEqual(match(kit, "Arial"), ["Arimo"], `plain Arial keeps its metric match: ${heading} over ${body}`);
+    assert.deepEqual(match(kit, "Arial Black"), ["Inter"], `Arial Black does not take Arial's: ${heading} over ${body}`);
+  }
+  // A heavy cut in one role's stack does not reach the names of another
+  // role's stack: Helvetica in the body's stack follows no cut there.
+  const kit = read('"Acme Display", "Arial Black", sans-serif', '"Acme Display", Helvetica, sans-serif');
+  assert.equal(kit.roles.heading.key, kit.roles.body.key);
+  assert.deepEqual(match(kit, "Acme Display"), ["Inter", "Arimo"]);
+  // A cut that is no heavy weight still goes with its family.
+  assert.equal(read('"HelveticaNeue-Bold", Helvetica, sans-serif', '"Helvetica Neue", sans-serif').roles.heading.family, "Helvetica Neue");
+  assert.equal(read("HelveticaNeue-Black, sans-serif", '"Helvetica Neue", sans-serif').roles.heading.family, "Helvetica Neue Black");
+});

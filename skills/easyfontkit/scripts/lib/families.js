@@ -48,14 +48,16 @@ const SYSTEM_NAMES = {
 };
 // A CSS name written as an identifier ("nyt-franklin") is kept as written;
 // one written as a name ("Airbnb Cereal VF") is cleaned like a file's.
-const cssDisplay = (name) => (/^[a-z0-9-]+$/.test(name) ? name : cleanName(name) || name);
+const cssDisplay = (name, options) => (/^[a-z0-9-]+$/.test(name) ? name : cleanName(name, options) || name);
 // A font on the visitor's computer is named as the CSS asks for it when the
 // CSS writes it as a name with spaces: the words a file adds to a name are
 // part of a system family's own name there, like Roman in Times New Roman
 // or Black in Arial Black. One written as a single word, like the PostScript
 // names SFMono-Regular and HelveticaNeue-Bold, is cleaned like a file's, so
-// it is SF Mono, and Helvetica Neue with the rest of its family.
-const systemName = (family) => SYSTEM_NAMES[lower(family)] || (/\s/.test(family) ? family : cssDisplay(family));
+// it is SF Mono, and Helvetica Neue with the rest of its family; but a
+// heavy cut keeps its weight, so Arial-Black is Arial Black, a family of its
+// own, as when it is written with a space.
+const systemName = (family) => SYSTEM_NAMES[lower(family)] || (/\s/.test(family) ? family : cssDisplay(family, { keepCut: true }));
 
 // A unicode-range as fonts.css can carry it: code points and ranges of them,
 // apart by commas, else nothing. The rules read from a style sheet's text
@@ -270,7 +272,6 @@ function describeFamily(family, pageUrl) {
   const cssNames = [...family.cssNames];
   const weightsUsed = [...family.weightsUsed].sort((a, b) => a - b);
   if (family.system) {
-    const names = family.stacks.flatMap(parseStack);
     const category = categoryOf(null, family.stacks, family.roles, null);
     return {
       key: family.key,
@@ -284,7 +285,7 @@ function describeFamily(family, pageUrl) {
       source: "system",
       license: { status: "system", name: "", url: "", maker: "", basis: "the site asks for a font already on the visitor's computer and sends no file" },
       files: [],
-      free: freeMatches({ names, category, stack: true }),
+      free: freeMatches({ stacks: family.stacks.map(parseStack), category, stack: true }),
     };
   }
   const urls = family.files.flatMap((file) => file.urls);

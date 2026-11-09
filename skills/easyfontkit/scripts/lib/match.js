@@ -92,11 +92,19 @@ function withoutMetric(entry) {
 
 // A family's name as people write it: Fontsource's own spelling when it
 // lists the family, else without the words a file adds ("Söhne VF" is
-// Söhne, "Lyon Text Web" is Lyon Text).
-function cleanName(name) {
+// Söhne, "Lyon Text Web" is Lyon Text). With keepCut, a heavy weight and
+// the words before it stay, for a font on the visitor's computer: Arial-Black
+// is Arial Black, a design of its own, not Arial drawn heavier.
+function cleanName(name, { keepCut = false } = {}) {
   const listed = lookup(name);
   if (listed) return listed.family;
-  return strip(words(name)).join(" ");
+  const parts = strip(words(name));
+  if (keepCut) {
+    const all = words(name);
+    const heavy = all.findLastIndex((word, i) => i > 0 && HEAVY.has(word.toLowerCase()));
+    if (heavy >= parts.length) return all.slice(0, heavy + 1).join(" ");
+  }
+  return parts.join(" ");
 }
 
 // The words of a style name that are not a weight or a slant: "Grid" in
@@ -143,24 +151,29 @@ const FEW_WEIGHTS = 0.005;
 
 // metrics: { xHeight, capHeight, lowercaseWidth }, each a share of the em,
 // as sfnt.describeFont reads them. names: every name the font goes by (its
-// family, its CSS names, its stack), tried in order on the hand-picked list.
-// stack: the names are a CSS font stack, so a free family it names (a site
-// asking for Inter where Inter is not installed) is the match itself.
-// slab: the font is a slab serif itself; slab serifs are matched only then.
-function freeMatches({ names = [], category = "sans", metrics = null, count = 3, stack = false, slab = false } = {}) {
+// family, its CSS names), tried in order on the hand-picked list; or stacks,
+// the CSS font stacks a font on the visitor's computer is asked for by, one
+// for each role. stack: the names are CSS font stacks, so a free family one
+// names (a site asking for Inter where Inter is not installed) is the match
+// itself. slab: the font is a slab serif itself; slab serifs are matched
+// only then.
+function freeMatches({ names = [], stacks = [names], category = "sans", metrics = null, count = 3, stack = false, slab = false } = {}) {
   const kind = DEFAULTS[category] ? category : "sans";
   // A free font that keeps a family's widths holds for the family's own
   // weights only: not for a cut drawn to other widths, nor for the names
   // after one in a stack, which are its fallbacks. In "Arial Black", Arial
-  // or "Arial Black", Helvetica, no name gets Arimo.
-  let cut = false;
-  for (const name of names) {
-    cut = cut || ownWidths(name);
-    const found = curated(name);
-    const entry = found && cut ? withoutMetric(found) : found;
-    if (entry) return entry.free.map((id) => BY_ID.get(id)).filter(Boolean).map((font) => described(font, entry.basis));
-    const listed = stack ? lookup(name) : null;
-    if (listed) return [described(listed, "the site's font stack names it, and it is free")];
+  // or "Arial Black", Helvetica, no name gets Arimo. Another role's stack
+  // follows no cut, so it starts again.
+  for (const list of stacks) {
+    let cut = false;
+    for (const name of list) {
+      cut = cut || ownWidths(name);
+      const found = curated(name);
+      const entry = found && cut ? withoutMetric(found) : found;
+      if (entry) return entry.free.map((id) => BY_ID.get(id)).filter(Boolean).map((font) => described(font, entry.basis));
+      const listed = stack ? lookup(name) : null;
+      if (listed) return [described(listed, "the site's font stack names it, and it is free")];
+    }
   }
   const m = metrics || {};
   const have = MEASURES.filter(([field]) => typeof m[field] === "number" && m[field] > 0);

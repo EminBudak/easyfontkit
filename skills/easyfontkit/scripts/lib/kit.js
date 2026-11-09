@@ -674,11 +674,16 @@ const slug = (text) =>
 
 const weightText = ({ min, max }) => (min === max ? String(min) : `${min} ${max}`);
 
+// A slug of plain ASCII cut to a length that leaves a file name well under
+// the 255 bytes a disk allows: a font can give itself a name of any length.
+const shortSlug = (text, most) => slug(text).slice(0, most).replace(/-+$/, "");
+
 // files/<family>-<weight or "variable">[-<style>][-italic].<format>, the
 // style when it is more than a weight ("grid" in Geist Pixel Grid), and
 // numbered when two files would still share a name (the latin and
-// latin-ext parts of one weight) or a name a file of the user's has in the
-// kit's files folder (own).
+// latin-ext parts of one weight, or two families with the same first 80
+// characters) or a name a file of the user's has in the kit's files folder
+// (own).
 function saveFiles(families, dir, own = []) {
   const taken = new Set(own.map((name) => name.toLowerCase()));
   fs.mkdirSync(path.join(dir, "files"));
@@ -686,7 +691,7 @@ function saveFiles(families, dir, own = []) {
     for (const file of family.files) {
       // A variable file's style is only its default instance.
       const style = file.variable ? [] : styleWords(file.style).filter((word) => !words(family.name).some((part) => part.toLowerCase() === word.toLowerCase()));
-      const stem = `${slug(family.name)}-${file.variable ? "variable" : file.weight.min}${style.length ? `-${slug(style.join(" "))}` : ""}${file.italic ? "-italic" : ""}`;
+      const stem = `${shortSlug(family.name, 80)}-${file.variable ? "variable" : file.weight.min}${style.length ? `-${shortSlug(style.join(" "), 40)}` : ""}${file.italic ? "-italic" : ""}`;
       let name = `${stem}.${file.format}`;
       for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${stem}-${n}.${file.format}`;
       taken.add(name.toLowerCase());

@@ -1835,6 +1835,52 @@ test("a page that moves itself on to a blob: address it made is read there and n
   }
 });
 
+test("fonts whose names are too long for a file name still get a kit, with short file names that stay apart", { skip: noBrowser }, async () => {
+  const family = "Verylongfamilyname".repeat(17);
+  const cssFamily = "Verylongcssname".repeat(20);
+  assert.ok(family.length > 300 && cssFamily.length >= 300);
+  const font = (names) => ({ type: "font/ttf", body: interAs({ names }) });
+  const face = (name, file) => `@font-face { font-family: "${name}"; src: url("${file}") format("truetype"); }`;
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Long names</title><style>
+        ${face("One", "/family.ttf")}
+        ${face("Two", "/same-start.ttf")}
+        ${face("Three", "/style.ttf")}
+        ${face(cssFamily, "/hidden.ttf")}
+        h1 { font-family: "One", sans-serif; }
+        h2 { font-family: "Two", sans-serif; }
+        p { font-family: "Three", sans-serif; }
+        pre, code { font-family: "${cssFamily}", monospace; }
+      </style></head><body><h1>Tools for teams</h1><h2>Plan and launch</h2><p>Every part of the work stays where the team can see it.</p><pre><code>npx acme init</code></pre></body></html>`,
+    },
+    // A family's name from its file, and one the same but for its end.
+    "/family.ttf": font({ 1: family, 2: "Regular" }),
+    "/same-start.ttf": font({ 1: `${family} Two`, 2: "Regular" }),
+    // A style's name from its file.
+    "/style.ttf": font({ 1: "Short Family", 2: "Stylish ".repeat(40).trim() }),
+    // A file that hides its names is named from the CSS.
+    "/hidden.ttf": font({ 1: ".\u007f", 2: "\u007f", 6: "\u007f" }),
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-long-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(`${origin}/`, { dir, timeLimit: 60_000 });
+    const names = fs.readdirSync(path.join(dir, "files"));
+    assert.equal(names.length, 4, names.join("\n"));
+    for (const name of names) assert.ok(Buffer.byteLength(name) <= 150, name);
+    // The kit lists each file under the name it was saved with.
+    const listed = kit.families.flatMap((one) => one.files.map((file) => path.basename(file.file)));
+    assert.deepEqual(listed.sort(), names.sort());
+    // The names in the kit itself stay whole.
+    assert.ok(kit.families.some((one) => one.name.replace(/ /g, "") === family), kit.families.map((one) => one.name).join("\n"));
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"]);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 // A page that sends the browser to a file served as an attachment, as a
 // download link does. Chrome on Linux saves a download in the Downloads
 // folder of the home it runs with, where nothing removes it.

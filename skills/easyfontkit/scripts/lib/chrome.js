@@ -89,6 +89,149 @@ function removeProfile({ profile, singleton }, maxRetries, retryDelay) {
   }
 }
 
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// When a process started, on Linux, from /proc/<pid>/stat, so that a pid
+// that has come round again on another process is not taken for it: null
+// once it has ended (a zombie has ended too).
+function startOf(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return fields[0] === "Z" || fields[0] === "X" ? null : fields[19];
+  } catch {
+    return null;
+  }
+}
+
+// The processes that run on Linux, but this one: the parent of each, and,
+// given a tag, those whose command line holds it.
+function processTable(tag = "") {
+  const parentOf = new Map();
+  const named = [];
+  let names = [];
+  try {
+    names = fs.readdirSync("/proc");
+  } catch {
+    return { parentOf, named };
+  }
+  for (const name of names) {
+    const pid = Number(name);
+    if (!/^\d+$/.test(name) || pid === process.pid) continue;
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const [state, ppid] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      if (state === "Z" || state === "X") continue;
+      parentOf.set(pid, Number(ppid));
+      if (tag && fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(tag)) named.push(pid);
+    } catch {
+      // Gone already.
+    }
+  }
+  return { parentOf, named };
+}
+
+// A browser's processes on Linux: the browser and those that descend from
+// it, each with its start. Other systems give none.
+function processesOf(child) {
+  if (process.platform !== "linux" || !child.pid) return [];
+  const { parentOf } = processTable();
+  const found = new Set([child.pid]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [pid, ppid] of parentOf) {
+      if (!found.has(pid) && found.has(ppid)) {
+        found.add(pid);
+        grew = true;
+      }
+    }
+  }
+  return [...found].map((pid) => ({ pid, start: startOf(pid) })).filter(({ start }) => start !== null);
+}
+
+// The crash handler a browser's processes name, on Linux, which Chrome starts
+// apart from them, in a session of its own: it is no child of theirs, and a
+// stop sent to the run's process group does not reach it. Ctrl-\ reaches the
+// browser's helpers, each of them asks it for a crash report, and it takes
+// hold of each one to write it. A helper killed while it is held stays until
+// the handler lets go of it, which it can fail to do for good. So it goes
+// with them: the one named, only when it is a crash handler by the name /proc
+// gives it (the first 15 characters of its program's name, chrome_crashpad
+// or msedge_crashpad) and it started with them or after them. Chrome rewrites
+// a helper's command line with spaces between its arguments. null when none
+// is named.
+function crashHandlerOf(processes) {
+  if (process.platform !== "linux" || !processes.length) return null;
+  const oldest = Math.min(...processes.map(({ start }) => Number(start)));
+  for (const { pid } of processes) {
+    let line = "";
+    try {
+      line = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    } catch {
+      continue;
+    }
+    const named = /(?:^|[\0 ])--crashpad-handler-pid=(\d+)(?=[\0 ]|$)/.exec(line);
+    if (!named) continue;
+    // 0 where Chrome runs without one.
+    const handler = Number(named[1]);
+    if (handler <= 1 || handler === process.pid) return null;
+    try {
+      if (!/crashpad/.test(fs.readFileSync(`/proc/${handler}/comm`, "utf8"))) return null;
+    } catch {
+      return null;
+    }
+    const start = startOf(handler);
+    return start === null || Number(start) < oldest ? null : { pid: handler, start };
+  }
+  return null;
+}
+
+// A browser's processes and its crash handler, known from its launch or
+// named by them now.
+function withCrashHandler(browser, processes) {
+  const handler = browser.crashHandler || crashHandlerOf(processes);
+  return handler && !processes.some(({ pid }) => pid === handler.pid) ? [...processes, handler] : processes;
+}
+
+// Each of them that still runs, killed.
+function killAll(processes) {
+  for (const { pid, start } of processes) {
+    if (startOf(pid) !== start) continue;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Gone already.
+    }
+  }
+}
+const allGone = (processes) => processes.every(({ pid, start }) => startOf(pid) !== start);
+
+// Each of a browser's processes that still runs, killed, and then each
+// process whose command line names its profile, as Chrome's helpers and its
+// crash handler do: they are found that way also once the browser has ended
+// and they belong to no one, and one of them can start another a moment
+// before it is killed, which would write into the profile after it was
+// removed. Looked for again until a look finds none and all have ended, a
+// second at most. Chrome's network service writes into the profile as it
+// ends, so the profile can be removed for good only once they are all gone.
+// Gives back every process it killed.
+function endAll(processes, profile) {
+  const ended = [...processes];
+  killAll(ended);
+  if (process.platform !== "linux") return ended;
+  const tag = path.basename(profile);
+  for (let waited = 0; waited < 1_000; waited += 20) {
+    const late = processTable(tag)
+      .named.map((pid) => ({ pid, start: startOf(pid) }))
+      .filter(({ pid, start }) => start !== null && !ended.some((known) => known.pid === pid && known.start === start));
+    if (!late.length && allGone(ended)) break;
+    killAll(late);
+    ended.push(...late);
+    pause(20);
+  }
+  return ended;
+}
+
 // Chrome on Linux takes its temp folder from TMPDIR, and makes there the
 // socket that hands a second start of a profile over to the first one. A
 // socket's path may not pass 107 bytes: the socket's own folder takes up to
@@ -114,13 +257,18 @@ function tempOf(profile) {
 // Chrome's component updater is sent to a closed port, so it downloads
 // nothing during a run: a download it had begun when a run ends early, as
 // on an error page, leaves an empty folder in the temp folder on every
-// system, which removing the profile does not reach.
+// system, which removing the profile does not reach. Chrome on Linux has its
+// crash handler keep its reports in the user's own browser's folder
+// (~/.config/google-chrome/Crash Reports), where nothing removes them, and
+// Ctrl-\ asks for one from each of the browser's processes:
+// BREAKPAD_DUMP_LOCATION puts them in the profile, which goes when the run
+// ends.
 async function launch({ width, height }) {
   const binary = findChrome();
   if (!binary) {
     throw new Error("No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.");
   }
-  const { profile, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
+  const { profile, env = process.env, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
   const child = spawn(
     binary,
     [
@@ -141,31 +289,39 @@ async function launch({ width, height }) {
       ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
       "about:blank",
     ],
-    { stdio: "ignore", ...where },
+    { stdio: "ignore", ...where, env: { ...env, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
   );
   let exited = false;
   child.on("exit", () => (exited = true));
   child.on("error", () => (exited = true));
-  const started = { child, profile, singleton: "" };
+  const started = { child, profile, singleton: "", crashHandler: null };
   open.add(started);
   let base = "";
   // Chrome is asked to quit first: killed outright, its helper processes go
-  // on writing to the profile for a while and the folder cannot be removed.
-  // A profile that still cannot be removed is left in the temp folder; the
-  // kit is not lost over it.
+  // on writing to the profile for a while. Those still there once it has
+  // quit are killed, with its crash handler, and the profile is removed once
+  // they are gone. A profile that still cannot be removed is left in the
+  // temp folder; the kit is not lost over it.
   const close = async () => {
+    // The browser's processes as they are now, with its crash handler; its
+    // helpers, which name the profile, are found also once it has ended, as
+    // one that could not start has.
+    const processes = withCrashHandler(started, processesOf(child));
     if (base && !exited) {
+      let asked = false;
       try {
         const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
         const browser = await connect(webSocketDebuggerUrl);
+        asked = true;
         await browser.send("Browser.close", {}, 3_000).catch(() => {});
       } catch {
-        // Not answering: it is killed below.
+        // Not answering: it is killed below, at once.
       }
-      for (let i = 0; i < 50 && !exited; i++) await sleep(100);
+      for (let i = 0; i < 50 && asked && !exited; i++) await sleep(100);
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
+    endAll(processes, profile);
     open.delete(started);
     started.singleton = started.singleton || singletonOf(profile);
     removeProfile(started, 10, 100);
@@ -178,6 +334,9 @@ async function launch({ width, height }) {
       if (/^\d+$/.test(port)) {
         base = `http://127.0.0.1:${port}`;
         started.singleton = singletonOf(profile);
+        // Known from the start: by the time the browser is stopped, its
+        // helpers can have ended.
+        started.crashHandler = crashHandlerOf(processesOf(child));
         return { base, close };
       }
     } catch {
@@ -189,27 +348,35 @@ async function launch({ width, height }) {
   throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
 }
 
-// Every browser still open, killed at once, and its profile and socket
-// folder removed, for a process that is being stopped and has no time to
-// ask them to quit. Their helper processes end by themselves soon after,
-// but on their way out they can write to the profile and make it again, so
-// it is removed once more a moment later. What is still left goes with the
-// system's temp clean-up.
+// Every browser still open, killed at once with its helpers and its crash
+// handler, and its profile and socket folder removed, for a process that is
+// being stopped and has no time to ask them to quit. It never throws.
 function killBrowsers() {
   const browsers = [...open];
   open.clear();
   if (!browsers.length) return;
   for (const browser of browsers) {
     browser.singleton = browser.singleton || singletonOf(browser.profile);
+    browser.processes = withCrashHandler(browser, processesOf(browser.child));
     try {
       browser.child.kill("SIGKILL");
     } catch {
       // Gone already.
     }
+    killAll(browser.processes);
   }
-  for (const wait of [0, 100]) {
-    if (wait) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
-    for (const browser of browsers) removeProfile(browser, 3, 50);
+  // Until they are gone, with any they started, a second at most each.
+  for (const browser of browsers) browser.processes = endAll(browser.processes, browser.profile);
+  // Once its processes are gone, nothing writes into a profile again. Where
+  // they cannot be told, as on macOS and Windows, helpers can still write
+  // into it for a moment as they end: it is removed until it stays gone,
+  // half a second at most. What is still left goes with the system's temp
+  // clean-up.
+  for (let round = 0; round < 5; round++) {
+    for (const browser of browsers) removeProfile(browser, 2, 20);
+    if (browsers.every(({ processes }) => processes.length && allGone(processes))) break;
+    pause(100);
+    if (!browsers.some(({ profile }) => fs.existsSync(profile))) break;
   }
 }
 

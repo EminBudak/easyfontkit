@@ -1554,59 +1554,74 @@ test("a unicode-range in the page's own CSS goes into fonts.css only when it is 
   }
 });
 
-test("a run stopped while it reads the page leaves the earlier kit as it was, closes its browser and ends by the signal", { skip: noBrowser || noSignals }, async () => {
+test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its process group, leaves the earlier kit as it was, ends its browser with its crash handler, leaves no crash report and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },
     "/held.css": { hold: true },
   });
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-stop-"));
-  const dir = path.join(parent, "kit");
-  // The browser's profile goes in the temp folder: a longer path than that
-  // can be too long for the socket Chrome makes there.
-  const profiles = () => fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith("easyfontkit-chrome-"));
-  const others = new Set(profiles());
   let child;
   try {
-    earlierKitIn(dir);
-    const before = snapshot(dir);
-    // In a process group of its own, as makersmcp runs a kit. The stop goes
-    // to the whole group, as Ctrl-C and makersmcp's cancel send it, and a
-    // second copy to the kit, as npm and makersmcp's supervisor pass it on.
-    child = spawn(process.execPath, [CLI, origin, "--out", dir], { detached: true, stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    const ended = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
-    const opened = new Promise((resolve) => child.stderr.on("data", (chunk) => /Opening/.test((stderr += chunk)) && resolve()));
-    await Promise.race([opened, ended]);
-    assert.match(stderr, /Opening/);
-    const mine = profiles().filter((name) => !others.has(name));
-    assert.equal(mine.length, 1);
-    await sleep(1500);
-    // Chrome's socket folder, which it removes only when it quits. On Linux
-    // the profile links to it from the start, from inside the profile when
-    // the temp folder's path is long.
-    let socket = "";
-    try {
-      const profile = path.join(os.tmpdir(), mine[0]);
-      socket = path.dirname(path.resolve(profile, fs.readlinkSync(path.join(profile, "SingletonSocket"))));
-    } catch (err) {
-      if (process.platform === "linux") throw err;
+    // Ctrl-\ reaches the browser's processes too, and Chrome takes it as a
+    // crash: each one asks its crash handler, which Chrome starts apart from
+    // them, for a report. Told on Linux only.
+    for (const signal of ["SIGTERM", ...(process.platform === "linux" ? ["SIGQUIT"] : [])]) {
+      const dir = path.join(parent, `kit-${signal}`);
+      // A home and a temp folder of the run's own, so whatever Chrome leaves
+      // in them is seen. A longer path than the test's own temp folder can be
+      // too long for the socket Chrome makes in it.
+      const home = path.join(parent, `home-${signal}`);
+      const tmp = path.join(parent, `tmp-${signal}`);
+      fs.mkdirSync(home);
+      fs.mkdirSync(tmp);
+      earlierKitIn(dir);
+      const before = snapshot(dir);
+      // In a process group of its own, as makersmcp runs a kit and a terminal
+      // runs a command. The stop goes to the whole group, as Ctrl-C, Ctrl-\
+      // and makersmcp's cancel send it, and a second copy to the kit, as npm
+      // and makersmcp's supervisor pass it on.
+      child = spawn(process.execPath, [CLI, origin, "--out", dir], { detached: true, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, HOME: home, TMPDIR: tmp } });
+      let stderr = "";
+      const ended = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+      const opened = new Promise((resolve) => child.stderr.on("data", (chunk) => /Opening/.test((stderr += chunk)) && resolve()));
+      await Promise.race([opened, ended]);
+      assert.match(stderr, /Opening/);
+      const mine = fs.readdirSync(tmp).filter((name) => name.startsWith("easyfontkit-chrome-"));
+      assert.equal(mine.length, 1);
+      await sleep(1500);
+      // Chrome's socket folder, which it removes only when it quits. On Linux
+      // the profile links to it from the start, from inside the profile when
+      // the temp folder's path is long.
+      let socket = "";
+      try {
+        const profile = path.join(tmp, mine[0]);
+        socket = path.dirname(path.resolve(profile, fs.readlinkSync(path.join(profile, "SingletonSocket"))));
+      } catch (err) {
+        if (process.platform === "linux") throw err;
+      }
+      process.kill(-child.pid, signal);
+      await sleep(20);
+      try {
+        process.kill(child.pid, signal);
+      } catch {
+        // Ended already.
+      }
+      const end = await ended;
+      assert.equal(end.signal, signal);
+      assert.ok(stderr.endsWith(`\neasyfontkit: stopped by ${signal}, so no kit was made. The earlier kit in ${dir} is as it was.\n`), stderr);
+      assert.deepEqual(snapshot(dir), before, signal);
+      // Nothing that names the profile, as the browser's processes do, or the
+      // home, as a crash handler that keeps its reports there does.
+      const left = () => spawnSync("ps", ["-A", "-o", "args="], { encoding: "utf8" }).stdout.split("\n").filter((line) => line.includes(mine[0]) || line.includes(home));
+      for (let i = 0; i < 150 && left().length; i++) await sleep(20);
+      assert.deepEqual(left(), [], signal);
+      assert.deepEqual(fs.readdirSync(tmp), [], `no browser profile left after ${signal}`);
+      if (socket) assert.equal(fs.existsSync(socket), false, "no socket folder left");
+      if (process.platform === "linux") {
+        const reports = spawnSync("find", [home, "-name", "Crash Reports", "-o", "-name", "*.dmp"], { encoding: "utf8" }).stdout.trim();
+        assert.equal(reports, "", `no crash reports in the home after ${signal}`);
+      }
     }
-    process.kill(-child.pid, "SIGTERM");
-    await sleep(20);
-    try {
-      process.kill(child.pid, "SIGTERM");
-    } catch {
-      // Ended already.
-    }
-    const { signal } = await ended;
-    assert.equal(signal, "SIGTERM");
-    assert.ok(stderr.endsWith(`\neasyfontkit: stopped by SIGTERM, so no kit was made. The earlier kit in ${dir} is as it was.\n`), stderr);
-    assert.deepEqual(snapshot(dir), before);
-    const browsers = () => spawnSync("ps", ["-A", "-o", "args="], { encoding: "utf8" }).stdout.split("\n").filter((line) => line.includes(mine[0]));
-    for (let i = 0; i < 150 && browsers().length; i++) await sleep(20);
-    assert.deepEqual(browsers(), []);
-    assert.equal(fs.existsSync(path.join(os.tmpdir(), mine[0])), false, "no browser profile left");
-    if (socket) assert.equal(fs.existsSync(socket), false, "no socket folder left");
   } finally {
     try {
       process.kill(-child.pid, "SIGKILL");

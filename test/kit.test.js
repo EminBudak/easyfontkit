@@ -1746,6 +1746,49 @@ test("a web font the browser refuses, one from another site whose server sends n
   }
 });
 
+test("a web font from another site whose server answers with an error and sends no CORS header, as error pages often come, gets a note with that error, not one that says the browser refused it", { skip: noBrowser }, async () => {
+  // Another site that is down for a while, as its error pages come without
+  // the header CORS asks for, and one that sends that header with its error.
+  const far = await serve({
+    "/busy.ttf": { status: 503, body: "<h1>Service Unavailable</h1>" },
+    "/gone.ttf": { status: 404, headers: { "access-control-allow-origin": "*" }, body: "<h1>Not Found</h1>" },
+  });
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Busy</title><style>
+        @font-face { font-family: "Busy Font"; src: url("${far.origin}/busy.ttf") format("truetype"); }
+        @font-face { font-family: "Gone Font"; src: url("${far.origin}/gone.ttf") format("truetype"); }
+        h1 { font-family: "Busy Font", serif; } p { font-family: "Gone Font", sans-serif; }
+      </style></head><body><h1>A heading in a font whose server is down</h1><p>Body text in a font that is not there.</p></body></html>`,
+    },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-busy-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(origin, { dir, timeLimit: 60_000 });
+    assert.deepEqual([kit.roles.heading.family, kit.roles.body.family], ["Busy Font", "Gone Font"]);
+    const family = Object.fromEntries(kit.families.map((f) => [f.name, f]));
+    for (const [name, file] of [
+      ["Busy Font", "busy.ttf"],
+      ["Gone Font", "gone.ttf"],
+    ]) {
+      assert.deepEqual(family[name].notLoaded, [`${far.origin}/${file}`], name);
+      assert.equal(family[name].license.status, "unknown", name);
+    }
+    // Both as a file whose server answered with an error: the note says
+    // which, and that is what kept the file out, with or without the header.
+    const md = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+    assert.ok(md.includes(`\n- ${far.origin}/busy.ttf was not a usable font file: the server answered 503.\n`), md);
+    assert.ok(md.includes(`\n- ${far.origin}/gone.ttf was not a usable font file: the server answered 404.\n`), md);
+    assert.doesNotMatch(md, /refused/);
+    assert.equal(kit.notes.length, 4);
+  } finally {
+    server.close();
+    far.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its process group, leaves the earlier kit as it was, ends its browser with its crash handler, leaves no crash report and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

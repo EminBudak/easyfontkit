@@ -72,6 +72,15 @@ function record(cdp) {
     if (corsErrorStatus && corsErrorStatus.corsError) refused.set(requestId, { url, reason: `the browser refused it (CORS error: ${corsErrorStatus.corsError})` });
     else if (blockedReason) refused.set(requestId, { url, reason: `the browser refused it (blocked: ${blockedReason})` });
   });
+  // The status of each request's last answer as the network got it, also
+  // of one the browser then refused: a server's error page often comes
+  // without the header CORS asks for, and then the error is what kept the
+  // file out, an answer another run may not get. Chrome can say this after
+  // it has said the request failed.
+  const statuses = new Map();
+  cdp.on("Network.responseReceivedExtraInfo", ({ requestId, statusCode }) => {
+    if (statusCode) statuses.set(requestId, statusCode);
+  });
   cdp.on("CSS.fontsUpdated", ({ font }) => font && faces.push(font));
   cdp.on("CSS.styleSheetAdded", ({ header }) => header && header.origin === "regular" && sheets.set(header.styleSheetId, header));
   // The tab's own page as the server answered it: the last response its
@@ -121,7 +130,7 @@ function record(cdp) {
   const arrived = ({ requestId }) => due.delete(requestId);
   cdp.on("Network.loadingFinished", arrived);
   cdp.on("Network.loadingFailed", arrived);
-  return { fonts, asked, refused, faces, sheets, page, due };
+  return { fonts, asked, refused, statuses, faces, sheets, page, due };
 }
 
 async function evaluate(cdp, expression, timeoutMs = 10_000) {
@@ -346,8 +355,9 @@ function decodeDataUrl(url) {
 
 // The font files, each once: the same file can be asked for twice, under
 // two addresses or as a data URL. A file the browser refused is skipped
-// with why, as one its server answered with an error is.
-async function readFiles(fonts, rules, faces, refused = new Map()) {
+// with why, as one its server answered with an error is, and with that
+// error when its server answered it with one.
+async function readFiles(fonts, rules, faces, refused = new Map(), statuses = new Map()) {
   const files = new Map();
   const skipped = [];
   const add = (buffer, urls) => {
@@ -365,7 +375,11 @@ async function readFiles(fonts, rules, faces, refused = new Map()) {
     if (body && body.length) add(body, font.urls);
     else if (font.status >= 400) skipped.push({ url: font.urls[0] || "", reason: `the server answered ${font.status}` });
   }
-  for (const refusal of refused.values()) if (!skipped.some((skip) => skip.url === refusal.url)) skipped.push(refusal);
+  for (const [requestId, refusal] of refused) {
+    if (skipped.some((skip) => skip.url === refusal.url)) continue;
+    const status = statuses.get(requestId) || 0;
+    skipped.push(status >= 400 ? { url: refusal.url, reason: `the server answered ${status}` } : refusal);
+  }
   const inline = [...rules.flatMap((rule) => rule.urls), ...faces.map((face) => String(face.src || ""))].filter((url) => url.startsWith("data:"));
   for (const url of new Set(inline)) {
     const body = decodeDataUrl(url);
@@ -448,7 +462,7 @@ async function scanPage(cdp, url, log = () => {}) {
     unicodeRange: face.unicodeRange && face.unicodeRange !== "U+0-10FFFF" ? face.unicodeRange : "",
     platformFamily: face.platformFontFamily || "",
   }));
-  const { files, skipped } = await readFiles(recorded.fonts, rules, faces, recorded.refused);
+  const { files, skipped } = await readFiles(recorded.fonts, rules, faces, recorded.refused, recorded.statuses);
   const { failed } = recorded.page;
   // The browser's own error page is titled with the host it could not
   // reach, which is not the site's bot check.

@@ -20,6 +20,14 @@ Read easyfontkit-linear.app/FONTS.md for the licenses and the free matches.
 
 Ask a coding agent to build something in a site's style and it reads the CSS: `font-family: sohne-var, "SF Pro Display", sans-serif`. That is a wish list, not an answer. Which of those did the browser use? Who made it? Can you use it too? easyfontkit opens the site in a headless browser, asks Chrome which font it actually drew the headings, the body text, the buttons and the code with, keeps the font files the page loaded, and reads what each file says about its own license. Your agent gets one Markdown file with the answers.
 
+## Requirements
+
+- Node.js 22 or newer.
+- Google Chrome or Chromium, which opens the site and says which fonts it drew the text with. It has been tested with Chrome 155 on Ubuntu 26.04, Chrome 157 on Ubuntu 22.04 and the Google Chrome that GitHub's runner for the latest Ubuntu comes with, and not with Chromium. easyfontkit looks for it on your PATH on Linux and where macOS and Windows install it, and for Edge and Brave as well, which no test has run with; on Windows it finds Chrome and Edge only. Set `CHROME_PATH` to use another build, as a path.
+- Linux, where it is tested: on the latest Ubuntu, on every push and before every release. This release has also run on Ubuntu 26.04 and on Ubuntu 22.04. It is written for macOS and Windows as well, but it has not been run on either.
+- Room on the disk for the kit and the one before it, as the earlier kit stays until the new one is in place, and in the temp folder for Chrome's profile.
+- Network access to the site, which the browser opens with its fonts as any browser would. The free fonts the matches come from are listed in a file that ships with easyfontkit. No ffmpeg, no account and no API key.
+
 ## What you get
 
 ```
@@ -105,7 +113,7 @@ npx easyfontkit <url> [options]
 
 Installed globally (`npm install -g easyfontkit`), the command is `easyfontkit`. npx keeps the copy an earlier run fetched, so `npx easyfontkit@latest` is how you get a newer version.
 
-It needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set `CHROME_PATH` to pick the browser. There are no npm dependencies and no browser to download: easyfontkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile, and reads the font files with Node's own zlib. The browser's component updater is pointed at a closed port, so the browser does not download its own components during a run, and on Linux its crash reports go into its throwaway profile, not into your own browser's folder. The browser also refuses every download a page starts, like a link or a redirect to a file, so a site cannot save a file on your machine.
+There are no npm dependencies and no browser to download: easyfontkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile, and reads the font files with Node's own zlib. The browser's component updater is pointed at a closed port, so the browser does not download its own components during a run, and on Linux its crash reports go into its throwaway profile, not into your own browser's folder. The browser also refuses every download a page starts, like a link or a redirect to a file, so a site cannot save a file on your machine.
 
 ## How it works
 

@@ -427,20 +427,23 @@ test("a browser that stops answering once it has started, or quits, ends the run
 
 // A browser held still, as a busy machine can hold it, until it is asked
 // whether it still answers and three seconds have gone by. It then answers
-// that question, and after it each call it was sent while it was held, as a
-// browser does once it goes on.
+// that question, and a moment later each call it was sent while it was
+// held, as Chrome does once it goes on: by then the call has been given its
+// wait again. Answered together with the question, the call's answer would
+// be taken while the browser is asked, and that second wait never tried.
 function heldStill() {
   let goOn;
   const wentOn = new Promise((resolve) => (goOn = resolve));
   return {
     // A call sent while it is held, answered with this once it goes on.
     until: (result) => wentOn.then(() => result),
-    // The question, answered three seconds after it is asked.
+    // The question, answered three seconds after it is asked, and the calls
+    // held a fifth of a second after that.
     asked: () =>
       new Promise((resolve) =>
         setTimeout(() => {
           resolve({});
-          goOn();
+          setTimeout(goOn, 200);
         }, 3_000),
       ),
   };
@@ -468,11 +471,11 @@ test("a call that gets no answer is put down to the browser only when the browse
   assert.deepEqual(await answering.cdp.send("Page.enable"), {});
   assert.deepEqual(answering.sent(), ["Page.navigate", "Browser.getVersion", "Page.enable"]);
   // A browser held still for longer than the calls waited. Two calls that
-  // ran out together share one question, and each gets the answer the
-  // browser gives it once it goes on, sent only once. A call still
-  // unanswered after its second wait fails as before when the browser
-  // answers again, and with what says the browser stopped when it does not.
-  // An answer that comes while the browser is asked is taken.
+  // ran out together share one question, and each gets its wait again and,
+  // in it, the answer the browser gives it once it goes on, sent only once.
+  // A call still unanswered after its second wait fails as before when the
+  // browser answers again, and with what says the browser stopped when it
+  // does not. An answer that comes while the browser is asked is taken.
   const busy = heldStill();
   const navigated = { frameId: "1", loaderId: "2" };
   const evaluated = { result: { type: "number", value: 1 } };

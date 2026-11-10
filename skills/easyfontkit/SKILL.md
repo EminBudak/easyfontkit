@@ -20,7 +20,7 @@ The folder has to be new, empty or hold an earlier kit. A new run into it replac
 ## Use it
 
 1. Read `fonts/<name>/FONTS.md` first. Its table gives each role's font, the weights the site uses, the license and the closest free font.
-2. Each family's section says who made it, where it was served from and what its file says about its license. Open means it may be used under that license anywhere. Commercial means its maker sells it, and the site's license covers the site, not other work. Unknown means neither the file nor its source says. A system font is the visitor's own and comes with no file.
+2. Each family's section says who made it, where it was served from and what its file says about its license. Open means it may be used under that license anywhere. Commercial means its maker sells it, and the site's license covers the site, not other work. Unknown means neither the file nor its source says, or the file did not load while the page was read. A system font is the visitor's own and comes with no file.
 3. In CSS, import `fonts.css` from the kit folder and use `var(--font-heading)`, `var(--font-body)`, `var(--font-button)` and `var(--font-code)` for the site's own fonts, or the `-free` variables for the closest free ones. The font files are in `files/`.
 4. Before a commercial or unknown font goes into work the user will publish, tell them which one it is and who sells it, and ask whether they hold a license. Until they answer, build with the `-free` variable. Open fonts need no question.
 5. For images and video, name the families in prompts and titles, and hand the files in `files/` to tools that take a font file.

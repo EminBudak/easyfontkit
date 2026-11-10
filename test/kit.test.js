@@ -1558,6 +1558,54 @@ test("a unicode-range in the page's own CSS goes into fonts.css only when it is 
   }
 });
 
+test("a web font whose file the browser asked for and did not get while the page was read, one that never comes or one that is not there, is named with that file's address and an unknown license, where it was taken for a font of the visitor's own", { skip: noBrowser }, async () => {
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Late</title><style>
+        @font-face { font-family: "Slowpoke"; src: url("/slowpoke.ttf") format("truetype"); }
+        @font-face { font-family: "Broken Sans"; src: url("/broken.woff2") format("woff2"); }
+        h1 { font-family: "Slowpoke", serif; } p, button { font-family: "Broken Sans", sans-serif; }
+      </style></head><body><h1>A heading whose font never comes</h1><p>Body text whose font is not there.</p><button>Go</button></body></html>`,
+    },
+    "/slowpoke.ttf": { hold: true },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-unloaded-"));
+  const dir = path.join(parent, "kit");
+  try {
+    // A run's time short enough that the wait for a page that does not
+    // finish loading is cut to a few seconds.
+    const { kit } = await makeFontKit(origin, { dir, timeLimit: 65_000 });
+    assert.deepEqual([kit.roles.heading.family, kit.roles.body.family, kit.roles.button.family], ["Slowpoke", "Broken Sans", "Broken Sans"]);
+    const family = Object.fromEntries(kit.families.map((f) => [f.name, f]));
+    for (const [name, file] of [
+      ["Slowpoke", "slowpoke.ttf"],
+      ["Broken Sans", "broken.woff2"],
+    ]) {
+      assert.equal(family[name].system, false, name);
+      assert.deepEqual(family[name].notLoaded, [`${origin}/${file}`], name);
+      assert.deepEqual(family[name].files, [], name);
+      assert.equal(family[name].license.status, "unknown", name);
+      assert.equal(family[name].source, "self-hosted", name);
+    }
+    const md = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+    assert.match(md, /\| Headings \| Slowpoke \| 700 \| Unknown \| [A-Z][^|]+ \|/);
+    assert.ok(md.includes(`\n- Files: none read, as ${origin}/slowpoke.ttf did not load while the page was read\n`), md);
+    assert.ok(md.includes("\n- License: Unknown. Its file did not load while the page was read, so nothing in it could be read.\n"), md);
+    assert.doesNotMatch(md, /System font|sends no file/);
+    // One that never answered may come on another run; one the server
+    // answered with an error has a note of its own that says why.
+    assert.match(md, new RegExp(`\\n- Some of the headings were drawn with .+?, (a fallback|fallbacks), because Slowpoke's file ${origin}/slowpoke\\.ttf did not load while the page was read\\. That text is counted as Slowpoke, the font the site asks for\\. The kit has no file of it, so its license is unknown: try again later\\.\\n`));
+    assert.match(md, new RegExp(`\\n- Some of the body text and buttons were drawn with .+?, (a fallback|fallbacks), because Broken Sans's file ${origin}/broken\\.woff2 did not load while the page was read\\. That text is counted as Broken Sans, the font the site asks for\\. The kit has no file of it, so its license is unknown\\.\\n`));
+    assert.match(md, new RegExp(`\\n- ${origin}/broken\\.woff2 was not a usable font file: [^\\n]+\\.\\n`));
+    // Its free match comes from Google Fonts, as for any font of unknown
+    // license.
+    assert.match(fs.readFileSync(path.join(dir, "fonts.css"), "utf8"), /--font-heading-free: "[^"]+", serif;/);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its process group, leaves the earlier kit as it was, ends its browser with its crash handler, leaves no crash report and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

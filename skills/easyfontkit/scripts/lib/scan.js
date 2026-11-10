@@ -53,6 +53,13 @@ function record(cdp) {
       .then(({ body, base64Encoded }) => Buffer.from(body, base64Encoded ? "base64" : "utf8"))
       .catch(() => null);
   });
+  // The address of every font file the browser asked for, redirects
+  // included, also of one whose answer has not come: one that is not among
+  // the files read did not load while the page was read.
+  const asked = new Set();
+  cdp.on("Network.requestWillBeSent", ({ type, request }) => {
+    if (type === "Font" && request && !String(request.url).startsWith("data:")) asked.add(request.url);
+  });
   cdp.on("CSS.fontsUpdated", ({ font }) => font && faces.push(font));
   cdp.on("CSS.styleSheetAdded", ({ header }) => header && header.origin === "regular" && sheets.set(header.styleSheetId, header));
   // The tab's own page as the server answered it: the last response its
@@ -102,7 +109,7 @@ function record(cdp) {
   const arrived = ({ requestId }) => due.delete(requestId);
   cdp.on("Network.loadingFinished", arrived);
   cdp.on("Network.loadingFailed", arrived);
-  return { fonts, faces, sheets, page, due };
+  return { fonts, asked, faces, sheets, page, due };
 }
 
 async function evaluate(cdp, expression, timeoutMs = 10_000) {
@@ -354,7 +361,8 @@ async function readFiles(fonts, rules, faces) {
 }
 
 // Opens the page and reads it: the faces of each role, every font file it
-// loaded, its @font-face rules, the web fonts Chrome reports as loaded, the
+// loaded, the addresses of every one the browser asked for (asked), its
+// @font-face rules, the web fonts Chrome reports as loaded, the
 // families document.fonts holds, the status and address the server
 // answered the page with (answer), the address the page was first asked
 // from as Chrome wrote it (first), the address a redirect or the page led
@@ -372,7 +380,7 @@ async function scanPage(cdp, url, log = () => {}) {
   await cdp.send("CSS.enable");
   const { frameTree } = await cdp.send("Page.getFrameTree");
   recorded.page.frame = frameTree.frame.id;
-  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [], ...found });
+  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [], asked: [], ...found });
   log(`Opening ${url}`);
   let pageUrl;
   try {
@@ -432,7 +440,7 @@ async function scanPage(cdp, url, log = () => {}) {
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })) };
+  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked] };
 }
 
 module.exports = { scanPage, fontFaceRules, decodeDataUrl };

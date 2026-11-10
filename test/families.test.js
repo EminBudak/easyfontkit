@@ -97,6 +97,51 @@ test("the note on text a late web font left to a fallback agrees with the roles 
   assert.deepEqual(two, ["Some of the headings were drawn with Liberation Sans and DejaVu Sans, fallbacks, because Acme Clean loaded too late for them. That text is counted as Acme Clean, the font the site asks for."]);
 });
 
+test("a web font whose file the browser asked for and did not get while the page was read is named as the CSS names it, with the file's address, an unknown license and a note, and is not taken for a font of the visitor's own", () => {
+  const slow = "https://www.acme.com/fonts/slowpoke.woff2";
+  const read = (asked, skipped = []) =>
+    buildFamilies({
+      pageUrl: PAGE,
+      roles: { heading: [face("Liberation Serif", 120, "Slowpoke, Georgia, serif", { custom: false, weight: "800" })] },
+      files: [],
+      // A file for characters the text does not use, which the browser does
+      // not ask for.
+      rules: [rule("Slowpoke", `${slow}#v1`), { ...rule("Slowpoke", "https://www.acme.com/fonts/slowpoke-cyrillic.woff2"), unicodeRange: "U+0400-04FF" }],
+      faces: [],
+      loaded: [],
+      asked,
+      skipped,
+    });
+  const { roles, families, notes } = read([slow]);
+  assert.equal(roles.heading.family, "Slowpoke");
+  assert.deepEqual(roles.heading.weights, [800]);
+  assert.equal(families.length, 1);
+  const [slowpoke] = families;
+  assert.equal(slowpoke.system, false);
+  assert.equal(slowpoke.missing, false);
+  assert.deepEqual(slowpoke.notLoaded, [slow], "the file the browser asked for alone");
+  assert.deepEqual(slowpoke.files, []);
+  assert.deepEqual([slowpoke.license.status, slowpoke.license.basis], ["unknown", "its file did not load while the page was read, so nothing in it could be read"]);
+  assert.deepEqual([slowpoke.source, slowpoke.host], ["self-hosted", "www.acme.com"]);
+  assert.equal(slowpoke.category, "serif");
+  assert.deepEqual(notes, [`Some of the headings were drawn with Liberation Serif, a fallback, because Slowpoke's file ${slow} did not load while the page was read. That text is counted as Slowpoke, the font the site asks for. The kit has no file of it, so its license is unknown: try again later.`]);
+  // A file whose server answered, with an error or with no font, has a note
+  // of its own that says why, and trying again later is not offered for it.
+  assert.deepEqual(read([slow], [{ url: slow, reason: "the server answered 404" }]).notes, [
+    `Some of the headings were drawn with Liberation Serif, a fallback, because Slowpoke's file ${slow} did not load while the page was read. That text is counted as Slowpoke, the font the site asks for. The kit has no file of it, so its license is unknown.`,
+  ]);
+  // Matched by its stack, as when it was taken for a font of the visitor's
+  // own: Georgia's match.
+  const before = read([]);
+  assert.deepEqual(slowpoke.free.map((f) => f.family), before.families[0].free.map((f) => f.family));
+  // A family whose files the browser never asked for is the visitor's own
+  // font, as before.
+  assert.equal(before.families[0].system, true);
+  assert.equal(before.families[0].name, "Slowpoke");
+  assert.equal("notLoaded" in before.families[0], false);
+  assert.deepEqual(before.notes, []);
+});
+
 test("a font on the visitor's computer keeps the name the CSS asks for it by", () => {
   const { roles, families } = buildFamilies({
     pageUrl: PAGE,

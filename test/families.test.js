@@ -66,6 +66,37 @@ test("text a late web font left to a fallback counts as the web font, with a not
   assert.equal(families.find((f) => f.system).drawnWith, "DejaVu Sans Mono");
 });
 
+test("the note on text a late web font left to a fallback agrees with the roles and the fallbacks it names", () => {
+  const clean = file("https://use.typekit.net/af/abc/000/27/l", { 1: "Acme Clean", 8: "Acme Type" });
+  const note = (roles) =>
+    buildFamilies({
+      pageUrl: PAGE,
+      roles: Object.fromEntries(roles.map((role) => [role, [face("Liberation Sans", 100, '"Acme Clean", acme-clean, sans-serif', { custom: false })]])),
+      files: [clean],
+      rules: [rule("acme-clean", clean.urls[0])],
+      faces: [],
+      loaded: [{ family: "acme-clean" }],
+    }).notes;
+  const late = (roles, verb, them) => [`Some of the ${roles} ${verb} drawn with Liberation Sans, a fallback, because Acme Clean loaded too late for ${them}. That text is counted as Acme Clean, the font the site asks for.`];
+  assert.deepEqual(note(["heading"]), late("headings", "were", "them"));
+  assert.deepEqual(note(["button"]), late("buttons", "were", "them"));
+  assert.deepEqual(note(["body"]), late("body text", "was", "it"));
+  assert.deepEqual(note(["code"]), late("code", "was", "it"));
+  assert.deepEqual(note(["body", "code"]), late("body text and code", "were", "them"));
+  assert.deepEqual(note(["heading", "body", "button"]), late("headings, body text and buttons", "were", "them"));
+  // Text drawn with two fallbacks names them both as fallbacks.
+  const stack = '"Acme Clean", acme-clean, sans-serif';
+  const two = buildFamilies({
+    pageUrl: PAGE,
+    roles: { heading: [face("Liberation Sans", 100, stack, { custom: false }), face("DejaVu Sans", 60, stack, { custom: false })] },
+    files: [clean],
+    rules: [rule("acme-clean", clean.urls[0])],
+    faces: [],
+    loaded: [{ family: "acme-clean" }],
+  }).notes;
+  assert.deepEqual(two, ["Some of the headings were drawn with Liberation Sans and DejaVu Sans, fallbacks, because Acme Clean loaded too late for them. That text is counted as Acme Clean, the font the site asks for."]);
+});
+
 test("a font on the visitor's computer keeps the name the CSS asks for it by", () => {
   const { roles, families } = buildFamilies({
     pageUrl: PAGE,

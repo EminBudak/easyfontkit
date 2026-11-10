@@ -21,6 +21,8 @@ const MIN_SHARE = 0.15;
 const bare = (url) => String(url || "").split("#")[0];
 const noQuery = (url) => bare(url).split("?")[0];
 const lower = (text) => String(text || "").toLowerCase();
+// "a", "a and b", "a, b and c".
+const listOf = (items) => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`);
 
 function parseStack(stack) {
   return String(stack || "")
@@ -256,8 +258,11 @@ function buildFamilies(scan) {
 
   const notes = [...fallbacks].map(([family, late]) => {
     const where = late.roles.map((role) => ROLE_WORDS[role]);
-    const roleText = where.length <= 1 ? where.join("") : `${where.slice(0, -1).join(", ")} and ${where[where.length - 1]}`;
-    return `Some of the ${roleText} was drawn with ${[...late.drawnWith].join(" and ")}, a fallback, because ${family.name} loaded too late for it. That text is counted as ${family.name}, the font the site asks for.`;
+    // Headings and buttons are many; body text and code are one, unless
+    // another role goes with them.
+    const many = where.length > 1 || late.roles.some((role) => role === "heading" || role === "button");
+    const fonts = [...late.drawnWith];
+    return `Some of the ${listOf(where)} ${many ? "were" : "was"} drawn with ${listOf(fonts)}, ${fonts.length > 1 ? "fallbacks" : "a fallback"}, because ${family.name} loaded too late for ${many ? "them" : "it"}. That text is counted as ${family.name}, the font the site asks for.`;
   });
   const list = [...families.values()].map((family) => describeFamily(family, pageUrl));
   const order = (family) => {

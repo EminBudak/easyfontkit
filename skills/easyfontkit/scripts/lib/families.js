@@ -200,19 +200,24 @@ function buildFamilies(scan) {
     }
     return null;
   };
-  // A web family the stack asks for before any system font, none of whose
+  // A web family the stack asks for before any other font, none of whose
   // files was read, though the page's own @font-face rules give it files
   // the browser asked for: they had not come when the page was read, or did
   // not load at all. Its text was drawn with a fallback, but the site does
   // send the font, so it is no font of the visitor's own. It is named as the
   // CSS names it, with the addresses of those files. A family whose files
   // the browser never asked for, as for characters the text does not use,
-  // is not one.
+  // is not one, and the browser goes on past it. A name that no @font-face
+  // rule of the page declares ends the search: it is a font of the
+  // visitor's own, like Arial, and the text may have been drawn with it,
+  // while other text that asks for the web font first made the browser ask
+  // for that font's file.
   const askedFor = new Set(asked.map(bare));
   const unloadedIn = (stack) => {
     for (const name of stack) {
-      if (SYSTEM_KEYWORD.test(name)) return null;
-      const urls = rules.filter((rule) => lower(rule.family) === lower(name)).flatMap((rule) => rule.urls.map(bare)).filter((url) => askedFor.has(url));
+      const declared = rules.filter((rule) => lower(rule.family) === lower(name));
+      if (SYSTEM_KEYWORD.test(name) || !declared.length) return null;
+      const urls = declared.flatMap((rule) => rule.urls.map(bare)).filter((url) => askedFor.has(url));
       if (!urls.length) continue;
       const shown = cssDisplay(name);
       const family = familyOf(/\p{L}/u.test(shown) ? shown : "Unnamed font");

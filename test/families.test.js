@@ -142,6 +142,41 @@ test("a web font whose file the browser asked for and did not get while the page
   assert.deepEqual(before.notes, []);
 });
 
+test("text whose stack asks for a font of the visitor's own before a web font whose file did not load is that font's, with no note, though other text made the browser ask for the web font's file", () => {
+  const slow = "https://www.acme.com/fonts/slowpoke.woff2";
+  const read = (stack) =>
+    buildFamilies({
+      pageUrl: PAGE,
+      roles: { heading: [face("Liberation Sans", 120, stack, { custom: false, weight: "800" })] },
+      files: [],
+      // A family for characters the text does not use, whose file the
+      // browser does not ask for.
+      rules: [rule("Slowpoke", slow), { ...rule("Slowpoke Cyrillic", "https://www.acme.com/fonts/slowpoke-cyrillic.woff2"), unicodeRange: "U+0400-04FF" }],
+      faces: [],
+      loaded: [],
+      // Asked for by other text, whose stack names Slowpoke first.
+      asked: [slow],
+    });
+  // Arial is no web font of the page's: the text was drawn with it, here as
+  // Liberation Sans, and Slowpoke's file has nothing to do with it.
+  const { roles, families, notes } = read('Arial, "Slowpoke", serif');
+  assert.equal(roles.heading.family, "Arial");
+  assert.deepEqual(roles.heading.weights, [800]);
+  assert.equal(families.length, 1);
+  const [arial] = families;
+  assert.deepEqual([arial.name, arial.system, arial.license.status, arial.drawnWith], ["Arial", true, "system", "Liberation Sans"]);
+  assert.equal("notLoaded" in arial, false);
+  assert.equal(arial.free[0].family, "Arimo");
+  assert.deepEqual(notes, []);
+  // A family of the page's whose file the browser did not ask for is gone
+  // past, as the browser goes past it, to the web font whose file did not
+  // load.
+  const past = read('"Slowpoke Cyrillic", "Slowpoke", serif');
+  assert.equal(past.roles.heading.family, "Slowpoke");
+  assert.deepEqual(past.families.map((f) => [f.name, f.system, f.notLoaded]), [["Slowpoke", false, [slow]]]);
+  assert.equal(past.notes.length, 1);
+});
+
 test("a font on the visitor's computer keeps the name the CSS asks for it by", () => {
   const { roles, families } = buildFamilies({
     pageUrl: PAGE,

@@ -587,7 +587,7 @@ test("a browser that stops answering, or quits, as its page is opened, scrolled 
   }
 });
 
-test("a browser held still for longer than a call waits, as a busy machine can hold it, that answers again within ten seconds of being asked, gives the call its answer once it goes on, and the run saves its whole kit, as in 0.1.2, wherever it was held: at the wait for the page's fonts, the navigation, the scroll, a layout read or the reading of a role; the call is not sent twice", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+test("a browser held still for longer than a call waits, as a busy machine can hold it, that answers more than two seconds after it is asked and within ten, gives the call its answer in the wait the call then gets again, and the run saves its whole kit wherever it was held: at the wait for the page's fonts, as 0.1.2 did, and at the navigation, the scroll, a layout read or the reading of a role, where 0.1.2 named the site or the page, or saved a kit without that role; the call is not sent twice", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
   // One run for each call, all at once, each in a browser of its own, held
   // still from the first time the call is sent: the call gets no answer in
   // its wait, and the browser, asked then, answers three seconds later, and

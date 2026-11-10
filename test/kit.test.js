@@ -2057,8 +2057,9 @@ test("the browser stays told to save nothing until it is closed, also once the s
 });
 
 // The ports that the processes whose command line names the given text
-// listen on, from /proc on Linux.
-function listening(named) {
+// listen on, from /proc on Linux. A kernel with IPv6 turned off has no
+// /proc/net/tcp6: the IPv4 table is read all the same.
+function listening(named, tables = ["/proc/net/tcp", "/proc/net/tcp6"]) {
   const sockets = new Set();
   for (const pid of fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
     try {
@@ -2072,8 +2073,15 @@ function listening(named) {
     }
   }
   const ports = [];
-  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
-    for (const line of fs.readFileSync(table, "utf8").split("\n").slice(1)) {
+  for (const table of tables) {
+    let text;
+    try {
+      text = fs.readFileSync(table, "utf8");
+    } catch (err) {
+      if (err.code === "ENOENT") continue;
+      throw err;
+    }
+    for (const line of text.split("\n").slice(1)) {
       const fields = line.trim().split(/\s+/);
       // The state 0A is LISTEN; the tenth field is the socket's inode.
       if (fields[3] === "0A" && sockets.has(fields[9])) ports.push(parseInt(fields[1].split(":")[1], 16));
@@ -2089,6 +2097,21 @@ test("the browser listens on no port, so no other program on the machine can rea
   const screen = { width: 800, height: 600 };
   let chrome;
   try {
+    // The ports are found: a listener of the test's own, named on its
+    // command line, in the IPv4 table, also where the IPv6 one is missing.
+    const tag = `easyfontkit-listener-${process.pid}`;
+    const listener = spawn(process.execPath, ["-e", 'const s = require("net").createServer().listen(0, "127.0.0.1", () => console.log(s.address().port));', tag], { stdio: ["ignore", "pipe", "ignore"] });
+    try {
+      const port = Number(
+        await new Promise((resolve, reject) => {
+          listener.stdout.once("data", resolve);
+          listener.once("exit", () => reject(new Error("the listener did not start")));
+        }),
+      );
+      assert.deepEqual(listening(tag, ["/proc/net/tcp", "/proc/net/no-such-table"]), [port]);
+    } finally {
+      listener.kill("SIGKILL");
+    }
     setTimeLimit(60_000);
     chrome = await launch(screen);
     const profile = fs.readdirSync(parent).find((name) => name.startsWith("easyfontkit-chrome-"));

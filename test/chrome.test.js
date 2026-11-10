@@ -9,7 +9,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { spawn } = require("node:child_process");
-const { launch, killBrowsers, openPage, navigate } = require("../skills/easyfontkit/scripts/lib/chrome");
+const { launch, killBrowsers, connect, openPage, navigate } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { makeFontKit } = require("../skills/easyfontkit/scripts/lib/kit");
 const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
 const { devtools } = require("./devtools");
@@ -404,19 +404,114 @@ test("a browser that stops answering once it has started, or quits, ends the run
   const kit = { "fonts.json": JSON.stringify({ version: 1, generator: "easyfontkit 0.1.2", url: "https://acme.example/", families: [] }), "FONTS.md": "# Fonts of acme.example\n", "fonts.css": ":root {}\n" };
   for (const [name, text] of Object.entries(kit)) fs.writeFileSync(path.join(dir, name), text);
   const stopped = "chrome stopped answering, so no kit was made. The machine may be busy; try again.";
-  for (const [what, options, timeLimit, last, message] of [
-    // A call that gets no answer until the run's time is out.
-    ["a call", { calls: { "Network.enable": "hold" } }, 4_000, "Network.enable", "chrome did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout."],
+  // The calls to the tab after the three that open it.
+  for (const [what, options, timeLimit, calls, message] of [
+    // A call that gets no answer until the run's time is out, and the
+    // browser itself, asked then.
+    ["a call", { calls: { "Network.enable": "hold" } }, 4_000, ["Network.enable", "Browser.getVersion"], "chrome did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout."],
     // A browser that drops its connection to the tab, before the page is
     // asked for or as it is, or its endpoint's request for the tab, as one
     // that has quit.
-    ["the connection", { calls: { "Network.enable": "close" } }, 60_000, "Network.enable", stopped],
-    ["the first navigation", { calls: { "Page.getFrameTree": { frameTree: { frame: { id: "1" } } }, "Page.navigate": "close" } }, 60_000, "Page.navigate", stopped],
-    ["the endpoint", { routes: { "/json/new": "refuse" } }, 60_000, undefined, stopped],
+    ["the connection", { calls: { "Network.enable": "close" } }, 60_000, ["Network.enable"], stopped],
+    ["the first navigation", { calls: { "Page.getFrameTree": { frameTree: { frame: { id: "1" } } }, "Page.navigate": "close" } }, 60_000, ["Network.enable", "DOM.enable", "CSS.enable", "Page.getFrameTree", "Page.navigate"], stopped],
+    ["the endpoint", { routes: { "/json/new": "refuse" } }, 60_000, [], stopped],
   ]) {
     const endpoint = await serve(options);
     await assert.rejects(makeFontKit("https://acme.example/", { dir, timeLimit }), { message }, what);
-    assert.equal(endpoint.received.filter(({ socket }) => socket === "tab").map(({ method }) => method).pop(), last, `${what}: the last call to the tab`);
+    assert.deepEqual(endpoint.received.filter(({ socket }) => socket === "tab").map(({ method }) => method).slice(3), calls, `${what}: the calls to the tab`);
+    assert.ok(await waitFor(pid()), `${what}: the browser is ended`);
+    assert.deepEqual(fs.readdirSync(temp), [], `${what}: no profile is left`);
+    assert.deepEqual(Object.fromEntries(fs.readdirSync(dir).map((name) => [name, fs.readFileSync(path.join(dir, name), "utf8")])), kit, `${what}: the earlier kit is as it was`);
+  }
+});
+
+test("a call that gets no answer is put down to the browser only when the browser itself, asked at once on the same connection, does not answer either, and every call then fails at once", async (t) => {
+  const endpoints = [];
+  t.after(() => {
+    for (const endpoint of endpoints) endpoint.close();
+    setTimeLimit(120_000);
+  });
+  setTimeLimit(60_000);
+  const open = async (calls, where = "/devtools/page/1") => {
+    const endpoint = await devtools({ calls });
+    endpoints.push(endpoint);
+    const cdp = await connect(`ws://127.0.0.1:${endpoint.port}${where}`, 5_000);
+    t.after(() => cdp.close());
+    return { cdp, sent: () => endpoint.received.map(({ method }) => method) };
+  };
+  // A server or a page that does not answer, in a browser that does: the
+  // call says so, and the next one goes through.
+  const answering = await open({ "Page.navigate": "hold" });
+  await assert.rejects(answering.cdp.send("Page.navigate", { url: "https://acme.example/" }, 1_000), { message: "Page.navigate timed out", timedOut: true });
+  assert.equal(answering.cdp.lost, null);
+  assert.deepEqual(await answering.cdp.send("Page.enable"), {});
+  assert.deepEqual(answering.sent(), ["Page.navigate", "Browser.getVersion", "Page.enable"]);
+  // A browser that does not answer either: the call, and one that waits
+  // with it, fail with what says so, and a call after them fails at once
+  // and is not sent.
+  const silent = await open({ "Page.navigate": "hold", "Runtime.evaluate": "hold", "Browser.getVersion": "hold" });
+  const waiting = silent.cdp.send("Runtime.evaluate", {}, 30_000).catch((err) => err);
+  const begun = Date.now();
+  const lost = await silent.cdp.send("Page.navigate", { url: "https://acme.example/" }, 1_000).catch((err) => err);
+  assert.equal(lost.message, "Page.navigate timed out");
+  assert.equal(lost.timedOut, true);
+  assert.equal(silent.cdp.lost, lost);
+  assert.equal(await waiting, lost);
+  assert.ok(Date.now() - begun < 10_000, `the call that waited with it failed after ${Date.now() - begun} ms`);
+  const after = Date.now();
+  assert.equal(await silent.cdp.send("Page.enable").catch((err) => err), lost);
+  assert.ok(Date.now() - after < 1_000, `a call after them failed after ${Date.now() - after} ms`);
+  assert.deepEqual(silent.sent(), ["Runtime.evaluate", "Page.navigate", "Browser.getVersion"]);
+  // A call of the browser's own that gets no answer says that by itself.
+  const own = await open({ "Browser.setDownloadBehavior": "hold" }, "/devtools/browser/x");
+  const refused = await own.cdp.send("Browser.setDownloadBehavior", { behavior: "deny" }, 1_000).catch((err) => err);
+  assert.equal(refused.timedOut, true);
+  assert.equal(own.cdp.lost, refused);
+  assert.deepEqual(own.sent(), ["Browser.setDownloadBehavior"]);
+});
+
+test("a browser that stops answering, or quits, as its page is opened, scrolled or read ends the run naming it, where the site or the page was named or a kit made of what had been read, and the earlier kit stays; a server or a page that does not answer in a browser that does is named as before", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+  const { parent, temp, pid, serve } = standIn(t);
+  const dir = path.join(parent, "kit");
+  fs.mkdirSync(dir);
+  const kit = { "fonts.json": JSON.stringify({ version: 1, generator: "easyfontkit 0.1.2", url: "https://acme.example/", families: [] }), "FONTS.md": "# Fonts of acme.example\n", "fonts.css": ":root {}\n" };
+  for (const [name, text] of Object.entries(kit)) fs.writeFileSync(path.join(dir, name), text);
+  // A page whose text is all drawn with Arial, as the browser tells it.
+  const fonts = { fonts: [{ familyName: "Arial", postScriptName: "ArialMT", isCustomFont: false, glyphCount: 12 }] };
+  const page = {
+    "Page.getFrameTree": { frameTree: { frame: { id: "1" } } },
+    "DOM.getDocument": { root: { nodeId: 1 } },
+    "DOM.querySelectorAll": { nodeIds: [2] },
+    "CSS.getPlatformFontsForNode": fonts,
+    "CSS.getComputedStyleForNode": { computedStyle: [{ name: "font-family", value: "Arial, sans-serif" }] },
+  };
+  // In a browser that answers, it gives a kit.
+  await serve({ calls: page });
+  const { kit: made } = await makeFontKit("https://acme.example/", { dir: path.join(parent, "answered"), timeLimit: 30_000 });
+  assert.deepEqual(Object.keys(made.roles), ["heading", "body", "button", "code"]);
+  assert.ok(await waitFor(pid()), "the browser that answered is ended");
+  // A browser that answers what its tab asks as it opens, and nothing after.
+  const silent = (times) => (times ? "hold" : {});
+  const stopped = "chrome stopped answering, so no kit was made. The machine may be busy; try again.";
+  const ranOut = "chrome did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.";
+  for (const [what, calls, timeLimit, last, said] of [
+    // The first navigation, which has all of a short run: told as a stop, or
+    // as the end of the run's time when that came a millisecond before.
+    ["the first navigation", { "Page.navigate": "hold", "Browser.getVersion": silent }, 5_000, ["Page.navigate", "Browser.getVersion"], [stopped, ranOut]],
+    // The scroll back to the top, which has ten seconds.
+    ["the scroll", { "Input.dispatchMouseEvent": "hold", "Browser.getVersion": silent }, 25_000, ["Input.dispatchMouseEvent", "Browser.getVersion"], [stopped]],
+    // The fonts of the body text, once the headings' were read, which have
+    // what is left of the run.
+    ["the reading", { "CSS.getPlatformFontsForNode": (times) => (times ? "hold" : fonts), "Browser.getVersion": silent }, 25_000, ["CSS.getPlatformFontsForNode", "Browser.getVersion"], [ranOut]],
+    // A browser that quits there.
+    ["a quit as the page is read", { "CSS.getPlatformFontsForNode": (times) => (times ? "close" : fonts) }, 25_000, ["CSS.getPlatformFontsForNode"], [stopped]],
+    // A server and a page that do not answer, in a browser that does.
+    ["the server", { "Page.navigate": "hold" }, 5_000, ["Page.navigate", "Browser.getVersion"], [/^Could not open https:\/\/acme\.example\/: no answer in \d+ s\. The site may be down or slow; try again later, or give it more time with --timeout\.$/]],
+    ["the page", { "Input.dispatchMouseEvent": "hold" }, 25_000, ["Input.dispatchMouseEvent", "Browser.getVersion"], ["https://acme.example/ stopped answering the browser while it was read, so no kit was made. Try again later, or check the page in a normal browser."]],
+  ]) {
+    const endpoint = await serve({ calls: { ...page, ...calls } });
+    await assert.rejects(makeFontKit("https://acme.example/", { dir, timeLimit }), (err) => said.some((text) => (typeof text === "string" ? err.message === text : text.test(err.message))) || assert.fail(`${what}: ${err.message}`));
+    assert.deepEqual(endpoint.received.filter(({ socket }) => socket === "tab").map(({ method }) => method).slice(-last.length), last, `${what}: the last calls to the tab`);
     assert.ok(await waitFor(pid()), `${what}: the browser is ended`);
     assert.deepEqual(fs.readdirSync(temp), [], `${what}: no profile is left`);
     assert.deepEqual(Object.fromEntries(fs.readdirSync(dir).map((name) => [name, fs.readFileSync(path.join(dir, name), "utf8")])), kit, `${what}: the earlier kit is as it was`);

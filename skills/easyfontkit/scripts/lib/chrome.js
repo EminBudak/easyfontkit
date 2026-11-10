@@ -486,6 +486,45 @@ function connect(wsUrl, ms = beforeReading()) {
     const pending = new Map();
     const listeners = new Map();
     let nextId = 0;
+    // What says that the browser has stopped answering, or that the
+    // connection has closed, once either has happened: every call waiting
+    // then fails with it, and every call after it fails at once.
+    let lost = null;
+    const lose = (err) => {
+      lost = lost || err;
+      for (const waiter of pending.values()) {
+        clearTimeout(waiter.timer);
+        waiter.reject(lost);
+      }
+      pending.clear();
+    };
+    // A call that gets no answer in the time given says so (timedOut).
+    const call = (method, params, wait) =>
+      new Promise((res, rej) => {
+        const id = ++nextId;
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          rej(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
+        }, wait);
+        pending.set(id, { resolve: res, reject: rej, timer });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+    // Whether the browser itself still answers, asked on the same connection
+    // when a call got no answer in its time. The browser answers
+    // Browser.getVersion by itself, whatever the page or its server does, in
+    // a few milliseconds also on a busy machine: any answer will do, an
+    // error too. None in two seconds, or a connection that closes, says it
+    // has stopped answering. Calls that run out together share one question.
+    let asking = null;
+    const answers = () =>
+      (asking =
+        asking ||
+        call("Browser.getVersion", {}, Math.max(1_000, Math.min(2_000, timeLeft())))
+          .then(
+            () => true,
+            (err) => !(err.timedOut || err.closed),
+          )
+          .finally(() => (asking = null)));
     ws.onmessage = (event) => {
       let msg;
       try {
@@ -510,11 +549,7 @@ function connect(wsUrl, ms = beforeReading()) {
     };
     ws.onclose = () => {
       clearTimeout(opening);
-      for (const waiter of pending.values()) {
-        clearTimeout(waiter.timer);
-        waiter.reject(Object.assign(new Error("The browser connection closed."), { closed: true }));
-      }
-      pending.clear();
+      lose(Object.assign(new Error("The browser connection closed."), { closed: true }));
     };
     ws.onopen = () => {
       clearTimeout(opening);
@@ -522,18 +557,20 @@ function connect(wsUrl, ms = beforeReading()) {
         // A call that gets no answer in its time says so (timedOut), and
         // whether the end of the run's time cut that short (outOfTime). One
         // on a connection that has closed fails at once (closed), where it
-        // would wait out its time for an answer that cannot come.
+        // would wait out its time for an answer that cannot come, and so
+        // does one once the browser has stopped answering. A call of the
+        // browser's own (Browser.*) that gets no answer says that by
+        // itself; for any other, the browser is asked first, so a page or
+        // a server that does not answer is not taken for the browser.
         send(method, params = {}, timeoutMs = 30_000) {
+          if (lost) return Promise.reject(lost);
           if (ws.readyState !== WebSocket.OPEN) return Promise.reject(Object.assign(new Error("The browser connection closed."), { closed: true }));
-          const id = ++nextId;
           const wait = Math.max(1_000, Math.min(timeoutMs, timeLeft()));
-          return new Promise((res, rej) => {
-            const timer = setTimeout(() => {
-              pending.delete(id);
-              rej(Object.assign(new Error(`${method} timed out`), { timedOut: true, outOfTime: wait < timeoutMs }));
-            }, wait);
-            pending.set(id, { resolve: res, reject: rej, timer });
-            ws.send(JSON.stringify({ id, method, params }));
+          return call(method, params, wait).catch(async (err) => {
+            if (!err.timedOut || err === lost) throw err;
+            err.outOfTime = wait < timeoutMs;
+            if (!lost && (method.startsWith("Browser.") || !(await answers()))) lose(err);
+            throw lost || err;
           });
         },
         on(method, listener) {
@@ -541,6 +578,11 @@ function connect(wsUrl, ms = beforeReading()) {
         },
         close() {
           ws.close();
+        },
+        // The browser stopped answering (timedOut), or the connection closed
+        // (closed), when either has happened; null until then.
+        get lost() {
+          return lost;
         },
       });
     };

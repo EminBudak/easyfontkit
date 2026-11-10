@@ -990,8 +990,13 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     try {
       cdp = await openPage(chrome, SCREEN);
       scan = await scanPage(cdp, url, log);
+      // A browser that stopped answering, or quit, while the page was read
+      // ends the run whatever the reading made of it: the server or the page
+      // that seemed not to answer was the browser, and a role or a file read
+      // after it stopped is missing.
+      if (cdp.lost) throw cdp.lost;
     } catch (err) {
-      throw stoppedAnswering(chrome.name, err);
+      throw stoppedAnswering(chrome.name, (cdp && cdp.lost) || err);
     } finally {
       if (cdp) cdp.close();
       await chrome.close();

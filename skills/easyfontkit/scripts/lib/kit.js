@@ -758,8 +758,10 @@ function unloadedFree(kit, byKey) {
   const roles = Object.entries(kit.roles).filter(([, info]) => (freeInCss(byKey.get(info.key)) || {}).unloaded);
   return { names: roles.map(([role]) => `--font-${role}-free`), families: new Set(roles.map(([, info]) => info.key)).size };
 }
-const unloadedText = ({ names, families }, loads) =>
-  `${list(names)} ${names.length === 1 ? "names" : "name"} ${families === 1 ? "an open font of the site's that is" : "open fonts of the site's that are"} on neither, so ${loads(families === 1 ? "it" : "them")}.`;
+// named says that the text before it has named Google Fonts and
+// Fontsource; otherwise it names them itself.
+const unloadedText = ({ names, families }, loads, named) =>
+  `${list(names)} ${names.length === 1 ? "names" : "name"} ${families === 1 ? "an open font of the site's that is" : "open fonts of the site's that are"} on neither${named ? "" : " Google Fonts nor Fontsource"}, so ${loads(families === 1 ? "it" : "them")}.`;
 
 // Text as lines of a CSS comment, each at most 76 characters with the
 // comment's indent.
@@ -788,11 +790,12 @@ function writeCss(kit, families, dir) {
   }
   const imports = freeImports([...picks.values()].map(({ free, used }) => ({ free, weights: freeWeights(free, [...used]) })));
   // A kit made without its font files has no @font-face rule, and the
-  // comment says so, as fonts.css is taken as it is.
+  // comment says so, as fonts.css is taken as it is. It speaks of @import
+  // lines only when there are some.
   const unloaded = unloadedFree(kit, byKey);
   const about = withoutFiles(families)
     ? commentLines(
-        `The font files were read but not saved, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts, which the @import lines load from Google Fonts or Fontsource.${unloaded.names.length ? ` ${unloadedText(unloaded, (it) => `nothing here loads ${it}`)}` : ""} FONTS.md says how each one is licensed. */`,
+        `The font files were read but not saved, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts${imports.length ? ", which the @import lines load from Google Fonts or Fontsource" : ""}.${unloaded.names.length ? ` ${unloadedText(unloaded, (it) => `nothing here loads ${it}`, imports.length > 0)}` : ""} FONTS.md says how each one is licensed. */`,
       )
     : [
         "   Each font file the page loaded has a @font-face rule below, under its",
@@ -912,9 +915,11 @@ function writeMarkdown(kit, families, dir) {
     others.forEach(section);
   }
   // A kit made without its font files says so, as fonts.css then declares
-  // none of them.
+  // none of them. When nothing loads any of its -free fonts, it does not
+  // say they are loaded from Google Fonts or Fontsource.
   const saved = !withoutFiles(families);
   const unloaded = unloadedFree(kit, byKey);
+  const fromLibraries = !unloaded.names.length || Object.values(kit.roles).some((info) => (freeInCss(byKey.get(info.key)) || {}).free);
   lines.push(
     "",
     "## How to use",
@@ -927,7 +932,7 @@ function writeMarkdown(kit, families, dir) {
     "body { font-family: var(--font-body); }",
     "```",
     "",
-    `\`--font-heading\` and the others are the site's own fonts. \`--font-heading-free\` and the other -free variables are the closest free fonts, loaded from Google Fonts or Fontsource.${unloaded.names.length ? ` ${unloadedText({ ...unloaded, names: unloaded.names.map((name) => `\`${name}\``) }, (it) => `fonts.css does not load ${it}`)}` : ""} A commercial font is licensed by its maker, and the site's license does not carry over to other uses.`,
+    `\`--font-heading\` and the others are the site's own fonts. \`--font-heading-free\` and the other -free variables are the closest free fonts${fromLibraries ? ", loaded from Google Fonts or Fontsource" : ""}.${unloaded.names.length ? ` ${unloadedText({ ...unloaded, names: unloaded.names.map((name) => `\`${name}\``) }, (it) => `fonts.css does not load ${it}`, fromLibraries)}` : ""} A commercial font is licensed by its maker, and the site's license does not carry over to other uses.`,
   );
   if (kit.notes.length) lines.push("", "## Notes", "", ...kit.notes.map((note) => `- ${note}`));
   fs.writeFileSync(path.join(dir, "FONTS.md"), lines.join("\n") + "\n");

@@ -1571,9 +1571,9 @@ test("a unicode-range in the page's own CSS goes into fonts.css only when it is 
   }
 });
 
-test("a kit made without its font files says in fonts.css that it has no @font-face rule, loads the site's own open fonts from Google Fonts or Fontsource where they are, and names the -free variables of those it cannot load", { skip: noBrowser }, async () => {
+test("a kit made without its font files says in fonts.css that it has no @font-face rule, loads the site's own open fonts from Google Fonts or Fontsource where they are, and names the -free variables of those it cannot load, and speaks of @import lines only when it has some", { skip: noBrowser }, async () => {
   // Inter, which Google Fonts has, and an open font of the site's own that
-  // neither Google Fonts nor Fontsource has.
+  // neither Google Fonts nor Fontsource has; on /only that font alone.
   const open = interAs({ names: { 1: "Acme Open", 2: "Regular", 4: "Acme Open", 6: "AcmeOpen-Regular", 13: "This Font Software is licensed under the SIL Open Font License, Version 1.1." } });
   const { server, origin } = await serve({
     "/": {
@@ -1582,6 +1582,12 @@ test("a kit made without its font files says in fonts.css that it has no @font-f
         @font-face { font-family: "Acme Open"; src: url("/open.ttf") format("truetype"); }
         h1 { font-family: "Body Sans", sans-serif; } p, button { font-family: "Acme Open", sans-serif; }
       </style></head><body><h1>Open fonts only</h1><p>Body text in an open font that no library has.</p><button>Go</button></body></html>`,
+    },
+    "/only": {
+      body: `<!doctype html><html><head><title>Only</title><style>
+        @font-face { font-family: "Acme Open"; src: url("/open.ttf") format("truetype"); }
+        h1, p, button { font-family: "Acme Open", sans-serif; }
+      </style></head><body><h1>One open font</h1><p>Body text in an open font that no library has.</p><button>Go</button></body></html>`,
     },
     "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
     "/open.ttf": { type: "font/ttf", body: open },
@@ -1608,6 +1614,24 @@ test("a kit made without its font files says in fonts.css that it has no @font-f
     const md = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
     assert.match(md, /\nfonts\.css sets a variable per role\. The font files were not saved, so it declares none of them:\n/);
     assert.match(md, /the closest free fonts, loaded from Google Fonts or Fontsource\. `--font-body-free` and `--font-button-free` name an open font of the site's that is on neither, so fonts\.css does not load it\. A commercial font/);
+
+    // With that font alone, nothing is loaded from Google Fonts or
+    // Fontsource, and neither fonts.css nor FONTS.md says otherwise.
+    const only = await makeFontKit(`${origin}/only`, { dir, files: false, timeLimit: 60_000 });
+    assert.deepEqual([only.kit.roles.heading.family, only.kit.roles.body.family, only.kit.roles.button.family], ["Acme Open", "Acme Open", "Acme Open"]);
+    const alone = cssParts(fs.readFileSync(path.join(dir, "fonts.css"), "utf8"));
+    assert.deepEqual(
+      alone.comments.map((comment) => comment.replace(/\n {3}/g, " ")),
+      [
+        `/* Fonts of 127.0.0.1, read from ${origin}/only on ${only.kit.capturedAt.slice(0, 10)} by easyfontkit ${require("../package.json").version}. The font files were read but not saved, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts. --font-heading-free, --font-body-free and --font-button-free name an open font of the site's that is on neither Google Fonts nor Fontsource, so nothing here loads it. FONTS.md says how each one is licensed. */`,
+      ],
+    );
+    for (const line of alone.comments[0].split("\n")) assert.ok(line.length <= 76 || line.startsWith("/* Fonts of"), line);
+    assert.doesNotMatch(alone.rules, /@import|@font-face/);
+    assert.match(alone.rules, /--font-heading-free: "Acme Open", sans-serif;/);
+    const aloneMd = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+    assert.ok(aloneMd.includes("the closest free fonts. `--font-heading-free`, `--font-body-free` and `--font-button-free` name an open font of the site's that is on neither Google Fonts nor Fontsource, so fonts.css does not load it. A commercial font"), aloneMd);
+    assert.doesNotMatch(aloneMd, /loaded from Google Fonts or Fontsource/);
   } finally {
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });

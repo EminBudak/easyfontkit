@@ -7,10 +7,11 @@
 // pipeTo(), or through the stand-in browser in browser.js, which carries
 // its own pipe there. Only tests use this; it is not shipped.
 //
-// calls: a method's result, "hold" to never answer it, a number of
-// milliseconds to answer it with {} that much later, a promise of the result
-// to answer it once that settles, as a browser held still for a while does,
-// or "close" to drop the pipe it came on, as a browser that quits does. A
+// calls: a method's result, an Error to answer it with that error, "hold"
+// to never answer it, a number of milliseconds to answer it with {} that
+// much later, a promise of the result to answer it once that settles, as a
+// browser held still for a while does, or "close" to drop the pipe it came
+// on, as a browser that quits does. A
 // function of how many times the method was called before, and of the
 // call's params, gives one of these. A method not named gets {}, but for
 // Target.createTarget and Target.attachToTarget, which give a tab and a
@@ -44,6 +45,10 @@ function devtools({ calls = {}, onClose = () => {} } = {}) {
         const reply = (result) => answer({ id, result, ...(sessionId ? { sessionId } : {}) });
         if (how === "hold") continue;
         if (how === "close") return void socket.destroy();
+        if (how instanceof Error) {
+          answer({ id, error: { code: -32000, message: how.message }, ...(sessionId ? { sessionId } : {}) });
+          continue;
+        }
         if (typeof how === "number") {
           setTimeout(() => reply({}), how).unref();
           continue;

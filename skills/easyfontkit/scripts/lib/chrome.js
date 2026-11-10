@@ -365,13 +365,13 @@ async function launch({ width, height }) {
   // has the time a browser has to start for that: one that does not answer
   // in it ends the run, as a slow one could go on to open the page with
   // nothing said. The time is told by the clock, as on a busy machine a
-  // wait takes longer than it asks. A run goes on in a browser that answers
-  // that it does not take it.
+  // wait takes longer than it asks. A browser that answers that it does not
+  // take it is not used, as a page could save files through it.
   const wait = beforeReading();
   const how = await Promise.race([
     pipe.send("Browser.setDownloadBehavior", { behavior: "deny" }, wait).then(
       () => "started",
-      (err) => (err.timedOut ? "slow" : err.closed ? "quit" : "started"),
+      (err) => (err.timedOut ? "slow" : err.closed ? "quit" : { refused: err.message }),
     ),
     ended.then(() => "quit"),
   ]);
@@ -379,7 +379,8 @@ async function launch({ width, height }) {
     await close();
     // One that quit did not start; one still starting is slow.
     if (how === "quit") throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
-    throw tooSlow(name, "start", wait);
+    if (how === "slow") throw tooSlow(name, "start", wait);
+    throw new Error(`${name} cannot be told to refuse the downloads a page starts (${how.refused}), so no kit was made: a site could save files on this machine through it. Point CHROME_PATH at another browser.`);
   }
   started.singleton = singletonOf(profile);
   // Known from the start: by the time the browser is stopped, its helpers

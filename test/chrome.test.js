@@ -436,6 +436,18 @@ test("a browser that quits as it starts is told apart from one that is slow, as 
   assert.deepEqual(fs.readdirSync(path.join(parent, "temp")), []);
 });
 
+test("a browser that answers that it cannot be told to refuse downloads is not used, as a site could save files through it, and is ended with its profile removed", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+  const { temp, pid, serve } = standIn(t);
+  setTimeLimit(60_000);
+  const endpoint = await serve({ calls: { "Browser.setDownloadBehavior": new Error("Browser.setDownloadBehavior is not supported") } });
+  await assert.rejects(launch(SCREEN), {
+    message: "chrome cannot be told to refuse the downloads a page starts (Browser.setDownloadBehavior is not supported), so no kit was made: a site could save files on this machine through it. Point CHROME_PATH at another browser.",
+  });
+  assert.deepEqual(endpoint.received.map(({ method }) => method), ["Browser.setDownloadBehavior", "Browser.close"]);
+  assert.ok(await waitFor(pid()), "the browser is ended");
+  assert.deepEqual(fs.readdirSync(temp), []);
+});
+
 test("a browser that stops answering once it has started, or quits, ends the run with a plain message, and the earlier kit stays", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
   const { parent, temp, pid, serve } = standIn(t);
   const dir = path.join(parent, "kit");

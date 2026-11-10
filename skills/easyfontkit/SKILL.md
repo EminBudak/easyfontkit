@@ -13,7 +13,7 @@ A CSS font stack says what a site asks for, not what the visitor sees, and a fon
 node <skill>/scripts/easyfontkit.js <url> --out fonts/<name>
 ```
 
-`<skill>` is this skill's folder. The script needs Node 22 or newer and Chrome, Chromium, Edge or Brave on the machine; it installs nothing and needs no API key. A run takes 15 to 60 seconds. Any page of a site works, and fonts can differ between a home page and its docs, so read the page whose look you need.
+`<skill>` is this skill's folder. The script needs Node 22 or newer and Chrome, Chromium, Edge or Brave on the machine; it installs nothing and needs no API key. A run takes 15 to 60 seconds. A page whose fonts are slow to come can hold the run up to 30 seconds longer while the page loads. Any page of a site works, and fonts can differ between a home page and its docs, so read the page whose look you need.
 
 The folder has to be new, empty or hold an earlier kit. A new run into it replaces the earlier kit once the new one is whole. A run that fails or is stopped leaves the folder as it was: a kit an earlier run left there is still whole, and nothing is added.
 

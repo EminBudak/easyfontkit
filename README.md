@@ -118,7 +118,7 @@ There are no npm dependencies and no browser to download: easyfontkit drives the
 ## How it works
 
 1. Opens the page in a headless browser on a 1600x900 desktop screen, with the network recorded, so each font file is kept as it arrives.
-2. Waits for the fonts, then scrolls to the bottom and back, so sections that render late load their fonts too.
+2. Waits for the page to load and for its fonts, then scrolls to the bottom and back, so sections that render late load their fonts too. A font that is slow to come can hold the load, and the run with it, for up to 30 s, as it holds a visitor's page.
 3. For up to 24 headings, paragraphs, buttons and code blocks, asks Chrome which fonts it drew the text with and how many glyphs each one drew. The font with the most glyphs is the role's font.
 4. Ties each of those fonts to its file by the names inside the file, by the @font-face rule that loads it, or by Chrome's own record of the web fonts it loaded. Some sites hide the names in their files; then the CSS name stands in.
 5. Reads every file's name, OS/2, post, head, cmap and hmtx tables (WOFF2, WOFF, TrueType and OpenType), decides the license, and measures the font for the free match.

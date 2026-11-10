@@ -988,7 +988,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     const chrome = await launch(SCREEN);
     let cdp;
     try {
-      cdp = await openPage(chrome.base, SCREEN);
+      cdp = await openPage(chrome, SCREEN);
       scan = await scanPage(cdp, url, log);
     } finally {
       if (cdp) cdp.close();

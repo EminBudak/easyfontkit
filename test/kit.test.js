@@ -1969,7 +1969,7 @@ test("the browser stays told to save nothing until it is closed, also once the c
   try {
     setTimeLimit(60_000);
     chrome = await launch(screen);
-    const cdp = await openPage(chrome.base, screen);
+    const cdp = await openPage(chrome, screen);
     await cdp.send("Page.navigate", { url: `${origin}/` });
     cdp.close();
     for (let waited = 0; waited < 10_000 && !asked; waited += 50) await sleep(50);

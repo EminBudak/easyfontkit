@@ -232,6 +232,31 @@ function endAll(processes, profile) {
   return ended;
 }
 
+// How long a wait before the page is read gets: the time the run has left,
+// less a minute for reading the page, 30 s at least, and never more than
+// the run has left. The browser gets that to open its page, as the page's
+// server gets it to answer: on a machine under heavy load the browser
+// alone can take half a minute and more.
+const beforeReading = () => Math.max(1_000, Math.min(Math.max(30_000, timeLeft() - 60_000), timeLeft()));
+
+// A browser that did not open its page in the time it had: which browser,
+// that no kit was made, and what to do. That time grows with the run's, so
+// more of it can help.
+function tooSlow(name, what, wait) {
+  return new Error(`${name} did not ${what} in ${Math.round(wait / 1000)} s, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`);
+}
+
+// A wait for the browser's own HTTP endpoint that runs out says so
+// (timedOut).
+async function askBrowser(url, init) {
+  try {
+    return await (await fetch(url, init)).json();
+  } catch (err) {
+    if (err.name === "TimeoutError") throw Object.assign(new Error("The browser did not answer."), { timedOut: true });
+    throw err;
+  }
+}
+
 // The connection to the browser as a whole, for what is said to all of it.
 async function browserConnection(base) {
   const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
@@ -292,6 +317,7 @@ async function launch({ width, height }) {
   if (!binary) {
     throw new Error("No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.");
   }
+  const name = path.basename(binary);
   const { profile, env = process.env, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
   const child = spawn(
     binary,
@@ -363,7 +389,7 @@ async function launch({ width, height }) {
         // helpers can have ended.
         started.crashHandler = crashHandlerOf(processesOf(child));
         denying = await denyDownloads(base);
-        return { base, close };
+        return { base, name, close };
       }
     } catch {
       // Not written yet.
@@ -371,7 +397,7 @@ async function launch({ width, height }) {
     await sleep(100);
   }
   await close();
-  throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
+  throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
 }
 
 // Every browser still open, killed at once with its helpers and its crash
@@ -406,9 +432,15 @@ function killBrowsers() {
   }
 }
 
-function connect(wsUrl) {
+// A connection to the browser or to one of its tabs, open within the time
+// given: one that does not open in it says so (timedOut).
+function connect(wsUrl, ms = beforeReading()) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
+    const opening = setTimeout(() => {
+      reject(Object.assign(new Error("The browser connection timed out."), { timedOut: true }));
+      ws.close();
+    }, ms);
     const pending = new Map();
     const listeners = new Map();
     let nextId = 0;
@@ -430,15 +462,20 @@ function connect(wsUrl) {
       if (msg.error) waiter.reject(new Error(msg.error.message || "DevTools protocol error"));
       else waiter.resolve(msg.result || {});
     };
-    ws.onerror = () => reject(new Error("The browser connection failed."));
+    ws.onerror = () => {
+      clearTimeout(opening);
+      reject(new Error("The browser connection failed."));
+    };
     ws.onclose = () => {
+      clearTimeout(opening);
       for (const waiter of pending.values()) {
         clearTimeout(waiter.timer);
         waiter.reject(new Error("The browser connection closed."));
       }
       pending.clear();
     };
-    ws.onopen = () =>
+    ws.onopen = () => {
+      clearTimeout(opening);
       resolve({
         send(method, params = {}, timeoutMs = 30_000) {
           const id = ++nextId;
@@ -458,24 +495,37 @@ function connect(wsUrl) {
           ws.close();
         },
       });
+    };
   });
 }
 
-// A new tab, set to a desktop screen of the given size. Headless Chrome says
-// "HeadlessChrome" in its user agent, and some sites answer that with a
-// stripped page; the tab says "Chrome", as the same browser with a window
+// A new tab, set to a desktop screen of the given size, in the browser
+// launch() gave, opened in the time a browser has for that. Headless Chrome
+// says "HeadlessChrome" in its user agent, and some sites answer that with
+// a stripped page; the tab says "Chrome", as the same browser with a window
 // would.
-async function openPage(base, { width, height }) {
-  const res = await fetch(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(10_000) });
-  const target = await res.json();
-  const cdp = await connect(target.webSocketDebuggerUrl);
-  await cdp.send("Page.enable");
-  await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
-  const { userAgent = "" } = await cdp.send("Browser.getVersion").catch(() => ({}));
-  if (userAgent.includes("HeadlessChrome")) {
-    await cdp.send("Emulation.setUserAgentOverride", { userAgent: userAgent.replace("HeadlessChrome", "Chrome") });
+async function openPage({ base, name }, { width, height }) {
+  const wait = beforeReading();
+  const until = Date.now() + wait;
+  const left = () => Math.max(1_000, until - Date.now());
+  let cdp;
+  try {
+    const target = await askBrowser(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(wait) });
+    cdp = await connect(target.webSocketDebuggerUrl, left());
+    await cdp.send("Page.enable", {}, left());
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }, left());
+    const { userAgent = "" } = await cdp.send("Browser.getVersion", {}, left()).catch((err) => {
+      if (err.timedOut) throw err;
+      return {};
+    });
+    if (userAgent.includes("HeadlessChrome")) {
+      await cdp.send("Emulation.setUserAgentOverride", { userAgent: userAgent.replace("HeadlessChrome", "Chrome") }, left());
+    }
+    return cdp;
+  } catch (err) {
+    if (cdp) cdp.close();
+    throw err.timedOut ? tooSlow(name, "open a page", wait) : err;
   }
-  return cdp;
 }
 
 // Opens the address and waits for its load event, at most 30 s: a page that
@@ -490,7 +540,7 @@ async function openPage(base, { width, height }) {
 // as the one that did not can be one a redirect led to.
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
-  const answer = Math.max(1_000, Math.min(Math.max(30_000, timeLeft() - 60_000), timeLeft()));
+  const answer = beforeReading();
   let errorText;
   try {
     ({ errorText } = await cdp.send("Page.navigate", { url }, answer));

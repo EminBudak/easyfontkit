@@ -9,8 +9,9 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { spawn } = require("node:child_process");
-const { launch, killBrowsers, navigate } = require("../skills/easyfontkit/scripts/lib/chrome");
+const { launch, killBrowsers, openPage, navigate } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
+const { devtools } = require("./devtools");
 
 test("on Linux, Chrome's temp folder is its profile where the socket it makes there fits, and its profile given as \".\", with Chrome started in it, where its own temp folder is too long for the socket; its crash reports go into its profile", { skip: ["darwin", "win32"].includes(process.platform) && "Chrome takes its temp folder from TMPDIR on Linux only" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-temp-"));
@@ -103,6 +104,65 @@ test("a page whose server does not answer gets the run's time less a minute, and
   }
   setTimeLimit(120_000);
 });
+
+const busy = (name, what, seconds) => `${name} did not ${what} in ${seconds} s, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`;
+const SCREEN = { width: 800, height: 600 };
+
+test("a browser gets the run's time less a minute to open its page, as the page's server gets to answer, and one that does not is named in a plain message", async () => {
+  // A browser that never answers, told without waiting for it.
+  const saved = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  };
+  try {
+    for (const [limit, seconds] of [
+      [120_000, 60],
+      [300_000, 240],
+      [75_000, 30],
+      [30_000, 30],
+    ]) {
+      setTimeLimit(limit);
+      await assert.rejects(openPage({ base: "http://127.0.0.1:9", name: "chrome" }, SCREEN), { message: busy("chrome", "open a page", seconds) });
+    }
+  } finally {
+    globalThis.fetch = saved;
+    setTimeLimit(120_000);
+  }
+});
+
+test("a browser slow to open its page gets it opened, and one that does not open it, or does not answer on it, in the time it has is named in a plain message", async (t) => {
+  const endpoints = [];
+  t.after(() => {
+    for (const endpoint of endpoints) endpoint.close();
+    setTimeLimit(120_000);
+  });
+  const stand = async (options) => {
+    const endpoint = await devtools(options);
+    endpoints.push(endpoint);
+    return { base: `http://127.0.0.1:${endpoint.port}`, name: "chrome", endpoint };
+  };
+  // More than the ten seconds a tab had in 0.1.2.
+  setTimeLimit(60_000);
+  const late = await stand({ routes: { "/json/new": 10_500 } });
+  const started = Date.now();
+  const cdp = await openPage(late, SCREEN);
+  assert.ok(Date.now() - started >= 10_000, `opened after ${Date.now() - started} ms`);
+  assert.deepEqual(
+    late.endpoint.received.map(({ method }) => method),
+    ["Page.enable", "Emulation.setDeviceMetricsOverride", "Browser.getVersion"],
+  );
+  cdp.close();
+  // The tab that is not made, its connection that does not open, and its
+  // first call that gets no answer, with three seconds left.
+  for (const options of [{ routes: { "/json/new": "hold" } }, { routes: { tab: "hold" } }, { calls: { "Page.enable": "hold" } }]) {
+    setTimeLimit(3_000);
+    const browser = await stand(options);
+    const begun = Date.now();
+    await assert.rejects(openPage(browser, SCREEN), { message: busy("chrome", "open a page", 3) }, JSON.stringify(options));
+    assert.ok(Date.now() - begun < 6_000, `${JSON.stringify(options)}: ${Date.now() - begun} ms`);
+  }
+});
+
 
 // A process that has ended, or that is a zombie waiting for its parent.
 const ended = (pid) => {

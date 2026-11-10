@@ -1637,6 +1637,72 @@ test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its
   }
 });
 
+// The processes still running, zombies aside, whose command line holds the
+// given text, from /proc on Linux.
+function naming(text) {
+  const found = [];
+  for (const pid of fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      if (/^[ZX]/.test(stat.slice(stat.lastIndexOf(")") + 2))) continue;
+      if (fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(text)) found.push(Number(pid));
+    } catch {
+      // Gone, or not this user's.
+    }
+  }
+  return found;
+}
+
+test("a run killed outright leaves no browser running: the browser and its crash handler quit once the pipe it is driven through closes, and only its profile stays in the temp folder", { skip: noBrowser || noSignals || (process.platform !== "linux" && "a browser's processes are told from /proc on Linux only") }, async () => {
+  const { server, origin } = await serve({
+    "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },
+    "/held.css": { hold: true },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-killed-"));
+  // A temp folder and a home of the run's own: Chrome makes its socket
+  // folder in that temp folder, and its crash handler names the profile.
+  const tmp = path.join(parent, "tmp");
+  const home = path.join(parent, "home");
+  fs.mkdirSync(tmp);
+  fs.mkdirSync(home);
+  let child;
+  try {
+    child = spawn(process.execPath, [CLI, origin, "--out", path.join(parent, "kit")], { detached: true, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, HOME: home, TMPDIR: tmp } });
+    let stderr = "";
+    const ended = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+    const opened = new Promise((resolve) => child.stderr.on("data", (chunk) => /Opening/.test((stderr += chunk)) && resolve()));
+    await Promise.race([opened, ended]);
+    assert.match(stderr, /Opening/);
+    const [profile, ...others] = fs.readdirSync(tmp).filter((name) => name.startsWith("easyfontkit-chrome-"));
+    assert.ok(profile && !others.length, "one profile");
+    assert.ok(naming(profile).length, "the browser runs");
+    // The kit alone, as kill -9 ends it: none of its handlers runs.
+    process.kill(child.pid, "SIGKILL");
+    assert.deepEqual(await ended, { code: null, signal: "SIGKILL" });
+    for (let waited = 0; waited < 5_000 && naming(profile).length; waited += 50) await sleep(50);
+    assert.deepEqual(naming(profile), [], "no process names the profile");
+    assert.deepEqual(fs.readdirSync(tmp), [profile], "the profile alone stays in the temp folder");
+    assert.equal(fs.existsSync(path.join(parent, "kit")), false);
+  } finally {
+    // Whatever of the run is left: its group, and anything that names its
+    // folders, as a crash handler in a session of its own does.
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // Nothing of its group is left.
+    }
+    for (const pid of naming(parent)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Gone already.
+      }
+    }
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
 test("a page that waits for a style sheet that never comes draws nothing and is refused, naming the style sheet, and the earlier kit stays", { skip: noBrowser }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

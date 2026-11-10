@@ -304,3 +304,91 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
     assert.equal(ended(named), false, given ? "a handler that ran before the browser" : "a process that is no crash handler");
   }
 });
+
+// Stands in for Chrome: writes the port of the stand-in DevTools endpoint
+// where Chrome writes its own, unless NO_PORT is set, and stays until it is
+// killed, as a browser that is slow to answer does.
+const STAND_IN = `#!/bin/sh
+for arg in "$@"; do case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}";; esac; done
+echo $$ > "$STANDIN_PID"
+[ -z "$NO_PORT" ] && printf '%s\\n/devtools/browser/x\\n' "$DEVTOOLS_PORT" > "$profile/DevToolsActivePort"
+exec sleep 60
+`;
+
+// A test's own temp folder and stand-in browser, with the environment put
+// back and anything left of the browser killed once the test has ended.
+function standIn(t) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-busy-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  const names = ["CHROME_PATH", "TMPDIR", "STANDIN_PID", "DEVTOOLS_PORT", "NO_PORT"];
+  const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const endpoints = [];
+  const pidFile = path.join(parent, "browser.pid");
+  const pid = () => Number(fs.readFileSync(pidFile, "utf8"));
+  t.after(() => {
+    for (const endpoint of endpoints) endpoint.close();
+    try {
+      process.kill(pid(), "SIGKILL");
+    } catch {
+      // Ended already, or never started.
+    }
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    setTimeLimit(120_000);
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  fs.writeFileSync(path.join(parent, "chrome"), STAND_IN, { mode: 0o755 });
+  Object.assign(process.env, { CHROME_PATH: path.join(parent, "chrome"), TMPDIR: temp, STANDIN_PID: pidFile });
+  // A browser asked to quit quits.
+  const serve = async (options) => {
+    const endpoint = await devtools({ ...options, onClose: () => process.kill(pid(), "SIGKILL") });
+    endpoints.push(endpoint);
+    process.env.DEVTOOLS_PORT = String(endpoint.port);
+    return endpoint;
+  };
+  return { parent, temp, pid, serve };
+}
+
+test("a browser slow to start gets the run's time less a minute, and is told to refuse downloads before a run goes on in it; one that does not start, or does not answer as it starts, in that time is named in a plain message, ended, and its profile removed", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+  const { temp, pid, serve } = standIn(t);
+  // /json/version answered after three seconds, where 0.1.2 gave up after
+  // two and went on without the download refusal.
+  setTimeLimit(60_000);
+  const slow = await serve({ routes: { "/json/version": (times) => (times ? 0 : 3_000) } });
+  const browser = await launch(SCREEN);
+  assert.equal(browser.name, "chrome");
+  assert.deepEqual(slow.received, [{ socket: "browser", method: "Browser.setDownloadBehavior" }]);
+  await browser.close();
+  assert.ok(ended(pid()), "the browser asked to quit");
+  assert.deepEqual(fs.readdirSync(temp), []);
+  // A browser that writes no port, one whose endpoint, connection or
+  // download refusal gets no answer, with three seconds left.
+  for (const [what, options] of [
+    ["no port", null],
+    ["/json/version", { routes: { "/json/version": "hold" } }],
+    ["the connection", { routes: { browser: "hold" } }],
+    ["the download refusal", { calls: { "Browser.setDownloadBehavior": "hold" } }],
+  ]) {
+    setTimeLimit(3_000);
+    if (options) {
+      delete process.env.NO_PORT;
+      await serve(options);
+    } else process.env.NO_PORT = "1";
+    const begun = Date.now();
+    await assert.rejects(launch(SCREEN), { message: busy("chrome", "start", 3) }, what);
+    assert.ok(Date.now() - begun < 8_000, `${what}: ${Date.now() - begun} ms`);
+    assert.ok(await waitFor(pid()), `${what}: the browser is ended`);
+    assert.deepEqual(fs.readdirSync(temp), [], `${what}: no profile is left`);
+  }
+});
+
+test("a browser that quits as it starts is told apart from one that is slow, as in 0.1.2", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+  const { parent } = standIn(t);
+  fs.writeFileSync(process.env.CHROME_PATH, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  setTimeLimit(3_000);
+  await assert.rejects(launch(SCREEN), { message: "chrome did not start. Try again, or point CHROME_PATH at another browser." });
+  assert.deepEqual(fs.readdirSync(path.join(parent, "temp")), []);
+});

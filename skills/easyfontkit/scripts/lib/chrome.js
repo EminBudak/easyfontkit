@@ -234,14 +234,14 @@ function endAll(processes, profile) {
 
 // How long a wait before the page is read gets: the time the run has left,
 // less a minute for reading the page, 30 s at least, and never more than
-// the run has left. The browser gets that to open its page, as the page's
-// server gets it to answer: on a machine under heavy load the browser
-// alone can take half a minute and more.
+// the run has left. The browser gets that to start, and again to open its
+// page, as the page's server gets it to answer: on a machine under heavy
+// load the browser alone can take half a minute and more.
 const beforeReading = () => Math.max(1_000, Math.min(Math.max(30_000, timeLeft() - 60_000), timeLeft()));
 
-// A browser that did not open its page in the time it had: which browser,
-// that no kit was made, and what to do. That time grows with the run's, so
-// more of it can help.
+// A browser that did not start, or did not open its page, in the time it
+// had: which browser, that no kit was made, and what to do. That time grows
+// with the run's, so more of it can help.
 function tooSlow(name, what, wait) {
   return new Error(`${name} did not ${what} in ${Math.round(wait / 1000)} s, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`);
 }
@@ -257,10 +257,12 @@ async function askBrowser(url, init) {
   }
 }
 
-// The connection to the browser as a whole, for what is said to all of it.
-async function browserConnection(base) {
-  const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
-  return connect(webSocketDebuggerUrl);
+// The connection to the browser as a whole, for what is said to all of it,
+// made by the time given.
+async function browserConnection(base, until) {
+  const left = () => Math.max(1_000, until - Date.now());
+  const { webSocketDebuggerUrl } = await askBrowser(`${base}/json/version`, { signal: AbortSignal.timeout(left()) });
+  return connect(webSocketDebuggerUrl, left());
 }
 
 // A page cannot make the browser save a file: a download it starts, by a
@@ -269,16 +271,30 @@ async function browserConnection(base) {
 // the page stays where it is. Said to the whole browser over a connection
 // of its own, which stays open until the browser has ended: Chrome forgets
 // it as soon as the connection that said it closes, and the connection to
-// the tab closes first. A run goes on in a browser that does not take it.
+// the tab closes first. It is said within the time the browser has to
+// start: a browser that does not answer in that time ends the run
+// (timedOut), as a slow one could go on to open the page with nothing said.
+// A run goes on in a browser that does not take it, or that refuses the
+// connection, as one that has quit: opening its page then fails.
 // Gives that connection, or null when there is none.
-async function denyDownloads(base) {
+async function denyDownloads(base, until) {
+  let browser;
   try {
-    const browser = await browserConnection(base);
-    await browser.send("Browser.setDownloadBehavior", { behavior: "deny" }, 5_000).catch(() => {});
-    return browser;
-  } catch {
+    browser = await browserConnection(base, until);
+  } catch (err) {
+    if (err.timedOut) throw err;
     return null;
   }
+  try {
+    await browser.send("Browser.setDownloadBehavior", { behavior: "deny" }, Math.max(1_000, until - Date.now()));
+  } catch (err) {
+    if (err.timedOut) {
+      browser.close();
+      throw err;
+    }
+    // A browser that does not take it.
+  }
+  return browser;
 }
 
 // Chrome on Linux takes its temp folder from TMPDIR, and makes there the
@@ -361,7 +377,7 @@ async function launch({ width, height }) {
     if (base && !exited) {
       let asked = false;
       try {
-        const browser = await browserConnection(base);
+        const browser = await browserConnection(base, Date.now() + 2_000);
         asked = true;
         await browser.send("Browser.close", {}, 3_000).catch(() => {});
       } catch {
@@ -378,26 +394,40 @@ async function launch({ width, height }) {
     removeProfile(started, 10, 100);
   };
   // Chrome writes the port it picked to DevToolsActivePort in the profile.
+  // The time a browser has to start covers that, and the connection that
+  // tells it to refuse downloads. It is told by the clock: on a busy
+  // machine each pause between two looks takes longer than it asks.
+  const wait = beforeReading();
+  const until = Date.now() + wait;
   const portFile = path.join(profile, "DevToolsActivePort");
-  for (let waited = 0; waited < 20_000 && !exited; waited += 100) {
+  while (!exited && Date.now() < until) {
+    let port = "";
     try {
-      const port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim();
-      if (/^\d+$/.test(port)) {
-        base = `http://127.0.0.1:${port}`;
-        started.singleton = singletonOf(profile);
-        // Known from the start: by the time the browser is stopped, its
-        // helpers can have ended.
-        started.crashHandler = crashHandlerOf(processesOf(child));
-        denying = await denyDownloads(base);
-        return { base, name, close };
-      }
+      port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim();
     } catch {
       // Not written yet.
     }
+    if (/^\d+$/.test(port)) {
+      base = `http://127.0.0.1:${port}`;
+      started.singleton = singletonOf(profile);
+      // Known from the start: by the time the browser is stopped, its
+      // helpers can have ended.
+      started.crashHandler = crashHandlerOf(processesOf(child));
+      try {
+        denying = await denyDownloads(base, until);
+      } catch (err) {
+        await close();
+        throw err.timedOut ? tooSlow(name, "start", wait) : err;
+      }
+      return { base, name, close };
+    }
     await sleep(100);
   }
+  // One that quit did not start; one still starting is slow.
+  const quit = exited;
   await close();
-  throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
+  if (quit) throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
+  throw tooSlow(name, "start", wait);
 }
 
 // Every browser still open, killed at once with its helpers and its crash

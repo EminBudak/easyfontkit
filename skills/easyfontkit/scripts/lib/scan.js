@@ -356,7 +356,9 @@ function decodeDataUrl(url) {
 // The font files, each once: the same file can be asked for twice, under
 // two addresses or as a data URL. A file the browser refused is skipped
 // with why, as one its server answered with an error is, and with that
-// error when its server answered it with one.
+// error when its server answered it with one. One read all the same from
+// that address, as by a preload the page made without crossorigin, which
+// the browser does not hold to CORS, is in the kit and not skipped.
 async function readFiles(fonts, rules, faces, refused = new Map(), statuses = new Map()) {
   const files = new Map();
   const skipped = [];
@@ -375,8 +377,9 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
     if (body && body.length) add(body, font.urls);
     else if (font.status >= 400) skipped.push({ url: font.urls[0] || "", reason: `the server answered ${font.status}` });
   }
+  const read = (url) => [...files.values()].some((file) => file.urls.includes(url));
   for (const [requestId, refusal] of refused) {
-    if (skipped.some((skip) => skip.url === refusal.url)) continue;
+    if (read(refusal.url) || skipped.some((skip) => skip.url === refusal.url)) continue;
     const status = statuses.get(requestId) || 0;
     skipped.push(status >= 400 ? { url: refusal.url, reason: `the server answered ${status}` } : refusal);
   }

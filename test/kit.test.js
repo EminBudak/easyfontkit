@@ -1789,6 +1789,38 @@ test("a web font from another site whose server answers with an error and sends 
   }
 });
 
+test("a font file from another site with no CORS header that the page also preloads without crossorigin is in the kit from that preload, with no note that it was not usable", { skip: noBrowser }, async () => {
+  // The preload is not held to CORS, so the browser gets the file, while
+  // the @font-face rule's own request for that address is refused.
+  const farFont = interAs({ names: { 1: "Far Font", 2: "Regular", 4: "Far Font", 6: "FarFont-Regular" } });
+  const far = await serve({ "/far.ttf": { type: "font/ttf", body: farFont } });
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Preloaded</title>
+        <link rel="preload" href="${far.origin}/far.ttf" as="font" type="font/ttf">
+        <style>
+        @font-face { font-family: "Far Font"; src: url("${far.origin}/far.ttf") format("truetype"); }
+        h1 { font-family: "Far Font", serif; }
+      </style></head><body><h1>A heading in a font from another site</h1><p>Body text.</p></body></html>`,
+    },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-preloaded-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(origin, { dir, timeLimit: 60_000 });
+    assert.equal(kit.roles.heading.family, "Far Font");
+    const family = kit.families.find((f) => f.name === "Far Font");
+    assert.deepEqual(family.files.map((file) => file.url), [`${far.origin}/far.ttf`]);
+    assert.equal("notLoaded" in family, false);
+    assert.ok(fs.existsSync(path.join(dir, family.files[0].file)));
+    assert.deepEqual(kit.notes.filter((note) => /usable|refused/.test(note)), []);
+  } finally {
+    server.close();
+    far.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its process group, leaves the earlier kit as it was, ends its browser with its crash handler, leaves no crash report and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

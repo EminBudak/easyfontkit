@@ -11,52 +11,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, sleep } = require("./time");
-
-const MAC = [
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-];
-const LINUX = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"];
-const WINDOWS = [
-  ["PROGRAMFILES", "Google\\Chrome\\Application\\chrome.exe"],
-  ["PROGRAMFILES(X86)", "Google\\Chrome\\Application\\chrome.exe"],
-  ["LOCALAPPDATA", "Google\\Chrome\\Application\\chrome.exe"],
-  ["PROGRAMFILES(X86)", "Microsoft\\Edge\\Application\\msedge.exe"],
-  ["PROGRAMFILES", "Microsoft\\Edge\\Application\\msedge.exe"],
-];
-
-function onPath(name) {
-  for (const dir of String(process.env.PATH || "").split(path.delimiter)) {
-    if (!dir) continue;
-    const file = path.join(dir, name);
-    try {
-      fs.accessSync(file, fs.constants.X_OK);
-      return file;
-    } catch {
-      // Not in this directory.
-    }
-  }
-  return "";
-}
-
-function findChrome() {
-  if (process.env.CHROME_PATH) return fs.existsSync(process.env.CHROME_PATH) ? process.env.CHROME_PATH : "";
-  if (process.platform === "darwin") return MAC.find((file) => fs.existsSync(file)) || "";
-  if (process.platform === "win32") {
-    for (const [root, rest] of WINDOWS) {
-      const file = process.env[root] ? path.join(process.env[root], rest) : "";
-      if (file && fs.existsSync(file)) return file;
-    }
-    return "";
-  }
-  for (const name of LINUX) {
-    const file = onPath(name);
-    if (file) return file;
-  }
-  return "";
-}
+const { NOTHING, chromePlace, findChrome, cannotStart, notStarted } = require("./program");
 
 // The browsers this process has started and not closed yet, each with its
 // profile, from the moment it is spawned.
@@ -291,42 +246,87 @@ function tempOf(profile) {
 // and not over a port: any program on the machine that found a port could
 // read the page the browser shows and drive it, as another user's job can on
 // a server that runs several at a time.
+//
+// A browser that cannot be started stops the run before anything is made,
+// with the path CHROME_PATH or the search for one gave and what is wrong
+// with it: a path the browser is not at, or one that names no program this
+// user may run, as a folder or a file on a noexec mount, is told before it
+// is started; a file the system cannot start, as a script whose interpreter
+// or a program whose loader or library is missing, or one for another
+// system, once it has failed to. The system can also be short of what it
+// takes to start one, as file descriptors.
 async function launch({ width, height }) {
-  const binary = findChrome();
-  if (!binary) {
-    throw new Error("No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.");
-  }
-  const name = path.basename(binary);
+  const place = chromePlace();
+  if (!place) throw new Error(NOTHING);
+  if (place.what) throw new Error(cannotStart(place));
+  const { file: binary, name } = place;
+  // One that ended before it answered, and what is wrong with it when that
+  // can be told, or the words for a browser that started and quit.
+  const quit = (failed) => new Error(notStarted(place, failed) || `${name} did not start. Try again, or point CHROME_PATH at another browser.`);
   const { profile, env = process.env, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
-  const child = spawn(
-    binary,
-    [
-      "--headless=new",
-      "--remote-debugging-pipe",
-      `--user-data-dir=${profile}`,
-      `--window-size=${width},${height}`,
-      "--hide-scrollbars",
-      "--mute-audio",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-extensions",
-      "--disable-sync",
-      "--component-updater=url-source=http://127.0.0.1:9/",
-      "--use-mock-keychain",
-      "--password-store=basic",
-      // Chrome refuses to start as root without it (a container, a CI box).
-      ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
-      "about:blank",
-    ],
-    { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"], ...where, env: { ...env, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
-  );
+  const started = { child: null, profile, singleton: "", crashHandler: null };
+  let child;
+  try {
+    child = spawn(
+      binary,
+      [
+        "--headless=new",
+        "--remote-debugging-pipe",
+        `--user-data-dir=${profile}`,
+        `--window-size=${width},${height}`,
+        "--hide-scrollbars",
+        "--mute-audio",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        "--disable-sync",
+        "--component-updater=url-source=http://127.0.0.1:9/",
+        "--use-mock-keychain",
+        "--password-store=basic",
+        // Chrome refuses to start as root without it (a container, a CI box).
+        ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
+        "about:blank",
+      ],
+      { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], ...where, env: { ...env, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
+    );
+  } catch (error) {
+    // Node gives some errors at once, as for a path that changed since it
+    // was looked at and now goes round a loop of links.
+    removeProfile(started, 10, 100);
+    throw quit({ error });
+  }
+  started.child = child;
+  open.add(started);
   let exited = false;
+  let failure = null;
   const ended = new Promise((resolve) => {
     child.on("exit", resolve);
-    child.on("error", resolve);
+    child.on("error", (error) => {
+      failure = failure || error;
+      resolve();
+    });
   }).then(() => (exited = true));
-  const started = { child, profile, singleton: "", crashHandler: null };
-  open.add(started);
+  // What the browser says on stderr, its first 8 KB: the system's loader
+  // says there which library is missing, and /bin/sh what it made of a file
+  // that is no program. The rest is read and let go, so the browser never
+  // waits to write it.
+  const said = [];
+  let saidBytes = 0;
+  if (child.stderr) {
+    child.stderr.on("data", (chunk) => {
+      if (saidBytes < 8_192) said.push(chunk.subarray(0, 8_192 - saidBytes));
+      saidBytes += chunk.length;
+    });
+    child.stderr.on("error", () => {});
+  }
+  // With no file descriptor left, Node makes no pipes, and says why a
+  // moment later.
+  if (!child.stdio || !child.stdio[3] || !child.stdio[4]) {
+    await ended;
+    open.delete(started);
+    removeProfile(started, 10, 100);
+    throw quit({ error: failure });
+  }
   const pipe = connect(child.stdio[3], child.stdio[4]);
   // Chrome is asked to quit first: killed outright, its helper processes go
   // on writing to the profile for a while. Those still there once it has
@@ -351,6 +351,7 @@ async function launch({ width, height }) {
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
     pipe.close();
     endAll(processes, profile);
+    if (child.stderr) child.stderr.destroy();
     open.delete(started);
     started.singleton = started.singleton || singletonOf(profile);
     removeProfile(started, 10, 100);
@@ -376,9 +377,16 @@ async function launch({ width, height }) {
     ended.then(() => "quit"),
   ]);
   if (how !== "started") {
+    // All it said as it ended, a second at most: helpers it started can
+    // hold its stderr open.
+    if (how === "quit" && child.stderr && !child.stderr.closed) {
+      let timer;
+      await Promise.race([new Promise((resolve) => child.stderr.once("close", resolve)), new Promise((resolve) => (timer = setTimeout(resolve, 1_000)))]);
+      clearTimeout(timer);
+    }
     await close();
     // One that quit did not start; one still starting is slow.
-    if (how === "quit") throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
+    if (how === "quit") throw quit({ error: failure, stderr: Buffer.concat(said).toString("utf8") });
     if (how === "slow") throw tooSlow(name, "start", wait);
     throw new Error(`${name} cannot be told to refuse the downloads a page starts (${how.refused}), so no kit was made: a site could save files on this machine through it. Point CHROME_PATH at another browser.`);
   }

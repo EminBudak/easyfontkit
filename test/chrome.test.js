@@ -17,7 +17,7 @@ const { devtools, pipeTo } = require("./devtools");
 // The stand-in browser that carries its pipe to the stand-in DevTools end.
 const BROWSER = path.join(__dirname, "browser.js");
 
-test("on Linux, Chrome's temp folder is its profile where the socket it makes there fits, and its profile given as \".\", with Chrome started in it, where its own temp folder is too long for the socket; its crash reports go into its profile", { skip: ["darwin", "win32"].includes(process.platform) && "Chrome takes its temp folder from TMPDIR on Linux only" }, async () => {
+test("on Linux, Chrome's temp folder is its profile where the socket it makes there fits, and its profile given as \".\", with Chrome started in it, where its own temp folder is too long for the socket, and a CHROME_PATH given from the folder the run was started in is still found; its crash reports go into its profile", { skip: ["darwin", "win32"].includes(process.platform) && "Chrome takes its temp folder from TMPDIR on Linux only" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-temp-"));
   const saved = { TMPDIR: process.env.TMPDIR, CHROME_PATH: process.env.CHROME_PATH };
   // A browser that writes down the temp folder it was given, its profile,
@@ -42,12 +42,17 @@ printf '%s\\n%s\\n%s\\n%s\\n' "$TMPDIR" "$profile" "$(pwd -P)" "$BREAKPAD_DUMP_L
   fs.mkdirSync(path.join(parent, "x".repeat(70)));
   try {
     process.chdir(parent);
-    for (const [tmp, temp] of [
+    for (const [tmp, temp, relative] of [
       ["t", "profile"],
       ["y".repeat(40), "own"],
       ["x".repeat(70), "."],
+      // Given from the folder the run was started in, not from the
+      // profile Chrome is started in.
+      ["x".repeat(70), ".", "./chrome"],
     ]) {
       process.env.TMPDIR = tmp;
+      process.env.CHROME_PATH = relative || path.join(parent, "chrome");
+      fs.rmSync(seen, { force: true });
       await assert.rejects(launch({ width: 800, height: 600 }), /did not start/);
       const [given, profile, started, dumps] = fs.readFileSync(seen, "utf8").split("\n");
       assert.equal(path.relative(parent, path.dirname(profile)), tmp);

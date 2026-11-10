@@ -591,8 +591,10 @@ test("a browser held still for longer than a call waits, as a busy machine can h
   // One run for each call, all at once, each in a browser of its own, held
   // still from the first time the call is sent: the call gets no answer in
   // its wait, and the browser, asked then, answers three seconds later, and
-  // the call after that. What is left of them is ended before the test's
-  // temp folder, with their pids, is removed.
+  // the call a moment after that. Every run has ended before the first is
+  // checked, so a check that fails leaves none going on to save its kit
+  // after the test's temp folder is removed. What is left of their browsers
+  // is ended before that folder, with their pids, is removed.
   const runs = [];
   t.after(() => {
     for (const { endpoint, pid } of runs) {
@@ -619,6 +621,8 @@ test("a browser held still for longer than a call waits, as a busy machine can h
     const made = makeFontKit("https://acme.example/", { dir: path.join(parent, method), timeLimit: 60_000 }).catch((err) => err);
     runs.push({ method, pid, endpoint, made });
   }
+  // Each run gives its kit or its error, so this does not throw.
+  await Promise.all(runs.map(({ made }) => made));
   for (const { method, pid, endpoint, made } of runs) {
     const { kit, message } = await made;
     assert.ok(kit, `${method}: ${message}`);

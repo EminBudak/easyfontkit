@@ -246,13 +246,24 @@ function tooSlow(name, what, wait) {
   return new Error(`${name} did not ${what} in ${Math.round(wait / 1000)} s, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`);
 }
 
+// A browser that stopped answering once it had started: a call that got no
+// answer in its time (timedOut), or a connection to it that failed or
+// closed (closed), as when it has quit. A call cut short by the end of the
+// run's time says that. Any other error is given back as it is.
+function stoppedAnswering(name, err) {
+  if (!err || !(err.timedOut || err.closed)) return err;
+  if (err.timedOut && err.outOfTime) return new Error(`${name} did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`);
+  return new Error(`${name} stopped answering, so no kit was made. The machine may be busy; try again.`);
+}
+
 // A wait for the browser's own HTTP endpoint that runs out says so
-// (timedOut).
+// (timedOut), and one it refuses, as when it has quit, too (closed).
 async function askBrowser(url, init) {
   try {
     return await (await fetch(url, init)).json();
   } catch (err) {
     if (err.name === "TimeoutError") throw Object.assign(new Error("The browser did not answer."), { timedOut: true });
+    if (err.name === "TypeError") throw Object.assign(new Error("The browser connection failed."), { closed: true });
     throw err;
   }
 }
@@ -463,7 +474,8 @@ function killBrowsers() {
 }
 
 // A connection to the browser or to one of its tabs, open within the time
-// given: one that does not open in it says so (timedOut).
+// given: one that does not open in it says so (timedOut), as does one that
+// fails or closes (closed).
 function connect(wsUrl, ms = beforeReading()) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
@@ -494,26 +506,32 @@ function connect(wsUrl, ms = beforeReading()) {
     };
     ws.onerror = () => {
       clearTimeout(opening);
-      reject(new Error("The browser connection failed."));
+      reject(Object.assign(new Error("The browser connection failed."), { closed: true }));
     };
     ws.onclose = () => {
       clearTimeout(opening);
       for (const waiter of pending.values()) {
         clearTimeout(waiter.timer);
-        waiter.reject(new Error("The browser connection closed."));
+        waiter.reject(Object.assign(new Error("The browser connection closed."), { closed: true }));
       }
       pending.clear();
     };
     ws.onopen = () => {
       clearTimeout(opening);
       resolve({
+        // A call that gets no answer in its time says so (timedOut), and
+        // whether the end of the run's time cut that short (outOfTime). One
+        // on a connection that has closed fails at once (closed), where it
+        // would wait out its time for an answer that cannot come.
         send(method, params = {}, timeoutMs = 30_000) {
+          if (ws.readyState !== WebSocket.OPEN) return Promise.reject(Object.assign(new Error("The browser connection closed."), { closed: true }));
           const id = ++nextId;
+          const wait = Math.max(1_000, Math.min(timeoutMs, timeLeft()));
           return new Promise((res, rej) => {
             const timer = setTimeout(() => {
               pending.delete(id);
-              rej(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
-            }, Math.max(1_000, Math.min(timeoutMs, timeLeft())));
+              rej(Object.assign(new Error(`${method} timed out`), { timedOut: true, outOfTime: wait < timeoutMs }));
+            }, wait);
             pending.set(id, { resolve: res, reject: rej, timer });
             ws.send(JSON.stringify({ id, method, params }));
           });
@@ -600,4 +618,4 @@ async function currentAddress(cdp) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, connect, openPage, navigate, currentAddress };
+module.exports = { findChrome, launch, killBrowsers, connect, openPage, stoppedAnswering, navigate, currentAddress };

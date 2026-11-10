@@ -22,7 +22,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const { STATUS_CODES } = require("http");
 const path = require("path");
-const { launch, killBrowsers, openPage } = require("./chrome");
+const { launch, killBrowsers, openPage, stoppedAnswering } = require("./chrome");
 const { scanPage } = require("./scan");
 const { buildFamilies, parseStack } = require("./families");
 const { SOURCE_NAMES } = require("./license");
@@ -990,6 +990,8 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     try {
       cdp = await openPage(chrome, SCREEN);
       scan = await scanPage(cdp, url, log);
+    } catch (err) {
+      throw stoppedAnswering(chrome.name, err);
     } finally {
       if (cdp) cdp.close();
       await chrome.close();

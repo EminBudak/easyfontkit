@@ -10,6 +10,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { spawn } = require("node:child_process");
 const { launch, killBrowsers, openPage, navigate } = require("../skills/easyfontkit/scripts/lib/chrome");
+const { makeFontKit } = require("../skills/easyfontkit/scripts/lib/kit");
 const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
 const { devtools } = require("./devtools");
 
@@ -391,4 +392,30 @@ test("a browser that quits as it starts is told apart from one that is slow, as 
   setTimeLimit(3_000);
   await assert.rejects(launch(SCREEN), { message: "chrome did not start. Try again, or point CHROME_PATH at another browser." });
   assert.deepEqual(fs.readdirSync(path.join(parent, "temp")), []);
+});
+
+test("a browser that stops answering once it has started, or quits, ends the run with a plain message, and the earlier kit stays", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+  const { parent, temp, pid, serve } = standIn(t);
+  const dir = path.join(parent, "kit");
+  fs.mkdirSync(dir);
+  const kit = { "fonts.json": JSON.stringify({ version: 1, generator: "easyfontkit 0.1.2", url: "https://acme.example/", families: [] }), "FONTS.md": "# Fonts of acme.example\n", "fonts.css": ":root {}\n" };
+  for (const [name, text] of Object.entries(kit)) fs.writeFileSync(path.join(dir, name), text);
+  const stopped = "chrome stopped answering, so no kit was made. The machine may be busy; try again.";
+  for (const [what, options, timeLimit, last, message] of [
+    // A call that gets no answer until the run's time is out.
+    ["a call", { calls: { "Network.enable": "hold" } }, 4_000, "Network.enable", "chrome did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout."],
+    // A browser that drops its connection to the tab, before the page is
+    // asked for or as it is, or its endpoint's request for the tab, as one
+    // that has quit.
+    ["the connection", { calls: { "Network.enable": "close" } }, 60_000, "Network.enable", stopped],
+    ["the first navigation", { calls: { "Page.getFrameTree": { frameTree: { frame: { id: "1" } } }, "Page.navigate": "close" } }, 60_000, "Page.navigate", stopped],
+    ["the endpoint", { routes: { "/json/new": "refuse" } }, 60_000, undefined, stopped],
+  ]) {
+    const endpoint = await serve(options);
+    await assert.rejects(makeFontKit("https://acme.example/", { dir, timeLimit }), { message }, what);
+    assert.equal(endpoint.received.filter(({ socket }) => socket === "tab").map(({ method }) => method).pop(), last, `${what}: the last call to the tab`);
+    assert.ok(await waitFor(pid()), `${what}: the browser is ended`);
+    assert.deepEqual(fs.readdirSync(temp), [], `${what}: no profile is left`);
+    assert.deepEqual(Object.fromEntries(fs.readdirSync(dir).map((name) => [name, fs.readFileSync(path.join(dir, name), "utf8")])), kit, `${what}: the earlier kit is as it was`);
+  }
 });

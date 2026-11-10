@@ -133,6 +133,9 @@ function described(font, basis) {
   };
 }
 
+// A free family of the index by its id, as freeMatches gives one, or null.
+const indexed = (id, basis = "") => (BY_ID.has(id) ? described(BY_ID.get(id), basis) : null);
+
 const round = (n) => Math.round(n * 100) / 100;
 
 // Families made for one use are poor stand-ins for a text face: small caps,
@@ -201,4 +204,4 @@ function freeMatches({ names = [], stacks = [names], category = "sans", metrics 
   return [described(BY_ID.get(DEFAULTS[kind]), `a plain free ${KIND[kind]} font; this one could not be measured`)];
 }
 
-module.exports = { freeMatches, lookup, cleanName, styleWords, words, key, FONTS };
+module.exports = { freeMatches, indexed, lookup, cleanName, styleWords, words, key, FONTS };

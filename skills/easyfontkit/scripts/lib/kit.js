@@ -26,7 +26,7 @@ const { launch, killBrowsers, openPage, stoppedAnswering } = require("./chrome")
 const { scanPage } = require("./scan");
 const { buildFamilies, parseStack } = require("./families");
 const { SOURCE_NAMES } = require("./license");
-const { styleWords, words } = require("./match");
+const { indexed, styleWords, words } = require("./match");
 const { setTimeLimit, sleep } = require("./time");
 const version = require("./version");
 
@@ -736,6 +736,39 @@ function freePick(family) {
   return free ? { name: free.family, free } : null;
 }
 
+// The free family a role's -free variable names in fonts.css, and what
+// loads it there. A role's own open family is backed by its saved files.
+// With none of them saved, as with --no-files, it is loaded from Google
+// Fonts or Fontsource like any other free family, where the index lists it
+// (free); one the index does not list is loaded by nothing (unloaded).
+function freeInCss(family) {
+  const pick = freePick(family);
+  if (!pick || !pick.own || family.files.some((file) => file.file)) return pick;
+  const free = family.listed && indexed(family.listed.id);
+  return free ? { name: free.family, free } : { ...pick, unloaded: true };
+}
+
+// Whether the kit was made without its font files: some were read, and
+// none was saved.
+const withoutFiles = (families) => families.some((family) => family.files.length) && families.every((family) => family.files.every((file) => !file.file));
+
+// The -free variables that name an open family of the site's that nothing
+// in fonts.css loads, and how many families they name.
+function unloadedFree(kit, byKey) {
+  const roles = Object.entries(kit.roles).filter(([, info]) => (freeInCss(byKey.get(info.key)) || {}).unloaded);
+  return { names: roles.map(([role]) => `--font-${role}-free`), families: new Set(roles.map(([, info]) => info.key)).size };
+}
+const unloadedText = ({ names, families }, loads) =>
+  `${list(names)} ${names.length === 1 ? "names" : "name"} ${families === 1 ? "an open font of the site's that is" : "open fonts of the site's that are"} on neither, so ${loads(families === 1 ? "it" : "them")}.`;
+
+// Text as lines of a CSS comment, each at most 76 characters with the
+// comment's indent.
+const commentLines = (text) =>
+  text
+    .split(" ")
+    .reduce((rows, word) => (rows.length && `${rows[rows.length - 1]} ${word}`.length <= 73 ? [...rows.slice(0, -1), `${rows[rows.length - 1]} ${word}`] : [...rows, word]), [])
+    .map((row) => `   ${row}`);
+
 // The page's address goes into a CSS comment, and the page sets it: a path,
 // a redirect or a #fragment with */ in it would end the comment and put
 // rules of the page's choosing, like an @import, at the top of fonts.css.
@@ -747,22 +780,27 @@ function writeCss(kit, families, dir) {
   const host = new URL(kit.url).hostname.replace(/^www\./, "");
   const picks = new Map();
   for (const role of Object.values(kit.roles)) {
-    const pick = freePick(byKey.get(role.key));
+    const pick = freeInCss(byKey.get(role.key));
     if (!pick || !pick.free) continue;
     const used = picks.get(pick.free.id) || { free: pick.free, used: new Set() };
     role.weights.forEach((w) => used.used.add(w));
     picks.set(pick.free.id, used);
   }
   const imports = freeImports([...picks.values()].map(({ free, used }) => ({ free, weights: freeWeights(free, [...used]) })));
-  const lines = [
-    `/* Fonts of ${inComment(host)}, read from ${inComment(kit.url)} on ${kit.capturedAt.slice(0, 10)} by easyfontkit ${version}.`,
-    "   Each font file the page loaded has a @font-face rule below, under its",
-    "   family's name. --font-heading, --font-body, --font-button and --font-code",
-    "   are the site's own fonts; the -free ones are the closest free fonts.",
-    "   FONTS.md says how each one is licensed. */",
-    "",
-    ...imports,
-  ];
+  // A kit made without its font files has no @font-face rule, and the
+  // comment says so, as fonts.css is taken as it is.
+  const unloaded = unloadedFree(kit, byKey);
+  const about = withoutFiles(families)
+    ? commentLines(
+        `The font files were read but not saved, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts, which the @import lines load from Google Fonts or Fontsource.${unloaded.names.length ? ` ${unloadedText(unloaded, (it) => `nothing here loads ${it}`)}` : ""} FONTS.md says how each one is licensed. */`,
+      )
+    : [
+        "   Each font file the page loaded has a @font-face rule below, under its",
+        "   family's name. --font-heading, --font-body, --font-button and --font-code",
+        "   are the site's own fonts; the -free ones are the closest free fonts.",
+        "   FONTS.md says how each one is licensed. */",
+      ];
+  const lines = [`/* Fonts of ${inComment(host)}, read from ${inComment(kit.url)} on ${kit.capturedAt.slice(0, 10)} by easyfontkit ${version}.`, ...about, "", ...imports];
   if (imports.length) lines.push("");
   for (const family of families) {
     for (const file of family.files.filter((f) => f.file)) {
@@ -787,7 +825,7 @@ function writeCss(kit, families, dir) {
     const own = family && !family.system ? [quote(family.name), ...stack.filter((name) => !family.cssNames.some((css) => css.toLowerCase() === name.toLowerCase())).map(cssName)] : stack.map(cssName);
     if (!own.includes(generic)) own.push(generic);
     lines.push(`  --font-${role}: ${[...new Set(own)].join(", ")};`);
-    const pick = freePick(family);
+    const pick = freeInCss(family);
     if (pick) lines.push(`  --font-${role}-free: ${quote(pick.name)}, ${generic};`);
   }
   lines.push("}", "");
@@ -873,11 +911,15 @@ function writeMarkdown(kit, families, dir) {
     lines.push("", "## Other fonts the page loads", "", "These files were loaded too, but none of the text read above was drawn with them: icon fonts, or text further from the usual places.");
     others.forEach(section);
   }
+  // A kit made without its font files says so, as fonts.css then declares
+  // none of them.
+  const saved = !withoutFiles(families);
+  const unloaded = unloadedFree(kit, byKey);
   lines.push(
     "",
     "## How to use",
     "",
-    "fonts.css declares every saved file under its family's name and sets a variable per role. Keep it next to the files folder:",
+    saved ? "fonts.css declares every saved file under its family's name and sets a variable per role. Keep it next to the files folder:" : "fonts.css sets a variable per role. The font files were not saved, so it declares none of them:",
     "",
     "```css",
     '@import "fonts.css";',
@@ -885,7 +927,7 @@ function writeMarkdown(kit, families, dir) {
     "body { font-family: var(--font-body); }",
     "```",
     "",
-    "`--font-heading` and the others are the site's own fonts. `--font-heading-free` and the other -free variables are the closest free fonts, loaded from Google Fonts or Fontsource. A commercial font is licensed by its maker, and the site's license does not carry over to other uses.",
+    `\`--font-heading\` and the others are the site's own fonts. \`--font-heading-free\` and the other -free variables are the closest free fonts, loaded from Google Fonts or Fontsource.${unloaded.names.length ? ` ${unloadedText({ ...unloaded, names: unloaded.names.map((name) => `\`${name}\``) }, (it) => `fonts.css does not load ${it}`)}` : ""} A commercial font is licensed by its maker, and the site's license does not carry over to other uses.`,
   );
   if (kit.notes.length) lines.push("", "## Notes", "", ...kit.notes.map((note) => `- ${note}`));
   fs.writeFileSync(path.join(dir, "FONTS.md"), lines.join("\n") + "\n");

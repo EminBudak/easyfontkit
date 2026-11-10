@@ -1421,7 +1421,11 @@ test("a page's fonts: each role's face, every file saved as served, each license
     assert.match(md, /\| Code \| System monospace font \| 400 \| System font \| JetBrains Mono \|/);
     assert.match(md, /The file says "Webfont sold by Acme Type, for use of the licensee only\."/);
     const css = fs.readFileSync(path.join(dir, "fonts.css"), "utf8");
+    assert.match(css, /^\/\* Fonts of 127\.0\.0\.1, read from [^\n]+\n {3}Each font file the page loaded has a @font-face rule below, under its\n/);
     assert.match(css, /@font-face \{\n {2}font-family: "Inter";\n {2}src: url\("files\/inter-400\.woff2"\) format\("woff2"\);\n {2}font-weight: 400;\n {2}font-style: normal;\n {2}unicode-range: U\+0000-00FF;/);
+    // Inter is the closest free font of the heading's, in its weight alone:
+    // the body's, the site's own, comes from its saved file.
+    assert.match(css, /family=Inter:wght@700&/);
     assert.match(css, /src: url\("files\/acme-display-400\.ttf"\) format\("truetype"\);/);
     assert.match(css, /--font-body: "Inter", "Helvetica Neue", "Arial", sans-serif;/);
     assert.match(css, /--font-body-free: "Inter", sans-serif;/);
@@ -1439,6 +1443,15 @@ test("a page's fonts: each role's face, every file saved as served, each license
     assert.equal(json.roles.body.family, "Inter");
     assert.equal(json.families.find((f) => f.name === "Inter").files[0].file, "");
     assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "fonts.css", "fonts.json"]);
+    // fonts.css then says it has no @font-face rule, and loads the site's
+    // own open font from Google Fonts, so its -free variable still names a
+    // font that loads, as every other -free variable does.
+    const bare = fs.readFileSync(path.join(dir, "fonts.css"), "utf8");
+    assert.match(bare, /^\/\* Fonts of 127\.0\.0\.1, read from [^\n]+\n {3}The font files were read but not saved, so no @font-face rule follows\.\n/);
+    assert.doesNotMatch(bare, /@font-face \{/);
+    assert.match(bare, /@import url\("https:\/\/fonts\.googleapis\.com\/css2\?family=Inter:wght@400;700&[^"]*display=swap"\);/);
+    assert.match(bare, /--font-body-free: "Inter", sans-serif;/);
+    assert.match(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8"), /\nfonts\.css sets a variable per role\. The font files were not saved, so it declares none of them:\n/);
 
     // Files of the user's own in the files folder stay theirs, also one
     // under the name a new font file would take, written in other case, as
@@ -1552,6 +1565,49 @@ test("a unicode-range in the page's own CSS goes into fonts.css only when it is 
     const css = fs.readFileSync(path.join(dir, "fonts.css"), "utf8");
     assert.doesNotMatch(css, /evil/, css);
     for (const line of css.split("\n").filter((text) => text.includes("unicode-range"))) assert.match(line.replace(/^ {2}unicode-range: (.*);$/, "$1"), range, line);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a kit made without its font files says in fonts.css that it has no @font-face rule, loads the site's own open fonts from Google Fonts or Fontsource where they are, and names the -free variables of those it cannot load", { skip: noBrowser }, async () => {
+  // Inter, which Google Fonts has, and an open font of the site's own that
+  // neither Google Fonts nor Fontsource has.
+  const open = interAs({ names: { 1: "Acme Open", 2: "Regular", 4: "Acme Open", 6: "AcmeOpen-Regular", 13: "This Font Software is licensed under the SIL Open Font License, Version 1.1." } });
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Open</title><style>
+        @font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); }
+        @font-face { font-family: "Acme Open"; src: url("/open.ttf") format("truetype"); }
+        h1 { font-family: "Body Sans", sans-serif; } p, button { font-family: "Acme Open", sans-serif; }
+      </style></head><body><h1>Open fonts only</h1><p>Body text in an open font that no library has.</p><button>Go</button></body></html>`,
+    },
+    "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+    "/open.ttf": { type: "font/ttf", body: open },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-nofiles-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(origin, { dir, files: false, timeLimit: 60_000 });
+    assert.deepEqual([kit.roles.heading.family, kit.roles.body.family, kit.roles.button.family], ["Inter", "Acme Open", "Acme Open"]);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "fonts.css", "fonts.json"]);
+    const css = fs.readFileSync(path.join(dir, "fonts.css"), "utf8");
+    const { comments, rules } = cssParts(css);
+    assert.deepEqual(
+      comments.map((comment) => comment.replace(/\n {3}/g, " ")),
+      [
+        `/* Fonts of 127.0.0.1, read from ${origin}/ on ${kit.capturedAt.slice(0, 10)} by easyfontkit ${require("../package.json").version}. The font files were read but not saved, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts, which the @import lines load from Google Fonts or Fontsource. --font-body-free and --font-button-free name an open font of the site's that is on neither, so nothing here loads it. FONTS.md says how each one is licensed. */`,
+      ],
+    );
+    for (const line of comments[0].split("\n")) assert.ok(line.length <= 76 || line.startsWith("/* Fonts of"), line);
+    assert.doesNotMatch(rules, /@font-face/);
+    assert.deepEqual(rules.match(/@import url\("[^"]*"\);/g), ['@import url("https://fonts.googleapis.com/css2?family=Inter:wght@700&display=swap");']);
+    assert.match(rules, /--font-heading-free: "Inter", sans-serif;/);
+    assert.match(rules, /--font-body-free: "Acme Open", sans-serif;/);
+    const md = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+    assert.match(md, /\nfonts\.css sets a variable per role\. The font files were not saved, so it declares none of them:\n/);
+    assert.match(md, /the closest free fonts, loaded from Google Fonts or Fontsource\. `--font-body-free` and `--font-button-free` name an open font of the site's that is on neither, so fonts\.css does not load it\. A commercial font/);
   } finally {
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });

@@ -513,13 +513,17 @@ function connect(wsUrl, ms = beforeReading()) {
     // when a call got no answer in its time. The browser answers
     // Browser.getVersion by itself, whatever the page or its server does, in
     // a few milliseconds also on a busy machine: any answer will do, an
-    // error too. None in two seconds, or a connection that closes, says it
-    // has stopped answering. Calls that run out together share one question.
+    // error too. A busy machine can also hold the browser still for a while,
+    // longer than the call waited, and the run goes on once it answers
+    // again: it has ten seconds for that, or what is left of the run's time
+    // when that is less, a second at least. None in that time, or a
+    // connection that closes, says it has stopped answering. Calls that run
+    // out together share one question.
     let asking = null;
     const answers = () =>
       (asking =
         asking ||
-        call("Browser.getVersion", {}, Math.max(1_000, Math.min(2_000, timeLeft())))
+        call("Browser.getVersion", {}, Math.max(1_000, Math.min(10_000, timeLeft())))
           .then(
             () => true,
             (err) => !(err.timedOut || err.closed),

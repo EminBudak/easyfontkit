@@ -9,10 +9,12 @@
 // connections), each "hold" to take the request and never answer, a number
 // of milliseconds to answer that much later, or "refuse" to drop it. A
 // function of how many times it was asked before gives one of these.
-// calls: a method's result, "hold" to never answer it, or "close" to drop
-// the connection it came on, as a browser that quits does. A function of how
-// many times the method was called before gives one of these. A method not
-// named gets {}. Browser.close is answered and calls onClose.
+// calls: a method's result, "hold" to never answer it, a number of
+// milliseconds to answer it with {} that much later, as a browser held still
+// for a while does, or "close" to drop the connection it came on, as a
+// browser that quits does. A function of how many times the method was
+// called before gives one of these. A method not named gets {}.
+// Browser.close is answered and calls onClose.
 
 const crypto = require("node:crypto");
 const http = require("node:http");
@@ -99,6 +101,10 @@ function devtools({ routes = {}, calls = {}, onClose = () => {} } = {}) {
           const answer = !(method in calls) ? {} : typeof calls[method] === "function" ? calls[method](times) : calls[method];
           if (answer === "hold") continue;
           if (answer === "close") return void socket.destroy();
+          if (typeof answer === "number") {
+            setTimeout(() => socket.writable && socket.write(frame(JSON.stringify({ id, result: {} }))), answer).unref();
+            continue;
+          }
           socket.write(frame(JSON.stringify({ id, result: answer })));
           if (method === "Browser.close") onClose();
         }

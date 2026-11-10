@@ -425,7 +425,28 @@ test("a browser that stops answering once it has started, or quits, ends the run
   }
 });
 
-test("a call that gets no answer is put down to the browser only when the browser itself, asked at once on the same connection, does not answer either in ten seconds, or in what is left of the run's time when that is less, and every call then fails at once", async (t) => {
+// A browser held still, as a busy machine can hold it, until it is asked
+// whether it still answers and three seconds have gone by. It then answers
+// that question, and after it each call it was sent while it was held, as a
+// browser does once it goes on.
+function heldStill() {
+  let goOn;
+  const wentOn = new Promise((resolve) => (goOn = resolve));
+  return {
+    // A call sent while it is held, answered with this once it goes on.
+    until: (result) => wentOn.then(() => result),
+    // The question, answered three seconds after it is asked.
+    asked: () =>
+      new Promise((resolve) =>
+        setTimeout(() => {
+          resolve({});
+          goOn();
+        }, 3_000),
+      ),
+  };
+}
+
+test("a call that gets no answer is put down to the browser only when the browser itself, asked at once on the same connection, does not answer either in ten seconds, or in what is left of the run's time when that is less, and every call then fails at once; a browser that takes more than two seconds to answer was held still, and the call it was sent gets its wait again and is not sent twice", async (t) => {
   const endpoints = [];
   t.after(() => {
     for (const endpoint of endpoints) endpoint.close();
@@ -446,13 +467,41 @@ test("a call that gets no answer is put down to the browser only when the browse
   assert.equal(answering.cdp.lost, null);
   assert.deepEqual(await answering.cdp.send("Page.enable"), {});
   assert.deepEqual(answering.sent(), ["Page.navigate", "Browser.getVersion", "Page.enable"]);
-  // A browser held still for longer than the call waited, as a busy machine
-  // can hold it, that answers three seconds after it is asked: the same.
-  const held = await open({ "Page.navigate": "hold", "Browser.getVersion": 3_000 });
-  await assert.rejects(held.cdp.send("Page.navigate", { url: "https://acme.example/" }, 1_000), { message: "Page.navigate timed out", timedOut: true });
+  // A browser held still for longer than the calls waited. Two calls that
+  // ran out together share one question, and each gets the answer the
+  // browser gives it once it goes on, sent only once. A call still
+  // unanswered after its second wait fails as before when the browser
+  // answers again, and with what says the browser stopped when it does not.
+  // An answer that comes while the browser is asked is taken.
+  const busy = heldStill();
+  const navigated = { frameId: "1", loaderId: "2" };
+  const evaluated = { result: { type: "number", value: 1 } };
+  const held = await open({ "Page.navigate": () => busy.until(navigated), "Runtime.evaluate": () => busy.until(evaluated), "Browser.getVersion": busy.asked });
+  const twice = await open({ "Page.navigate": "hold", "Browser.getVersion": 3_000 });
+  const stops = await open({ "Page.navigate": "hold", "Browser.getVersion": (times) => (times ? "hold" : 3_000) });
+  const slow = await open({ "Page.navigate": 2_500, "Browser.getVersion": 3_000 });
+  const url = { url: "https://acme.example/" };
+  const [evaluation, navigation, failed, gone, meanwhile] = await Promise.all([
+    held.cdp.send("Runtime.evaluate", {}, 2_000),
+    held.cdp.send("Page.navigate", url, 2_000),
+    twice.cdp.send("Page.navigate", url, 1_000).catch((err) => err),
+    stops.cdp.send("Page.navigate", url, 1_000).catch((err) => err),
+    slow.cdp.send("Page.navigate", url, 1_000),
+  ]);
+  assert.deepEqual(evaluation, evaluated);
+  assert.deepEqual(navigation, navigated);
   assert.equal(held.cdp.lost, null);
-  assert.deepEqual(await held.cdp.send("Page.enable"), {});
-  assert.deepEqual(held.sent(), ["Page.navigate", "Browser.getVersion", "Page.enable"]);
+  assert.deepEqual(held.sent(), ["Runtime.evaluate", "Page.navigate", "Browser.getVersion"]);
+  assert.deepEqual(meanwhile, {});
+  assert.deepEqual(slow.sent(), ["Page.navigate", "Browser.getVersion"]);
+  assert.equal(failed.message, "Page.navigate timed out");
+  assert.equal(failed.timedOut, true);
+  assert.equal(twice.cdp.lost, null);
+  assert.deepEqual(await twice.cdp.send("Page.enable"), {});
+  assert.deepEqual(twice.sent(), ["Page.navigate", "Browser.getVersion", "Browser.getVersion", "Page.enable"]);
+  assert.equal(gone.timedOut, true);
+  assert.equal(stops.cdp.lost, gone);
+  assert.deepEqual(stops.sent(), ["Page.navigate", "Browser.getVersion", "Browser.getVersion"]);
   // A browser that does not answer either: the call, and one that waits
   // with it, fail with what says so once the browser has had its ten
   // seconds, and a call after them fails at once and is not sent.
@@ -535,16 +584,47 @@ test("a browser that stops answering, or quits, as its page is opened, scrolled 
   }
 });
 
-test("a browser held still for longer than a call waits, as a busy machine can hold it, goes on once it answers again within ten seconds of being asked, and the run saves its kit, as in 0.1.2", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
-  const { parent, temp, pid, serve } = standIn(t);
-  // The first wait for the page's fonts, ten seconds, gets no answer, and
-  // the browser, asked then, answers three seconds later.
-  const endpoint = await serve({ calls: { ...PAGE, "Runtime.evaluate": (times) => (times ? {} : "hold"), "Browser.getVersion": (times) => (times ? 3_000 : {}) } });
-  const { kit } = await makeFontKit("https://acme.example/", { dir: path.join(parent, "kit"), timeLimit: 60_000 });
-  assert.deepEqual(Object.keys(kit.roles), ["heading", "body", "button", "code"]);
-  const sent = endpoint.received.filter(({ socket }) => socket === "tab").map(({ method }) => method);
-  const held = sent.indexOf("Runtime.evaluate");
-  assert.deepEqual(sent.slice(held, held + 3), ["Runtime.evaluate", "Browser.getVersion", "Page.getLayoutMetrics"], "the run goes on once the browser answers");
-  assert.ok(await waitFor(pid()), "the browser is ended");
+test("a browser held still for longer than a call waits, as a busy machine can hold it, that answers again within ten seconds of being asked, gives the call its answer once it goes on, and the run saves its whole kit, as in 0.1.2, wherever it was held: at the wait for the page's fonts, the navigation, the scroll, a layout read or the reading of a role; the call is not sent twice", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+  // One run for each call, all at once, each in a browser of its own, held
+  // still from the first time the call is sent: the call gets no answer in
+  // its wait, and the browser, asked then, answers three seconds later, and
+  // the call after that. What is left of them is ended before the test's
+  // temp folder, with their pids, is removed.
+  const runs = [];
+  t.after(() => {
+    for (const { endpoint, pid } of runs) {
+      endpoint.close();
+      try {
+        if (!ended(pid())) process.kill(pid(), "SIGKILL");
+      } catch {
+        // Never started.
+      }
+    }
+  });
+  const { parent, temp } = standIn(t);
+  // A page whose headings are all h1, h2 or h3, so a heading not read
+  // there is not read at all.
+  const page = { ...PAGE, "DOM.querySelectorAll": (times, { selector }) => ({ nodeIds: selector.startsWith("h4") ? [] : [2] }) };
+  for (const method of ["Runtime.evaluate", "Page.navigate", "Input.dispatchMouseEvent", "Page.getLayoutMetrics", "CSS.getPlatformFontsForNode"]) {
+    const pidFile = path.join(parent, `${method}.pid`);
+    const pid = () => Number(fs.readFileSync(pidFile, "utf8"));
+    const busy = heldStill();
+    const answer = page[method] || {};
+    const endpoint = await devtools({ calls: { ...page, [method]: (times) => (times ? answer : busy.until(answer)), "Browser.getVersion": (times) => (times ? busy.asked() : {}) }, onClose: () => process.kill(pid(), "SIGKILL") });
+    // The browser is started at once, with these.
+    Object.assign(process.env, { DEVTOOLS_PORT: String(endpoint.port), STANDIN_PID: pidFile });
+    const made = makeFontKit("https://acme.example/", { dir: path.join(parent, method), timeLimit: 60_000 }).catch((err) => err);
+    runs.push({ method, pid, endpoint, made });
+  }
+  for (const { method, pid, endpoint, made } of runs) {
+    const { kit, message } = await made;
+    assert.ok(kit, `${method}: ${message}`);
+    assert.deepEqual(Object.keys(kit.roles), ["heading", "body", "button", "code"], method);
+    const sent = endpoint.received.filter(({ socket }) => socket === "tab").map(({ method: sentMethod }) => sentMethod);
+    const held = sent.indexOf(method);
+    assert.deepEqual(sent.slice(held, held + 2), [method, "Browser.getVersion"], `${method}: the browser is asked`);
+    assert.notEqual(sent[held + 2], method, `${method}: not sent twice`);
+    assert.ok(await waitFor(pid()), `${method}: the browser is ended`);
+  }
   assert.deepEqual(fs.readdirSync(temp), [], "no profile is left");
 });

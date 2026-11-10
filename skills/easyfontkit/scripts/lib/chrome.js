@@ -473,6 +473,11 @@ function killBrowsers() {
   }
 }
 
+// The browser answers what is asked of the browser itself in a few
+// milliseconds, also on a busy machine. One that takes longer than this was
+// held still, as a machine under heavy load can hold it.
+const HELD_STILL = 2_000;
+
 // A connection to the browser or to one of its tabs, open within the time
 // given: one that does not open in it says so (timedOut), as does one that
 // fails or closes (closed).
@@ -510,25 +515,28 @@ function connect(wsUrl, ms = beforeReading()) {
         ws.send(JSON.stringify({ id, method, params }));
       });
     // Whether the browser itself still answers, asked on the same connection
-    // when a call got no answer in its time. The browser answers
+    // when a call got no answer in its time, and how long its answer took:
+    // the milliseconds, or null when it gave none. The browser answers
     // Browser.getVersion by itself, whatever the page or its server does, in
     // a few milliseconds also on a busy machine: any answer will do, an
-    // error too. A busy machine can also hold the browser still for a while,
-    // longer than the call waited, and the run goes on once it answers
-    // again: it has ten seconds for that, or what is left of the run's time
-    // when that is less, a second at least. None in that time, or a
-    // connection that closes, says it has stopped answering. Calls that run
-    // out together share one question.
+    // error too. It has ten seconds for that, or what is left of the run's
+    // time when that is less, a second at least, as a busy machine can hold
+    // it still for a while. None in that time, or a connection that closes,
+    // says it has stopped answering. Calls that run out together share one
+    // question, and each is told how long it took.
     let asking = null;
-    const answers = () =>
-      (asking =
-        asking ||
-        call("Browser.getVersion", {}, Math.max(1_000, Math.min(10_000, timeLeft())))
+    const answers = () => {
+      if (!asking) {
+        const asked = Date.now();
+        asking = call("Browser.getVersion", {}, Math.max(1_000, Math.min(10_000, timeLeft())))
           .then(
-            () => true,
-            (err) => !(err.timedOut || err.closed),
+            () => Date.now() - asked,
+            (err) => (err.timedOut || err.closed ? null : Date.now() - asked),
           )
-          .finally(() => (asking = null)));
+          .finally(() => (asking = null));
+      }
+      return asking;
+    };
     ws.onmessage = (event) => {
       let msg;
       try {
@@ -565,16 +573,45 @@ function connect(wsUrl, ms = beforeReading()) {
         // does one once the browser has stopped answering. A call of the
         // browser's own (Browser.*) that gets no answer says that by
         // itself; for any other, the browser is asked first, so a page or
-        // a server that does not answer is not taken for the browser.
+        // a server that does not answer is not taken for the browser, and
+        // the call's own answer is still taken while the browser is asked.
+        // When the browser answers within two seconds, the call fails, as
+        // one the page or its server did not answer. When it takes longer,
+        // it was held still itself, and the call can have run out for that
+        // alone: the browser still has the call and answers it once it goes
+        // on, so the call gets its wait again, cut to what is left of the
+        // run's time, and the run goes on with its answer. It is not sent
+        // again: the browser would do it twice, and Chrome answers a page
+        // opened a second time that way with net::ERR_ABORTED. Still
+        // unanswered after its second wait, the call fails in the same way,
+        // or as the browser's when the browser does not answer either.
         send(method, params = {}, timeoutMs = 30_000) {
           if (lost) return Promise.reject(lost);
           if (ws.readyState !== WebSocket.OPEN) return Promise.reject(Object.assign(new Error("The browser connection closed."), { closed: true }));
-          const wait = Math.max(1_000, Math.min(timeoutMs, timeLeft()));
-          return call(method, params, wait).catch(async (err) => {
-            if (!err.timedOut || err === lost) throw err;
-            err.outOfTime = wait < timeoutMs;
-            if (!lost && (method.startsWith("Browser.") || !(await answers()))) lose(err);
-            throw lost || err;
+          return new Promise((resolve, reject) => {
+            const id = ++nextId;
+            const waiter = { resolve, reject, timer: null };
+            let waitedAgain = false;
+            const wait = () => {
+              const given = Math.max(1_000, Math.min(timeoutMs, timeLeft()));
+              waiter.timer = setTimeout(async () => {
+                if (!pending.has(id)) return;
+                const err = Object.assign(new Error(`${method} timed out`), { timedOut: true, outOfTime: given < timeoutMs });
+                const took = method.startsWith("Browser.") ? null : await answers();
+                // Answered meanwhile, or failed with the rest.
+                if (!pending.has(id)) return;
+                if (took === null) return void lose(err);
+                if (took > HELD_STILL && !waitedAgain) {
+                  waitedAgain = true;
+                  return void wait();
+                }
+                pending.delete(id);
+                reject(err);
+              }, given);
+            };
+            pending.set(id, waiter);
+            wait();
+            ws.send(JSON.stringify({ id, method, params }));
           });
         },
         on(method, listener) {

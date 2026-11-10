@@ -10,10 +10,11 @@
 // of milliseconds to answer that much later, or "refuse" to drop it. A
 // function of how many times it was asked before gives one of these.
 // calls: a method's result, "hold" to never answer it, a number of
-// milliseconds to answer it with {} that much later, as a browser held still
-// for a while does, or "close" to drop the connection it came on, as a
-// browser that quits does. A function of how many times the method was
-// called before gives one of these. A method not named gets {}.
+// milliseconds to answer it with {} that much later, a promise of the result
+// to answer it once that settles, as a browser held still for a while does,
+// or "close" to drop the connection it came on, as a browser that quits
+// does. A function of how many times the method was called before, and of
+// the call's params, gives one of these. A method not named gets {}.
 // Browser.close is answered and calls onClose.
 
 const crypto = require("node:crypto");
@@ -94,15 +95,19 @@ function devtools({ routes = {}, calls = {}, onClose = () => {} } = {}) {
         for (const { opcode, text } of out) {
           if (opcode === 8) return void socket.end(Buffer.from([0x88, 0]));
           if (opcode !== 1) continue;
-          const { id, method } = JSON.parse(text);
+          const { id, method, params = {} } = JSON.parse(text);
           received.push({ socket: which, method });
           const times = called[method] || 0;
           called[method] = times + 1;
-          const answer = !(method in calls) ? {} : typeof calls[method] === "function" ? calls[method](times) : calls[method];
+          const answer = !(method in calls) ? {} : typeof calls[method] === "function" ? calls[method](times, params) : calls[method];
           if (answer === "hold") continue;
           if (answer === "close") return void socket.destroy();
           if (typeof answer === "number") {
             setTimeout(() => socket.writable && socket.write(frame(JSON.stringify({ id, result: {} }))), answer).unref();
+            continue;
+          }
+          if (answer && typeof answer.then === "function") {
+            answer.then((result) => socket.writable && socket.write(frame(JSON.stringify({ id, result }))));
             continue;
           }
           socket.write(frame(JSON.stringify({ id, result: answer })));

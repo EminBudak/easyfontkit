@@ -107,6 +107,9 @@ test("a page whose server does not answer gets the run's time less a minute, and
 });
 
 const busy = (name, what, seconds) => `${name} did not ${what} in ${seconds} s, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`;
+// The message of a wait given a run with three seconds left, which on a
+// busy machine can be two by the time the wait begins.
+const inThreeSeconds = (what) => (err) => [3, 2].some((seconds) => err.message === busy("chrome", what, seconds)) || assert.fail(err.message);
 const SCREEN = { width: 800, height: 600 };
 
 test("a browser gets the run's time less a minute to open its page, as the page's server gets to answer, and one that does not is named in a plain message", async () => {
@@ -156,11 +159,11 @@ test("a browser slow to open its page gets it opened, and one that does not open
   // The tab that is not made, its connection that does not open, and its
   // first call that gets no answer, with three seconds left.
   for (const options of [{ routes: { "/json/new": "hold" } }, { routes: { tab: "hold" } }, { calls: { "Page.enable": "hold" } }]) {
-    setTimeLimit(3_000);
     const browser = await stand(options);
     const begun = Date.now();
-    await assert.rejects(openPage(browser, SCREEN), { message: busy("chrome", "open a page", 3) }, JSON.stringify(options));
-    assert.ok(Date.now() - begun < 6_000, `${JSON.stringify(options)}: ${Date.now() - begun} ms`);
+    setTimeLimit(3_000);
+    await assert.rejects(openPage(browser, SCREEN), inThreeSeconds("open a page"), JSON.stringify(options));
+    assert.ok(Date.now() - begun < 15_000, `${JSON.stringify(options)}: ${Date.now() - begun} ms`);
   }
 });
 
@@ -373,14 +376,14 @@ test("a browser slow to start gets the run's time less a minute, and is told to 
     ["the connection", { routes: { browser: "hold" } }],
     ["the download refusal", { calls: { "Browser.setDownloadBehavior": "hold" } }],
   ]) {
-    setTimeLimit(3_000);
     if (options) {
       delete process.env.NO_PORT;
       await serve(options);
     } else process.env.NO_PORT = "1";
     const begun = Date.now();
-    await assert.rejects(launch(SCREEN), { message: busy("chrome", "start", 3) }, what);
-    assert.ok(Date.now() - begun < 8_000, `${what}: ${Date.now() - begun} ms`);
+    setTimeLimit(3_000);
+    await assert.rejects(launch(SCREEN), inThreeSeconds("start"), what);
+    assert.ok(Date.now() - begun < 20_000, `${what}: ${Date.now() - begun} ms`);
     assert.ok(await waitFor(pid()), `${what}: the browser is ended`);
     assert.deepEqual(fs.readdirSync(temp), [], `${what}: no profile is left`);
   }

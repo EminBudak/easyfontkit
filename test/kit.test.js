@@ -1526,7 +1526,10 @@ test("the page's address goes into fonts.css only inside its comment, also when 
 test("a unicode-range in the page's own CSS goes into fonts.css only when it is one", { skip: noBrowser }, async () => {
   const routes = {
     "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
-    "/evil.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+    // A font of its own: the same bytes at two addresses are one file in the
+    // kit, named by the address whose answer the browser took first, which
+    // on a busy machine can be either.
+    "/evil.ttf": { type: "font/ttf", body: interAs({ names: { 1: "Other Sans", 2: "Regular", 4: "Other Sans", 6: "OtherSans-Regular" } }) },
   };
   const { server, origin } = await serve(routes);
   // A range that ends in an open quote, then a line with a src of its own:
@@ -1534,7 +1537,7 @@ test("a unicode-range in the page's own CSS goes into fonts.css only when it is 
   // family a file from elsewhere.
   routes["/"] = {
     body: `<!doctype html><html><head><title>Range</title><link rel="preload" href="/inter.woff2" as="font" type="font/woff2" crossorigin>
-      <style>@font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); unicode-range: U+0-FF "\n; src: url(${origin}/evil.woff2) }
+      <style>@font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); unicode-range: U+0-FF "\n; src: url(${origin}/evil.ttf) }
       h1, p { font-family: "Body Sans", sans-serif; }</style></head>
       <body><h1>Range</h1><p>A family whose range carries a file from elsewhere.</p></body></html>`,
   };

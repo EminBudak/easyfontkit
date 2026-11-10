@@ -29,7 +29,7 @@ Options:
   -v, --version    show the version
 
 Needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set CHROME_PATH
-to pick the browser.`;
+to pick the browser, by its path or a name on your PATH.`;
 
 function parse(argv) {
   const options = { files: true, json: false, timeout: 120 };

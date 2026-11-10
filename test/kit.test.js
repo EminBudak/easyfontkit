@@ -1956,7 +1956,7 @@ test("a page cannot make the browser save a file and is read where it stays, and
   }
 });
 
-test("the browser stays told to save nothing until it is closed, also once the connection to its tab has closed", { skip: noDownloads }, async () => {
+test("the browser stays told to save nothing until it is closed, also once the session of its tab has been let go of", { skip: noDownloads }, async () => {
   let asked = 0;
   const { server, origin } = await serve({
     "/": { body: startsDownload(`setTimeout(() => (location.href = "/file.bin"), 400)`) },
@@ -1986,6 +1986,57 @@ test("the browser stays told to save nothing until it is closed, also once the c
       else process.env[name] = value;
     }
     server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+// The ports that the processes whose command line names the given text
+// listen on, from /proc on Linux.
+function listening(named) {
+  const sockets = new Set();
+  for (const pid of fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+    try {
+      if (!fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(named)) continue;
+      for (const fd of fs.readdirSync(`/proc/${pid}/fd`)) {
+        const socket = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${pid}/fd/${fd}`));
+        if (socket) sockets.add(socket[1]);
+      }
+    } catch {
+      // Gone, or not this user's.
+    }
+  }
+  const ports = [];
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    for (const line of fs.readFileSync(table, "utf8").split("\n").slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      // The state 0A is LISTEN; the tenth field is the socket's inode.
+      if (fields[3] === "0A" && sockets.has(fields[9])) ports.push(parseInt(fields[1].split(":")[1], 16));
+    }
+  }
+  return ports;
+}
+
+test("the browser listens on no port, so no other program on the machine can read or drive it, and is driven over its pipe", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-port-"));
+  const saved = process.env.TMPDIR;
+  process.env.TMPDIR = parent;
+  const screen = { width: 800, height: 600 };
+  let chrome;
+  try {
+    setTimeLimit(60_000);
+    chrome = await launch(screen);
+    const profile = fs.readdirSync(parent).find((name) => name.startsWith("easyfontkit-chrome-"));
+    const cdp = await openPage(chrome, screen);
+    const { result } = await cdp.send("Runtime.evaluate", { expression: "1 + 1", returnByValue: true });
+    assert.equal(result.value, 2, "the tab answers over the pipe");
+    assert.deepEqual(listening(profile), [], "ports the browser listens on");
+    assert.equal(fs.existsSync(path.join(parent, profile, "DevToolsActivePort")), false);
+    cdp.close();
+  } finally {
+    if (chrome) await chrome.close();
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+    setTimeLimit(120_000);
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });

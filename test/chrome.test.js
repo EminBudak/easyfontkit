@@ -1,7 +1,7 @@
 "use strict";
 
-// The browser's answers that need no browser: a stand-in for the DevTools
-// connection says what the real one would.
+// The browser's answers that need no browser: a stand-in for the browser's
+// end of the DevTools pipe says what the real one would.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -12,7 +12,10 @@ const { spawn } = require("node:child_process");
 const { launch, killBrowsers, connect, openPage, navigate } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { makeFontKit } = require("../skills/easyfontkit/scripts/lib/kit");
 const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
-const { devtools } = require("./devtools");
+const { devtools, pipeTo } = require("./devtools");
+
+// The stand-in browser that carries its pipe to the stand-in DevTools end.
+const BROWSER = path.join(__dirname, "browser.js");
 
 test("on Linux, Chrome's temp folder is its profile where the socket it makes there fits, and its profile given as \".\", with Chrome started in it, where its own temp folder is too long for the socket; its crash reports go into its profile", { skip: ["darwin", "win32"].includes(process.platform) && "Chrome takes its temp folder from TMPDIR on Linux only" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-temp-"));
@@ -80,6 +83,34 @@ test("Chrome's component updater is sent to a closed port, so it downloads nothi
   }
 });
 
+test("the browser is driven over a pipe on its file descriptors 3 and 4, and is started with no DevTools port", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-pipe-"));
+  const saved = process.env.CHROME_PATH;
+  // A browser that writes down what it was started with and which of its
+  // file descriptors 3 and 4 are open, then quits.
+  const seen = path.join(parent, "seen");
+  process.env.CHROME_PATH = path.join(parent, "chrome");
+  fs.writeFileSync(
+    process.env.CHROME_PATH,
+    `#!/bin/sh
+printf '%s\\n' "$@" > ${JSON.stringify(seen)}
+for fd in 3 4; do if { : >&$fd; } 2>/dev/null; then echo "open $fd" >> ${JSON.stringify(seen)}; fi; done
+`,
+    { mode: 0o755 },
+  );
+  try {
+    await assert.rejects(launch({ width: 800, height: 600 }), /did not start/);
+    const lines = fs.readFileSync(seen, "utf8").split("\n");
+    assert.ok(lines.includes("--remote-debugging-pipe"), lines.join(" "));
+    assert.deepEqual(lines.filter((line) => line.startsWith("--remote-debugging-port") || line.startsWith("--remote-debugging-address")), []);
+    assert.ok(lines.includes("open 3") && lines.includes("open 4"), lines.join(" "));
+  } finally {
+    if (saved === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = saved;
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a page whose server does not answer gets the run's time less a minute, and a message with its address", async () => {
   for (const [limit, seconds] of [
     [120_000, 60],
@@ -114,9 +145,12 @@ const SCREEN = { width: 800, height: 600 };
 
 test("a browser gets the run's time less a minute to open its page, as the page's server gets to answer, and one that does not is named in a plain message", async () => {
   // A browser that never answers, told without waiting for it.
-  const saved = globalThis.fetch;
-  globalThis.fetch = async () => {
-    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  const given = [];
+  const pipe = {
+    send(method, params, timeoutMs) {
+      given.push(timeoutMs);
+      return Promise.reject(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
+    },
   };
   try {
     for (const [limit, seconds] of [
@@ -126,44 +160,44 @@ test("a browser gets the run's time less a minute to open its page, as the page'
       [30_000, 30],
     ]) {
       setTimeLimit(limit);
-      await assert.rejects(openPage({ base: "http://127.0.0.1:9", name: "chrome" }, SCREEN), { message: busy("chrome", "open a page", seconds) });
+      await assert.rejects(openPage({ pipe, name: "chrome" }, SCREEN), { message: busy("chrome", "open a page", seconds) });
+      assert.ok(Math.abs(given.at(-1) - seconds * 1000) < 1_000, `${given.at(-1)} ms for a ${limit} ms run`);
     }
   } finally {
-    globalThis.fetch = saved;
     setTimeLimit(120_000);
   }
 });
 
-test("a browser slow to open its page gets it opened, and one that does not open it, or does not answer on it, in the time it has is named in a plain message", async (t) => {
-  const endpoints = [];
+// The stand-in browser's end of a pipe, and the run's end of it.
+async function standInPipe(t, calls) {
+  const endpoint = await devtools({ calls });
+  const socket = await pipeTo(endpoint);
+  const pipe = connect(socket, socket);
   t.after(() => {
-    for (const endpoint of endpoints) endpoint.close();
-    setTimeLimit(120_000);
+    pipe.close();
+    endpoint.close();
   });
-  const stand = async (options) => {
-    const endpoint = await devtools(options);
-    endpoints.push(endpoint);
-    return { base: `http://127.0.0.1:${endpoint.port}`, name: "chrome", endpoint };
-  };
+  return { endpoint, pipe, sent: () => endpoint.received.map(({ to, method }) => `${to} ${method}`) };
+}
+
+test("a browser slow to open its page gets it opened, and one that does not open it, or does not answer on it, in the time it has is named in a plain message", async (t) => {
+  t.after(() => setTimeLimit(120_000));
   // More than the ten seconds a tab had in 0.1.2.
   setTimeLimit(60_000);
-  const late = await stand({ routes: { "/json/new": 10_500 } });
+  const late = await standInPipe(t, { "Target.createTarget": () => new Promise((resolve) => setTimeout(() => resolve({ targetId: "1" }), 10_500)) });
   const started = Date.now();
-  const cdp = await openPage(late, SCREEN);
+  const cdp = await openPage({ pipe: late.pipe, name: "chrome" }, SCREEN);
   assert.ok(Date.now() - started >= 10_000, `opened after ${Date.now() - started} ms`);
-  assert.deepEqual(
-    late.endpoint.received.map(({ method }) => method),
-    ["Page.enable", "Emulation.setDeviceMetricsOverride", "Browser.getVersion"],
-  );
+  assert.deepEqual(late.sent(), ["browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"]);
   cdp.close();
-  // The tab that is not made, its connection that does not open, and its
-  // first call that gets no answer, with three seconds left.
-  for (const options of [{ routes: { "/json/new": "hold" } }, { routes: { tab: "hold" } }, { calls: { "Page.enable": "hold" } }]) {
-    const browser = await stand(options);
+  // The tab that is not made, the session that is not given for it, and
+  // its first call that gets no answer, with three seconds left.
+  for (const calls of [{ "Target.createTarget": "hold" }, { "Target.attachToTarget": "hold" }, { "Page.enable": "hold" }]) {
+    const { pipe } = await standInPipe(t, calls);
     const begun = Date.now();
     setTimeLimit(3_000);
-    await assert.rejects(openPage(browser, SCREEN), inThreeSeconds("open a page"), JSON.stringify(options));
-    assert.ok(Date.now() - begun < 15_000, `${JSON.stringify(options)}: ${Date.now() - begun} ms`);
+    await assert.rejects(openPage({ pipe, name: "chrome" }, SCREEN), inThreeSeconds("open a page"), JSON.stringify(calls));
+    assert.ok(Date.now() - begun < 15_000, `${JSON.stringify(calls)}: ${Date.now() - begun} ms`);
   }
 });
 
@@ -183,22 +217,23 @@ const waitFor = async (pid) => {
 };
 
 // Stands in for Chrome with a helper that writes into the profile until it
-// is killed, as Chrome's network service does on its way out.
+// is killed, as Chrome's network service does on its way out. The browser
+// answers on its pipe at once; its helper does not hold the pipe, as
+// Chrome's do not.
 const WITH_HELPER = `#!/bin/sh
 for arg in "$@"; do
   case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
 done
-"$NODE_BIN" -e 'const fs = require("fs"); setInterval(() => { try { fs.mkdirSync(process.argv[1] + "/Default", { recursive: true }); fs.writeFileSync(process.argv[1] + "/Default/state", "x"); } catch {} }, 20)' "$profile" &
+"$NODE_BIN" -e 'const fs = require("fs"); setInterval(() => { try { fs.mkdirSync(process.argv[1] + "/Default", { recursive: true }); fs.writeFileSync(process.argv[1] + "/Default/state", "x"); } catch {} }, 20)' "$profile" 3>&- 4>&- &
 echo $! > "$HELPER_PID"
-printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
-exec sleep 30
+exec "$NODE_BIN" "$BROWSER_JS" answer
 `;
 
 test("a browser that is closed or stopped takes its helpers with it, and its profile stays gone", { skip: process.platform !== "linux" && "a browser's processes are told on Linux only" }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-helpers-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
-  const names = ["CHROME_PATH", "TMPDIR", "HELPER_PID", "NODE_BIN"];
+  const names = ["CHROME_PATH", "TMPDIR", "HELPER_PID", "NODE_BIN", "BROWSER_JS"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const started = [];
   t.after(() => {
@@ -211,7 +246,7 @@ test("a browser that is closed or stopped takes its helpers with it, and its pro
   });
   const chrome = path.join(parent, "chrome");
   fs.writeFileSync(chrome, WITH_HELPER, { mode: 0o755 });
-  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, HELPER_PID: path.join(parent, "helper.pid"), NODE_BIN: process.execPath });
+  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, HELPER_PID: path.join(parent, "helper.pid"), NODE_BIN: process.execPath, BROWSER_JS: BROWSER });
   for (const end of ["closed", "stopped"]) {
     const browser = await launch({ width: 800, height: 600 });
     const helper = Number(fs.readFileSync(process.env.HELPER_PID, "utf8"));
@@ -228,26 +263,27 @@ test("a browser that is closed or stopped takes its helpers with it, and its pro
 // the handler is no child of the browser's, and a helper names it as
 // Chrome's helpers do, in a command line rewritten with its arguments apart
 // by spaces. A handler already running can be named instead of a new one.
+// The browser answers on its pipe at once, and neither of the others holds
+// the pipe, as Chrome's helpers and handler do not.
 const WITH_CRASH_HANDLER = `#!/bin/sh
 for arg in "$@"; do
   case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
 done
 if [ -z "$HANDLER_GIVEN" ]; then
-  ( "$HANDLER_BIN" -e 'setTimeout(() => {}, 30000)' & echo $! > "$HANDLER_PID" )
+  ( "$HANDLER_BIN" -e 'setTimeout(() => {}, 30000)' 3>&- 4>&- & echo $! > "$HANDLER_PID" )
 else
   echo "$HANDLER_GIVEN" > "$HANDLER_PID"
 fi
-"$NODE_BIN" -e 'process.title = process.argv.join(" "); require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 30000)' -- "$profile/helper.pid" "--crashpad-handler-pid=$(cat "$HANDLER_PID")" "--user-data-dir=$profile" &
+"$NODE_BIN" -e 'process.title = process.argv.join(" "); require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 30000)' -- "$profile/helper.pid" "--crashpad-handler-pid=$(cat "$HANDLER_PID")" "--user-data-dir=$profile" 3>&- 4>&- &
 while [ ! -s "$profile/helper.pid" ]; do sleep 0.01; done
-printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
-exec sleep 30
+exec "$NODE_BIN" "$BROWSER_JS" answer
 `;
 
 test("a browser's crash handler goes with it, also once its helpers have ended, and no other process it names does", { skip: process.platform !== "linux" && "a browser's processes are told on Linux only" }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-handler-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
-  const names = ["CHROME_PATH", "TMPDIR", "NODE_BIN", "HANDLER_BIN", "HANDLER_PID", "HANDLER_GIVEN"];
+  const names = ["CHROME_PATH", "TMPDIR", "NODE_BIN", "BROWSER_JS", "HANDLER_BIN", "HANDLER_PID", "HANDLER_GIVEN"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const started = [];
   t.after(() => {
@@ -263,7 +299,7 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
   const handlerBin = path.join(parent, "chrome_crashpad_handler");
   fs.symlinkSync(process.execPath, handlerBin);
   fs.symlinkSync(process.execPath, path.join(parent, "something_else"));
-  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, NODE_BIN: process.execPath, HANDLER_PID: path.join(parent, "handler.pid") });
+  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, NODE_BIN: process.execPath, BROWSER_JS: BROWSER, HANDLER_PID: path.join(parent, "handler.pid") });
   const helperOf = () => {
     const profile = fs.readdirSync(temp).find((name) => name.startsWith("easyfontkit-chrome-"));
     return Number(fs.readFileSync(path.join(temp, profile, "helper.pid"), "utf8"));
@@ -309,13 +345,12 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
   }
 });
 
-// Stands in for Chrome: writes the port of the stand-in DevTools endpoint
-// where Chrome writes its own, unless NO_PORT is set, and stays until it is
-// killed, as a browser that is slow to answer does.
+// Stands in for Chrome: carries its pipe to the stand-in DevTools end at
+// DEVTOOLS_PORT, unless SILENT is set, when it never answers on it and stays
+// until it is killed, as a browser that is slow to answer does.
 const STAND_IN = `#!/bin/sh
-for arg in "$@"; do case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}";; esac; done
 echo $$ > "$STANDIN_PID"
-[ -z "$NO_PORT" ] && printf '%s\\n/devtools/browser/x\\n' "$DEVTOOLS_PORT" > "$profile/DevToolsActivePort"
+[ -z "$SILENT" ] && exec "$NODE_BIN" "$BROWSER_JS"
 exec sleep 60
 `;
 
@@ -325,7 +360,7 @@ function standIn(t) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-busy-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
-  const names = ["CHROME_PATH", "TMPDIR", "STANDIN_PID", "DEVTOOLS_PORT", "NO_PORT"];
+  const names = ["CHROME_PATH", "TMPDIR", "STANDIN_PID", "DEVTOOLS_PORT", "SILENT", "NODE_BIN", "BROWSER_JS"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const endpoints = [];
   const pidFile = path.join(parent, "browser.pid");
@@ -345,7 +380,7 @@ function standIn(t) {
     fs.rmSync(parent, { recursive: true, force: true });
   });
   fs.writeFileSync(path.join(parent, "chrome"), STAND_IN, { mode: 0o755 });
-  Object.assign(process.env, { CHROME_PATH: path.join(parent, "chrome"), TMPDIR: temp, STANDIN_PID: pidFile });
+  Object.assign(process.env, { CHROME_PATH: path.join(parent, "chrome"), TMPDIR: temp, STANDIN_PID: pidFile, NODE_BIN: process.execPath, BROWSER_JS: BROWSER });
   // A browser asked to quit quits.
   const serve = async (options) => {
     const endpoint = await devtools({ ...options, onClose: () => process.kill(pid(), "SIGKILL") });
@@ -356,30 +391,34 @@ function standIn(t) {
   return { parent, temp, pid, serve };
 }
 
+// What a run said to the stand-in, to the browser or to a tab, before it let
+// go of its tab and closed the browser.
+const asked = (endpoint) =>
+  endpoint.received.map(({ to, method }) => `${to} ${method}`).filter((call) => call !== "browser Target.detachFromTarget" && call !== "browser Browser.close");
+
 test("a browser slow to start gets the run's time less a minute, and is told to refuse downloads before a run goes on in it; one that does not start, or does not answer as it starts, in that time is named in a plain message, ended, and its profile removed", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
   const { temp, pid, serve } = standIn(t);
-  // /json/version answered after three seconds, where 0.1.2 gave up after
-  // two and went on without the download refusal.
+  // The download refusal, the first thing said on the pipe, answered after
+  // three seconds, where 0.1.2 gave up after two and went on without it.
   setTimeLimit(60_000);
-  const slow = await serve({ routes: { "/json/version": (times) => (times ? 0 : 3_000) } });
+  const slow = await serve({ calls: { "Browser.setDownloadBehavior": (times) => (times ? {} : 3_000) } });
   const browser = await launch(SCREEN);
   assert.equal(browser.name, "chrome");
-  assert.deepEqual(slow.received, [{ socket: "browser", method: "Browser.setDownloadBehavior" }]);
+  assert.deepEqual(slow.received, [{ to: "browser", method: "Browser.setDownloadBehavior" }]);
   await browser.close();
   assert.ok(ended(pid()), "the browser asked to quit");
+  assert.deepEqual(slow.received.map(({ method }) => method), ["Browser.setDownloadBehavior", "Browser.close"]);
   assert.deepEqual(fs.readdirSync(temp), []);
-  // A browser that writes no port, one whose endpoint, connection or
-  // download refusal gets no answer, with three seconds left.
+  // A browser that never answers on its pipe, and one that does not answer
+  // the download refusal, with three seconds left.
   for (const [what, options] of [
-    ["no port", null],
-    ["/json/version", { routes: { "/json/version": "hold" } }],
-    ["the connection", { routes: { browser: "hold" } }],
+    ["no answer", null],
     ["the download refusal", { calls: { "Browser.setDownloadBehavior": "hold" } }],
   ]) {
     if (options) {
-      delete process.env.NO_PORT;
+      delete process.env.SILENT;
       await serve(options);
-    } else process.env.NO_PORT = "1";
+    } else process.env.SILENT = "1";
     const begun = Date.now();
     setTimeLimit(3_000);
     await assert.rejects(launch(SCREEN), inThreeSeconds("start"), what);
@@ -404,21 +443,22 @@ test("a browser that stops answering once it has started, or quits, ends the run
   const kit = { "fonts.json": JSON.stringify({ version: 1, generator: "easyfontkit 0.1.2", url: "https://acme.example/", families: [] }), "FONTS.md": "# Fonts of acme.example\n", "fonts.css": ":root {}\n" };
   for (const [name, text] of Object.entries(kit)) fs.writeFileSync(path.join(dir, name), text);
   const stopped = "chrome stopped answering, so no kit was made. The machine may be busy; try again.";
-  // The calls to the tab after the three that open it.
+  // The calls that start the browser and open its tab, and those after
+  // them.
+  const opening = ["browser Browser.setDownloadBehavior", "browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"];
   for (const [what, options, timeLimit, calls, message] of [
     // A call that gets no answer until the run's time is out, and the
     // browser itself, asked then.
-    ["a call", { calls: { "Network.enable": "hold" } }, 4_000, ["Network.enable", "Browser.getVersion"], "chrome did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout."],
-    // A browser that drops its connection to the tab, before the page is
-    // asked for or as it is, or its endpoint's request for the tab, as one
-    // that has quit.
-    ["the connection", { calls: { "Network.enable": "close" } }, 60_000, ["Network.enable"], stopped],
-    ["the first navigation", { calls: { "Page.getFrameTree": { frameTree: { frame: { id: "1" } } }, "Page.navigate": "close" } }, 60_000, ["Network.enable", "DOM.enable", "CSS.enable", "Page.getFrameTree", "Page.navigate"], stopped],
-    ["the endpoint", { routes: { "/json/new": "refuse" } }, 60_000, [], stopped],
+    ["a call", { calls: { "Network.enable": "hold" } }, 4_000, [...opening, "tab Network.enable", "browser Browser.getVersion"], "chrome did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout."],
+    // A browser that drops its pipe before the page is asked for or as it
+    // is, or as it is asked for a tab, as one that has quit.
+    ["the pipe", { calls: { "Network.enable": "close" } }, 60_000, [...opening, "tab Network.enable"], stopped],
+    ["the first navigation", { calls: { "Page.getFrameTree": { frameTree: { frame: { id: "1" } } }, "Page.navigate": "close" } }, 60_000, [...opening, "tab Network.enable", "tab DOM.enable", "tab CSS.enable", "tab Page.getFrameTree", "tab Page.navigate"], stopped],
+    ["the tab", { calls: { "Target.createTarget": "close" } }, 60_000, opening.slice(0, 2), stopped],
   ]) {
     const endpoint = await serve(options);
     await assert.rejects(makeFontKit("https://acme.example/", { dir, timeLimit }), { message }, what);
-    assert.deepEqual(endpoint.received.filter(({ socket }) => socket === "tab").map(({ method }) => method).slice(3), calls, `${what}: the calls to the tab`);
+    assert.deepEqual(asked(endpoint), calls, `${what}: the calls`);
     assert.ok(await waitFor(pid()), `${what}: the browser is ended`);
     assert.deepEqual(fs.readdirSync(temp), [], `${what}: no profile is left`);
     assert.deepEqual(Object.fromEntries(fs.readdirSync(dir).map((name) => [name, fs.readFileSync(path.join(dir, name), "utf8")])), kit, `${what}: the earlier kit is as it was`);
@@ -449,19 +489,13 @@ function heldStill() {
   };
 }
 
-test("a call that gets no answer is put down to the browser only when the browser itself, asked at once on the same connection, does not answer either in ten seconds, or in what is left of the run's time when that is less, and every call then fails at once; a browser that takes more than two seconds to answer was held still, and the call it was sent gets its wait again and is not sent twice", async (t) => {
-  const endpoints = [];
-  t.after(() => {
-    for (const endpoint of endpoints) endpoint.close();
-    setTimeLimit(120_000);
-  });
+test("a call to a tab that gets no answer is put down to the browser only when the browser itself, asked at once on the pipe, does not answer either in ten seconds, or in what is left of the run's time when that is less, and every call then fails at once; a browser that takes more than two seconds to answer was held still, and the call it was sent gets its wait again and is not sent twice", async (t) => {
+  t.after(() => setTimeLimit(120_000));
   setTimeLimit(60_000);
-  const open = async (calls, where = "/devtools/page/1") => {
-    const endpoint = await devtools({ calls });
-    endpoints.push(endpoint);
-    const cdp = await connect(`ws://127.0.0.1:${endpoint.port}${where}`, 5_000);
-    t.after(() => cdp.close());
-    return { cdp, sent: () => endpoint.received.map(({ method }) => method) };
+  // A tab's session on a pipe to a stand-in browser.
+  const open = async (calls) => {
+    const { pipe, endpoint } = await standInPipe(t, calls);
+    return { pipe, cdp: pipe.session("S1"), sent: () => endpoint.received.map(({ method }) => method) };
   };
   // A server or a page that does not answer, in a browser that does: the
   // call says so, and the next one goes through.
@@ -521,12 +555,21 @@ test("a call that gets no answer is put down to the browser only when the browse
   assert.equal(await silent.cdp.send("Page.enable").catch((err) => err), lost);
   assert.ok(Date.now() - after < 1_000, `a call after them failed after ${Date.now() - after} ms`);
   assert.deepEqual(silent.sent(), ["Runtime.evaluate", "Page.navigate", "Browser.getVersion"]);
-  // A call of the browser's own that gets no answer says that by itself.
-  const own = await open({ "Browser.setDownloadBehavior": "hold" }, "/devtools/browser/x");
-  const refused = await own.cdp.send("Browser.setDownloadBehavior", { behavior: "deny" }, 1_000).catch((err) => err);
-  assert.equal(refused.timedOut, true);
-  assert.equal(own.cdp.lost, refused);
-  assert.deepEqual(own.sent(), ["Browser.setDownloadBehavior"]);
+  // A call to the browser itself, one of the browser's own or not, that
+  // gets no answer says that by itself, as does one of the browser's own
+  // said to a tab.
+  for (const [method, to] of [
+    ["Browser.setDownloadBehavior", "browser"],
+    ["Target.createTarget", "browser"],
+    ["Browser.getVersion", "tab"],
+  ]) {
+    const own = await open({ [method]: "hold" });
+    const unanswered = await (to === "tab" ? own.cdp : own.pipe).send(method, {}, 1_000).catch((err) => err);
+    assert.equal(unanswered.timedOut, true, method);
+    assert.equal(own.pipe.lost, unanswered, method);
+    assert.equal(own.cdp.lost, unanswered, method);
+    assert.deepEqual(own.sent(), [method]);
+  }
   // With three seconds of the run left, the browser has what is left to
   // answer, not ten seconds more.
   const late = await open({ "Page.navigate": "hold", "Browser.getVersion": "hold" });
@@ -536,6 +579,34 @@ test("a call that gets no answer is put down to the browser only when the browse
   assert.equal(late.cdp.lost, unanswered);
   assert.ok(Date.now() - cut < 8_000, `told after ${Date.now() - cut} ms`);
   assert.deepEqual(late.sent(), ["Page.navigate", "Browser.getVersion"]);
+});
+
+test("a tab let go of fails the calls still waiting on it at once and is detached from, while the browser goes on answering; a long answer comes whole; a pipe that closes fails every call", async (t) => {
+  const { pipe, endpoint } = await standInPipe(t, { "Page.navigate": "hold", "Network.getResponseBody": { body: "x".repeat(300_000), base64Encoded: false } });
+  const cdp = pipe.session("S1");
+  const { body } = await cdp.send("Network.getResponseBody", { requestId: "1" });
+  assert.equal(body.length, 300_000);
+  const waiting = cdp.send("Page.navigate", { url: "https://acme.example/" }, 30_000).catch((err) => err);
+  const begun = Date.now();
+  cdp.close();
+  const dropped = await waiting;
+  assert.equal(dropped.closed, true);
+  assert.ok(Date.now() - begun < 1_000, `failed after ${Date.now() - begun} ms`);
+  assert.equal(pipe.lost, null);
+  assert.deepEqual(await pipe.send("Browser.getVersion"), {});
+  assert.equal((await cdp.send("Page.enable").catch((err) => err)).closed, true);
+  assert.deepEqual(
+    endpoint.received.map(({ to, method }) => `${to} ${method}`),
+    ["tab Network.getResponseBody", "tab Page.navigate", "browser Target.detachFromTarget", "browser Browser.getVersion"],
+  );
+  // The browser's end of the pipe closes, as when it quits.
+  const other = pipe.session("S2");
+  const held = other.send("Page.navigate", { url: "https://acme.example/" }, 30_000).catch((err) => err);
+  endpoint.close();
+  const gone = await held;
+  assert.equal(gone.closed, true);
+  assert.equal(pipe.lost, gone);
+  assert.equal(await pipe.send("Browser.getVersion").catch((err) => err), gone);
 });
 
 // A page whose text is all drawn with Arial, as the browser tells it.
@@ -566,21 +637,21 @@ test("a browser that stops answering, or quits, as its page is opened, scrolled 
   for (const [what, calls, timeLimit, last, said] of [
     // The first navigation, which has all of a short run: told as a stop, or
     // as the end of the run's time when that came a millisecond before.
-    ["the first navigation", { "Page.navigate": "hold", "Browser.getVersion": silent }, 5_000, ["Page.navigate", "Browser.getVersion"], [stopped, ranOut]],
+    ["the first navigation", { "Page.navigate": "hold", "Browser.getVersion": silent }, 5_000, ["tab Page.navigate", "browser Browser.getVersion"], [stopped, ranOut]],
     // The scroll back to the top, which has ten seconds.
-    ["the scroll", { "Input.dispatchMouseEvent": "hold", "Browser.getVersion": silent }, 25_000, ["Input.dispatchMouseEvent", "Browser.getVersion"], [stopped]],
+    ["the scroll", { "Input.dispatchMouseEvent": "hold", "Browser.getVersion": silent }, 25_000, ["tab Input.dispatchMouseEvent", "browser Browser.getVersion"], [stopped]],
     // The fonts of the body text, once the headings' were read, which have
     // what is left of the run.
-    ["the reading", { "CSS.getPlatformFontsForNode": (times) => (times ? "hold" : ARIAL), "Browser.getVersion": silent }, 25_000, ["CSS.getPlatformFontsForNode", "Browser.getVersion"], [ranOut]],
+    ["the reading", { "CSS.getPlatformFontsForNode": (times) => (times ? "hold" : ARIAL), "Browser.getVersion": silent }, 25_000, ["tab CSS.getPlatformFontsForNode", "browser Browser.getVersion"], [ranOut]],
     // A browser that quits there.
-    ["a quit as the page is read", { "CSS.getPlatformFontsForNode": (times) => (times ? "close" : ARIAL) }, 25_000, ["CSS.getPlatformFontsForNode"], [stopped]],
+    ["a quit as the page is read", { "CSS.getPlatformFontsForNode": (times) => (times ? "close" : ARIAL) }, 25_000, ["tab CSS.getPlatformFontsForNode"], [stopped]],
     // A server and a page that do not answer, in a browser that does.
-    ["the server", { "Page.navigate": "hold" }, 5_000, ["Page.navigate", "Browser.getVersion"], [/^Could not open https:\/\/acme\.example\/: no answer in \d+ s\. The site may be down or slow; try again later, or give it more time with --timeout\.$/]],
-    ["the page", { "Input.dispatchMouseEvent": "hold" }, 25_000, ["Input.dispatchMouseEvent", "Browser.getVersion"], ["https://acme.example/ stopped answering the browser while it was read, so no kit was made. Try again later, or check the page in a normal browser."]],
+    ["the server", { "Page.navigate": "hold" }, 5_000, ["tab Page.navigate", "browser Browser.getVersion"], [/^Could not open https:\/\/acme\.example\/: no answer in \d+ s\. The site may be down or slow; try again later, or give it more time with --timeout\.$/]],
+    ["the page", { "Input.dispatchMouseEvent": "hold" }, 25_000, ["tab Input.dispatchMouseEvent", "browser Browser.getVersion"], ["https://acme.example/ stopped answering the browser while it was read, so no kit was made. Try again later, or check the page in a normal browser."]],
   ]) {
     const endpoint = await serve({ calls: { ...PAGE, ...calls } });
     await assert.rejects(makeFontKit("https://acme.example/", { dir, timeLimit }), (err) => said.some((text) => (typeof text === "string" ? err.message === text : text.test(err.message))) || assert.fail(`${what}: ${err.message}`));
-    assert.deepEqual(endpoint.received.filter(({ socket }) => socket === "tab").map(({ method }) => method).slice(-last.length), last, `${what}: the last calls to the tab`);
+    assert.deepEqual(asked(endpoint).slice(-last.length), last, `${what}: the last calls`);
     assert.ok(await waitFor(pid()), `${what}: the browser is ended`);
     assert.deepEqual(fs.readdirSync(temp), [], `${what}: no profile is left`);
     assert.deepEqual(Object.fromEntries(fs.readdirSync(dir).map((name) => [name, fs.readFileSync(path.join(dir, name), "utf8")])), kit, `${what}: the earlier kit is as it was`);
@@ -627,10 +698,10 @@ test("a browser held still for longer than a call waits, as a busy machine can h
     const { kit, message } = await made;
     assert.ok(kit, `${method}: ${message}`);
     assert.deepEqual(Object.keys(kit.roles), ["heading", "body", "button", "code"], method);
-    const sent = endpoint.received.filter(({ socket }) => socket === "tab").map(({ method: sentMethod }) => sentMethod);
-    const held = sent.indexOf(method);
-    assert.deepEqual(sent.slice(held, held + 2), [method, "Browser.getVersion"], `${method}: the browser is asked`);
-    assert.notEqual(sent[held + 2], method, `${method}: not sent twice`);
+    const sent = asked(endpoint);
+    const held = sent.indexOf(`tab ${method}`);
+    assert.deepEqual(sent.slice(held, held + 2), [`tab ${method}`, "browser Browser.getVersion"], `${method}: the browser is asked`);
+    assert.notEqual(sent[held + 2], `tab ${method}`, `${method}: not sent twice`);
     assert.ok(await waitFor(pid()), `${method}: the browser is ended`);
   }
   assert.deepEqual(fs.readdirSync(temp), [], "no profile is left");

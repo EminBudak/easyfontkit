@@ -2,7 +2,8 @@
 
 // The browser: a Chrome, Chromium, Edge or Brave already on this machine,
 // started headless with a throwaway profile and driven over the DevTools
-// protocol with the WebSocket built into Node 22. No browser is
+// protocol on a pipe, its file descriptors 3 and 4. It opens no port, so no
+// other program on the machine can read or drive it. No browser is
 // downloaded, and the one started downloads none of its components.
 
 const fs = require("fs");
@@ -247,65 +248,13 @@ function tooSlow(name, what, wait) {
 }
 
 // A browser that stopped answering once it had started: a call that got no
-// answer in its time (timedOut), or a connection to it that failed or
-// closed (closed), as when it has quit. A call cut short by the end of the
-// run's time says that. Any other error is given back as it is.
+// answer in its time (timedOut), or a pipe to it that failed or closed
+// (closed), as when it has quit. A call cut short by the end of the run's
+// time says that. Any other error is given back as it is.
 function stoppedAnswering(name, err) {
   if (!err || !(err.timedOut || err.closed)) return err;
   if (err.timedOut && err.outOfTime) return new Error(`${name} did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`);
   return new Error(`${name} stopped answering, so no kit was made. The machine may be busy; try again.`);
-}
-
-// A wait for the browser's own HTTP endpoint that runs out says so
-// (timedOut), and one it refuses, as when it has quit, too (closed).
-async function askBrowser(url, init) {
-  try {
-    return await (await fetch(url, init)).json();
-  } catch (err) {
-    if (err.name === "TimeoutError") throw Object.assign(new Error("The browser did not answer."), { timedOut: true });
-    if (err.name === "TypeError") throw Object.assign(new Error("The browser connection failed."), { closed: true });
-    throw err;
-  }
-}
-
-// The connection to the browser as a whole, for what is said to all of it,
-// made by the time given.
-async function browserConnection(base, until) {
-  const left = () => Math.max(1_000, until - Date.now());
-  const { webSocketDebuggerUrl } = await askBrowser(`${base}/json/version`, { signal: AbortSignal.timeout(left()) });
-  return connect(webSocketDebuggerUrl, left());
-}
-
-// A page cannot make the browser save a file: a download it starts, by a
-// link, a script or a frame that goes to an attachment, is refused before
-// anything is written, in the user's Downloads folder or anywhere else, and
-// the page stays where it is. Said to the whole browser over a connection
-// of its own, which stays open until the browser has ended: Chrome forgets
-// it as soon as the connection that said it closes, and the connection to
-// the tab closes first. It is said within the time the browser has to
-// start: a browser that does not answer in that time ends the run
-// (timedOut), as a slow one could go on to open the page with nothing said.
-// A run goes on in a browser that does not take it, or that refuses the
-// connection, as one that has quit: opening its page then fails.
-// Gives that connection, or null when there is none.
-async function denyDownloads(base, until) {
-  let browser;
-  try {
-    browser = await browserConnection(base, until);
-  } catch (err) {
-    if (err.timedOut) throw err;
-    return null;
-  }
-  try {
-    await browser.send("Browser.setDownloadBehavior", { behavior: "deny" }, Math.max(1_000, until - Date.now()));
-  } catch (err) {
-    if (err.timedOut) {
-      browser.close();
-      throw err;
-    }
-    // A browser that does not take it.
-  }
-  return browser;
 }
 
 // Chrome on Linux takes its temp folder from TMPDIR, and makes there the
@@ -338,7 +287,10 @@ function tempOf(profile) {
 // (~/.config/google-chrome/Crash Reports), where nothing removes them, and
 // Ctrl-\ asks for one from each of the browser's processes:
 // BREAKPAD_DUMP_LOCATION puts them in the profile, which goes when the run
-// ends.
+// ends. The DevTools protocol goes over a pipe, file descriptors 3 and 4,
+// and not over a port: any program on the machine that found a port could
+// read the page the browser shows and drive it, as another user's job can on
+// a server that runs several at a time.
 async function launch({ width, height }) {
   const binary = findChrome();
   if (!binary) {
@@ -350,7 +302,7 @@ async function launch({ width, height }) {
     binary,
     [
       "--headless=new",
-      "--remote-debugging-port=0",
+      "--remote-debugging-pipe",
       `--user-data-dir=${profile}`,
       `--window-size=${width},${height}`,
       "--hide-scrollbars",
@@ -366,15 +318,16 @@ async function launch({ width, height }) {
       ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
       "about:blank",
     ],
-    { stdio: "ignore", ...where, env: { ...env, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
+    { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"], ...where, env: { ...env, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
   );
   let exited = false;
-  child.on("exit", () => (exited = true));
-  child.on("error", () => (exited = true));
+  const ended = new Promise((resolve) => {
+    child.on("exit", resolve);
+    child.on("error", resolve);
+  }).then(() => (exited = true));
   const started = { child, profile, singleton: "", crashHandler: null };
   open.add(started);
-  let base = "";
-  let denying = null;
+  const pipe = connect(child.stdio[3], child.stdio[4]);
   // Chrome is asked to quit first: killed outright, its helper processes go
   // on writing to the profile for a while. Those still there once it has
   // quit are killed, with its crash handler, and the profile is removed once
@@ -385,60 +338,54 @@ async function launch({ width, height }) {
     // helpers, which name the profile, are found also once it has ended, as
     // one that could not start has.
     const processes = withCrashHandler(started, processesOf(child));
-    if (base && !exited) {
-      let asked = false;
-      try {
-        const browser = await browserConnection(base, Date.now() + 2_000);
-        asked = true;
-        await browser.send("Browser.close", {}, 3_000).catch(() => {});
-      } catch {
-        // Not answering: it is killed below, at once.
-      }
+    if (!exited && !pipe.lost) {
+      // One that does not take the request in three seconds is not
+      // answering: it is killed below, at once.
+      const asked = await pipe.send("Browser.close", {}, 3_000).then(
+        () => true,
+        (err) => !err.timedOut,
+      );
       for (let i = 0; i < 50 && asked && !exited; i++) await sleep(100);
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
-    if (denying) denying.close();
+    pipe.close();
     endAll(processes, profile);
     open.delete(started);
     started.singleton = started.singleton || singletonOf(profile);
     removeProfile(started, 10, 100);
   };
-  // Chrome writes the port it picked to DevToolsActivePort in the profile.
-  // The time a browser has to start covers that, and the connection that
-  // tells it to refuse downloads. It is told by the clock: on a busy
-  // machine each pause between two looks takes longer than it asks.
+  // A page cannot make the browser save a file: a download it starts, by a
+  // link, a script or a frame that goes to an attachment, is refused before
+  // anything is written, in the user's Downloads folder or anywhere else, and
+  // the page stays where it is. It is the first thing said on the pipe, to
+  // the whole browser, and it holds until the browser has ended: Chrome
+  // forgets it only when the connection that said it closes, and the pipe
+  // closes with the browser. The browser has started once it answers, and it
+  // has the time a browser has to start for that: one that does not answer
+  // in it ends the run, as a slow one could go on to open the page with
+  // nothing said. The time is told by the clock, as on a busy machine a
+  // wait takes longer than it asks. A run goes on in a browser that answers
+  // that it does not take it.
   const wait = beforeReading();
-  const until = Date.now() + wait;
-  const portFile = path.join(profile, "DevToolsActivePort");
-  while (!exited && Date.now() < until) {
-    let port = "";
-    try {
-      port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim();
-    } catch {
-      // Not written yet.
-    }
-    if (/^\d+$/.test(port)) {
-      base = `http://127.0.0.1:${port}`;
-      started.singleton = singletonOf(profile);
-      // Known from the start: by the time the browser is stopped, its
-      // helpers can have ended.
-      started.crashHandler = crashHandlerOf(processesOf(child));
-      try {
-        denying = await denyDownloads(base, until);
-      } catch (err) {
-        await close();
-        throw err.timedOut ? tooSlow(name, "start", wait) : err;
-      }
-      return { base, name, close };
-    }
-    await sleep(100);
+  const how = await Promise.race([
+    pipe.send("Browser.setDownloadBehavior", { behavior: "deny" }, wait).then(
+      () => "started",
+      (err) => (err.timedOut ? "slow" : err.closed ? "quit" : "started"),
+    ),
+    ended.then(() => "quit"),
+  ]);
+  if (how !== "started") {
+    await close();
+    // One that quit did not start; one still starting is slow.
+    if (how === "quit") throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
+    throw tooSlow(name, "start", wait);
   }
-  // One that quit did not start; one still starting is slow.
-  const quit = exited;
-  await close();
-  if (quit) throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
-  throw tooSlow(name, "start", wait);
+  started.singleton = singletonOf(profile);
+  // Known from the start: by the time the browser is stopped, its helpers
+  // can have ended.
+  started.crashHandler = crashHandlerOf(processesOf(child));
+  return { name, pipe, close };
 }
 
 // Every browser still open, killed at once with its helpers and its crash
@@ -478,174 +425,216 @@ function killBrowsers() {
 // held still, as a machine under heavy load can hold it.
 const HELD_STILL = 2_000;
 
-// A connection to the browser or to one of its tabs, open within the time
-// given: one that does not open in it says so (timedOut), as does one that
-// fails or closes (closed).
-function connect(wsUrl, ms = beforeReading()) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
-    const opening = setTimeout(() => {
-      reject(Object.assign(new Error("The browser connection timed out."), { timedOut: true }));
-      ws.close();
-    }, ms);
-    const pending = new Map();
-    const listeners = new Map();
-    let nextId = 0;
-    // What says that the browser has stopped answering, or that the
-    // connection has closed, once either has happened: every call waiting
-    // then fails with it, and every call after it fails at once.
-    let lost = null;
-    const lose = (err) => {
-      lost = lost || err;
-      for (const waiter of pending.values()) {
-        clearTimeout(waiter.timer);
-        waiter.reject(lost);
-      }
-      pending.clear();
-    };
-    // A call that gets no answer in the time given says so (timedOut).
-    const call = (method, params, wait) =>
-      new Promise((res, rej) => {
-        const id = ++nextId;
-        const timer = setTimeout(() => {
-          pending.delete(id);
-          rej(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
-        }, wait);
-        pending.set(id, { resolve: res, reject: rej, timer });
-        ws.send(JSON.stringify({ id, method, params }));
-      });
-    // Whether the browser itself still answers, asked on the same connection
-    // when a call got no answer in its time, and how long its answer took:
-    // the milliseconds, or null when it gave none. The browser answers
-    // Browser.getVersion by itself, whatever the page or its server does, in
-    // a few milliseconds also on a busy machine: any answer will do, an
-    // error too. It has ten seconds for that, or what is left of the run's
-    // time when that is less, a second at least, as a busy machine can hold
-    // it still for a while. None in that time, or a connection that closes,
-    // says it has stopped answering. Calls that run out together share one
-    // question, and each is told how long it took.
-    let asking = null;
-    const answers = () => {
-      if (!asking) {
-        const asked = Date.now();
-        asking = call("Browser.getVersion", {}, Math.max(1_000, Math.min(10_000, timeLeft())))
-          .then(
-            () => Date.now() - asked,
-            (err) => (err.timedOut || err.closed ? null : Date.now() - asked),
-          )
-          .finally(() => (asking = null));
-      }
-      return asking;
-    };
-    ws.onmessage = (event) => {
-      let msg;
-      try {
-        msg = JSON.parse(typeof event.data === "string" ? event.data : String(event.data));
-      } catch {
-        return;
-      }
-      if (msg && msg.method) {
-        for (const listener of listeners.get(msg.method) || []) listener(msg.params || {});
-        return;
-      }
-      const waiter = msg && pending.get(msg.id);
-      if (!waiter) return;
-      pending.delete(msg.id);
+// What says the pipe to the browser has closed, as when the browser has
+// quit.
+const closedPipe = () => Object.assign(new Error("The browser connection closed."), { closed: true });
+
+// The connection to a browser over the pipe it was started with: the
+// browser reads what it is asked from one end (input) and writes its
+// answers and events to the other (output), each message JSON ended by a
+// NUL byte. The pipe carries what is said to the browser itself and, each
+// in a session of its own, what is said to its tabs. Gives the browser's
+// own session, whose session() gives a tab's. What says that the browser
+// has stopped answering (timedOut), or that the pipe has closed (closed),
+// holds for all of them once either has happened: every call waiting then
+// fails with it, and every call after it fails at once.
+function connect(input, output) {
+  const pending = new Map();
+  const listeners = new Map();
+  let nextId = 0;
+  let lost = null;
+  const lose = (err) => {
+    lost = lost || err;
+    for (const waiter of pending.values()) {
       clearTimeout(waiter.timer);
-      if (msg.error) waiter.reject(new Error(msg.error.message || "DevTools protocol error"));
-      else waiter.resolve(msg.result || {});
-    };
-    ws.onerror = () => {
-      clearTimeout(opening);
-      reject(Object.assign(new Error("The browser connection failed."), { closed: true }));
-    };
-    ws.onclose = () => {
-      clearTimeout(opening);
-      lose(Object.assign(new Error("The browser connection closed."), { closed: true }));
-    };
-    ws.onopen = () => {
-      clearTimeout(opening);
-      resolve({
-        // A call that gets no answer in its time says so (timedOut), and
-        // whether the end of the run's time cut that short (outOfTime). One
-        // on a connection that has closed fails at once (closed), where it
-        // would wait out its time for an answer that cannot come, and so
-        // does one once the browser has stopped answering. A call of the
-        // browser's own (Browser.*) that gets no answer says that by
-        // itself; for any other, the browser is asked first, so a page or
-        // a server that does not answer is not taken for the browser, and
-        // the call's own answer is still taken while the browser is asked.
-        // When the browser answers within two seconds, the call fails, as
-        // one the page or its server did not answer. When it takes longer,
-        // it was held still itself, and the call can have run out for that
-        // alone: the browser still has the call and answers it once it goes
-        // on, so the call gets its wait again, cut to what is left of the
-        // run's time, and the run goes on with its answer. It is not sent
-        // again: the browser would do it twice, and Chrome answers a page
-        // opened a second time that way with net::ERR_ABORTED. Still
-        // unanswered after its second wait, the call fails in the same way,
-        // or as the browser's when the browser does not answer either.
-        send(method, params = {}, timeoutMs = 30_000) {
-          if (lost) return Promise.reject(lost);
-          if (ws.readyState !== WebSocket.OPEN) return Promise.reject(Object.assign(new Error("The browser connection closed."), { closed: true }));
-          return new Promise((resolve, reject) => {
-            const id = ++nextId;
-            const waiter = { resolve, reject, timer: null };
-            let waitedAgain = false;
-            const wait = () => {
-              const given = Math.max(1_000, Math.min(timeoutMs, timeLeft()));
-              waiter.timer = setTimeout(async () => {
-                if (!pending.has(id)) return;
-                const err = Object.assign(new Error(`${method} timed out`), { timedOut: true, outOfTime: given < timeoutMs });
-                const took = method.startsWith("Browser.") ? null : await answers();
-                // Answered meanwhile, or failed with the rest.
-                if (!pending.has(id)) return;
-                if (took === null) return void lose(err);
-                if (took > HELD_STILL && !waitedAgain) {
-                  waitedAgain = true;
-                  return void wait();
-                }
-                pending.delete(id);
-                reject(err);
-              }, given);
-            };
-            pending.set(id, waiter);
-            wait();
-            ws.send(JSON.stringify({ id, method, params }));
-          });
-        },
-        on(method, listener) {
-          listeners.set(method, [...(listeners.get(method) || []), listener]);
-        },
-        close() {
-          ws.close();
-        },
-        // The browser stopped answering (timedOut), or the connection closed
-        // (closed), when either has happened; null until then.
-        get lost() {
-          return lost;
-        },
-      });
-    };
+      waiter.reject(lost);
+    }
+    pending.clear();
+  };
+  const write = (id, method, params, sessionId) => {
+    if (!input.writable) return void lose(closedPipe());
+    input.write(`${JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params })}\0`);
+  };
+  const receive = (text) => {
+    let msg;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (!msg) return;
+    if (msg.method) {
+      const own = listeners.get(msg.sessionId || "");
+      for (const listener of (own && own.get(msg.method)) || []) listener(msg.params || {});
+      return;
+    }
+    const waiter = pending.get(msg.id);
+    if (!waiter) return;
+    pending.delete(msg.id);
+    clearTimeout(waiter.timer);
+    if (msg.error) waiter.reject(new Error(msg.error.message || "DevTools protocol error"));
+    else waiter.resolve(msg.result || {});
+  };
+  // A message can come in several pieces, and a piece can hold several.
+  let pieces = [];
+  output.on("data", (chunk) => {
+    let start = 0;
+    for (let end = chunk.indexOf(0); end !== -1; end = chunk.indexOf(0, start)) {
+      pieces.push(chunk.subarray(start, end));
+      start = end + 1;
+      const text = Buffer.concat(pieces).toString("utf8");
+      pieces = [];
+      receive(text);
+    }
+    if (start < chunk.length) pieces.push(chunk.subarray(start));
   });
+  output.on("close", () => lose(closedPipe()));
+  output.on("error", () => lose(closedPipe()));
+  input.on("error", () => lose(closedPipe()));
+  // A call that gets no answer in the time given says so (timedOut).
+  const call = (method, params, wait) =>
+    new Promise((resolve, reject) => {
+      if (lost) return void reject(lost);
+      const id = ++nextId;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
+      }, wait);
+      pending.set(id, { resolve, reject, timer, sessionId: "" });
+      write(id, method, params, "");
+    });
+  // Whether the browser itself still answers, asked on the pipe when a call
+  // to a tab got no answer in its time, and how long its answer took: the
+  // milliseconds, or null when it gave none. The browser answers
+  // Browser.getVersion by itself, whatever the page or its server does, in
+  // a few milliseconds also on a busy machine: any answer will do, an error
+  // too. It has ten seconds for that, or what is left of the run's time when
+  // that is less, a second at least, as a busy machine can hold it still for
+  // a while. None in that time, or a pipe that closes, says it has stopped
+  // answering. Calls that run out together share one question, and each is
+  // told how long it took.
+  let asking = null;
+  const answers = () => {
+    if (!asking) {
+      const asked = Date.now();
+      asking = call("Browser.getVersion", {}, Math.max(1_000, Math.min(10_000, timeLeft())))
+        .then(
+          () => Date.now() - asked,
+          (err) => (err.timedOut || err.closed ? null : Date.now() - asked),
+        )
+        .finally(() => (asking = null));
+    }
+    return asking;
+  };
+  const session = (sessionId) => {
+    const own = new Map();
+    listeners.set(sessionId, own);
+    let ended = false;
+    return {
+      // A call that gets no answer in its time says so (timedOut), and
+      // whether the end of the run's time cut that short (outOfTime). One on
+      // a pipe that has closed fails at once (closed), where it would wait
+      // out its time for an answer that cannot come, and so does one once
+      // the browser has stopped answering. A call to the browser itself,
+      // and a call of the browser's own (Browser.*), that gets no answer
+      // says that by itself; for one to a tab, the browser is asked first,
+      // so a page or a server that does not answer is not taken for the
+      // browser, and the call's own answer is still taken while the browser
+      // is asked. When the browser answers within two seconds, the call
+      // fails, as one the page or its server did not answer. When it takes
+      // longer, it was held still itself, and the call can have run out for
+      // that alone: the browser still has the call and answers it once it
+      // goes on, so the call gets its wait again, cut to what is left of the
+      // run's time, and the run goes on with its answer. It is not sent
+      // again: the browser would do it twice, and Chrome answers a page
+      // opened a second time that way with net::ERR_ABORTED. Still
+      // unanswered after its second wait, the call fails in the same way, or
+      // as the browser's when the browser does not answer either.
+      send(method, params = {}, timeoutMs = 30_000) {
+        if (lost) return Promise.reject(lost);
+        if (ended) return Promise.reject(closedPipe());
+        return new Promise((resolve, reject) => {
+          const id = ++nextId;
+          const waiter = { resolve, reject, timer: null, sessionId };
+          let waitedAgain = false;
+          const wait = () => {
+            const given = Math.max(1_000, Math.min(timeoutMs, timeLeft()));
+            waiter.timer = setTimeout(async () => {
+              if (!pending.has(id)) return;
+              const err = Object.assign(new Error(`${method} timed out`), { timedOut: true, outOfTime: given < timeoutMs });
+              const took = !sessionId || method.startsWith("Browser.") ? null : await answers();
+              // Answered meanwhile, or failed with the rest.
+              if (!pending.has(id)) return;
+              if (took === null) return void lose(err);
+              if (took > HELD_STILL && !waitedAgain) {
+                waitedAgain = true;
+                return void wait();
+              }
+              pending.delete(id);
+              reject(err);
+            }, given);
+          };
+          pending.set(id, waiter);
+          wait();
+          write(id, method, params, sessionId);
+        });
+      },
+      on(method, listener) {
+        own.set(method, [...(own.get(method) || []), listener]);
+      },
+      // A tab's session is let go of, and its calls still waiting fail
+      // (closed); the browser's own closes the pipe.
+      close() {
+        if (ended) return;
+        ended = true;
+        listeners.delete(sessionId);
+        if (!sessionId) {
+          lose(closedPipe());
+          input.destroy();
+          output.destroy();
+          return;
+        }
+        for (const [id, waiter] of pending) {
+          if (waiter.sessionId !== sessionId) continue;
+          pending.delete(id);
+          clearTimeout(waiter.timer);
+          waiter.reject(closedPipe());
+        }
+        if (!lost) write(++nextId, "Target.detachFromTarget", { sessionId }, "");
+      },
+      // The browser stopped answering (timedOut), or the pipe closed
+      // (closed), when either has happened; null until then.
+      get lost() {
+        return lost;
+      },
+    };
+  };
+  const browser = session("");
+  // The session a tab was given when it was attached to.
+  browser.session = (sessionId) => {
+    if (!sessionId) throw new Error("The browser gave its tab no session.");
+    return session(sessionId);
+  };
+  return browser;
 }
 
 // A new tab, set to a desktop screen of the given size, in the browser
-// launch() gave, opened in the time a browser has for that. Headless Chrome
-// says "HeadlessChrome" in its user agent, and some sites answer that with
-// a stripped page; the tab says "Chrome", as the same browser with a window
-// would.
-async function openPage({ base, name }, { width, height }) {
+// launch() gave, with a session of its own on the browser's pipe, opened in
+// the time a browser has for that. Headless Chrome says "HeadlessChrome" in
+// its user agent, and some sites answer that with a stripped page; the tab
+// says "Chrome", as the same browser with a window would.
+async function openPage({ pipe, name }, { width, height }) {
   const wait = beforeReading();
   const until = Date.now() + wait;
   const left = () => Math.max(1_000, until - Date.now());
   let cdp;
   try {
-    const target = await askBrowser(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(wait) });
-    cdp = await connect(target.webSocketDebuggerUrl, left());
+    const { targetId } = await pipe.send("Target.createTarget", { url: "about:blank" }, wait);
+    const { sessionId } = await pipe.send("Target.attachToTarget", { targetId, flatten: true }, left());
+    cdp = pipe.session(sessionId);
     await cdp.send("Page.enable", {}, left());
     await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }, left());
-    const { userAgent = "" } = await cdp.send("Browser.getVersion", {}, left()).catch((err) => {
+    const { userAgent = "" } = await pipe.send("Browser.getVersion", {}, left()).catch((err) => {
       if (err.timedOut) throw err;
       return {};
     });

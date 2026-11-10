@@ -60,6 +60,18 @@ function record(cdp) {
   cdp.on("Network.requestWillBeSent", ({ type, request }) => {
     if (type === "Font" && request && !String(request.url).startsWith("data:")) asked.add(request.url);
   });
+  // The font files the browser refused to load, by the address the page
+  // asked for, with why: one from another site whose server does not let
+  // this page use it (CORS), or one the page's own Content-Security-Policy
+  // keeps out. The browser refuses them again on every visit, so another
+  // run does not get them either.
+  const refused = new Map();
+  cdp.on("Network.loadingFailed", ({ requestId, type, corsErrorStatus, blockedReason }) => {
+    const [url] = addresses.get(requestId) || [];
+    if (type !== "Font" || !url) return;
+    if (corsErrorStatus && corsErrorStatus.corsError) refused.set(requestId, { url, reason: `the browser refused it (CORS error: ${corsErrorStatus.corsError})` });
+    else if (blockedReason) refused.set(requestId, { url, reason: `the browser refused it (blocked: ${blockedReason})` });
+  });
   cdp.on("CSS.fontsUpdated", ({ font }) => font && faces.push(font));
   cdp.on("CSS.styleSheetAdded", ({ header }) => header && header.origin === "regular" && sheets.set(header.styleSheetId, header));
   // The tab's own page as the server answered it: the last response its
@@ -109,7 +121,7 @@ function record(cdp) {
   const arrived = ({ requestId }) => due.delete(requestId);
   cdp.on("Network.loadingFinished", arrived);
   cdp.on("Network.loadingFailed", arrived);
-  return { fonts, asked, faces, sheets, page, due };
+  return { fonts, asked, refused, faces, sheets, page, due };
 }
 
 async function evaluate(cdp, expression, timeoutMs = 10_000) {
@@ -333,8 +345,9 @@ function decodeDataUrl(url) {
 }
 
 // The font files, each once: the same file can be asked for twice, under
-// two addresses or as a data URL.
-async function readFiles(fonts, rules, faces) {
+// two addresses or as a data URL. A file the browser refused is skipped
+// with why, as one its server answered with an error is.
+async function readFiles(fonts, rules, faces, refused = new Map()) {
   const files = new Map();
   const skipped = [];
   const add = (buffer, urls) => {
@@ -352,6 +365,7 @@ async function readFiles(fonts, rules, faces) {
     if (body && body.length) add(body, font.urls);
     else if (font.status >= 400) skipped.push({ url: font.urls[0] || "", reason: `the server answered ${font.status}` });
   }
+  for (const refusal of refused.values()) if (!skipped.some((skip) => skip.url === refusal.url)) skipped.push(refusal);
   const inline = [...rules.flatMap((rule) => rule.urls), ...faces.map((face) => String(face.src || ""))].filter((url) => url.startsWith("data:"));
   for (const url of new Set(inline)) {
     const body = decodeDataUrl(url);
@@ -434,7 +448,7 @@ async function scanPage(cdp, url, log = () => {}) {
     unicodeRange: face.unicodeRange && face.unicodeRange !== "U+0-10FFFF" ? face.unicodeRange : "",
     platformFamily: face.platformFontFamily || "",
   }));
-  const { files, skipped } = await readFiles(recorded.fonts, rules, faces);
+  const { files, skipped } = await readFiles(recorded.fonts, rules, faces, recorded.refused);
   const { failed } = recorded.page;
   // The browser's own error page is titled with the host it could not
   // reach, which is not the site's bot check.

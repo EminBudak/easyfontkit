@@ -1662,6 +1662,66 @@ test("a web font whose file the browser asked for and did not get while the page
   }
 });
 
+test("a web font the browser refuses, one from another site whose server sends no CORS header or one the page's own Content-Security-Policy keeps out, is named with its file's address, and a note says the browser refused it, with no advice to try again later", { skip: noBrowser }, async () => {
+  // Another site: a server on another port is another origin. It sends the
+  // same font once without a CORS header and once with one.
+  const farFont = interAs({ names: { 1: "Far Font", 2: "Regular", 4: "Far Font", 6: "FarFont-Regular" } });
+  const far = await serve({
+    "/far.ttf": { type: "font/ttf", body: farFont },
+    "/far-allowed.ttf": { type: "font/ttf", headers: { "access-control-allow-origin": "*" }, body: farFont },
+  });
+  const page = (src, head = "") => `<!doctype html><html><head><title>Refused</title>${head}<style>
+      @font-face { font-family: "Far Font"; src: url("${far.origin}/${src}") format("truetype"); }
+      @font-face { font-family: "Kept Out"; src: url("/kept.ttf") format("truetype"); }
+      h1 { font-family: "Far Font", serif; } p { font-family: "Kept Out", sans-serif; }
+    </style></head><body><h1>A heading in a font from another site</h1><p>Body text in a font the page keeps out.</p></body></html>`;
+  const { server, origin } = await serve({
+    "/": { body: page("far.ttf", `<meta http-equiv="Content-Security-Policy" content="font-src ${far.origin}">`) },
+    "/allowed": { body: page("far-allowed.ttf") },
+    "/kept.ttf": { type: "font/ttf", body: interAs({ names: { 1: "Kept Out", 2: "Regular", 4: "Kept Out", 6: "KeptOut-Regular" } }) },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-refused-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(origin, { dir, timeLimit: 60_000 });
+    assert.deepEqual([kit.roles.heading.family, kit.roles.body.family], ["Far Font", "Kept Out"]);
+    const family = Object.fromEntries(kit.families.map((f) => [f.name, f]));
+    for (const [name, url] of [
+      ["Far Font", `${far.origin}/far.ttf`],
+      ["Kept Out", `${origin}/kept.ttf`],
+    ]) {
+      assert.equal(family[name].system, false, name);
+      assert.deepEqual(family[name].notLoaded, [url], name);
+      assert.deepEqual(family[name].files, [], name);
+      assert.equal(family[name].license.status, "unknown", name);
+    }
+    // Another run gets the same answer, so trying again later is not
+    // offered, and a note of its own says why the file did not load.
+    const md = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+    assert.match(md, new RegExp(`\\n- Some of the headings were drawn with .+?, (a fallback|fallbacks), because Far Font's file ${far.origin}/far\\.ttf did not load while the page was read\\. That text is counted as Far Font, the font the site asks for\\. The kit has no file of it, so its license is unknown\\.\\n`));
+    assert.match(md, new RegExp(`\\n- Some of the body text was drawn with .+?, (a fallback|fallbacks), because Kept Out's file ${origin}/kept\\.ttf did not load while the page was read\\. That text is counted as Kept Out, the font the site asks for\\. The kit has no file of it, so its license is unknown\\.\\n`));
+    assert.ok(md.includes(`\n- ${far.origin}/far.ttf was not a usable font file: the browser refused it (CORS error: MissingAllowOriginHeader).\n`), md);
+    assert.ok(md.includes(`\n- ${origin}/kept.ttf was not a usable font file: the browser refused it (blocked: csp).\n`), md);
+    assert.doesNotMatch(md, /try again later/);
+    assert.equal(kit.notes.length, 4);
+
+    // With a CORS header and no such policy, the same fonts load and are in
+    // the kit, with no note.
+    const allowed = await makeFontKit(`${origin}/allowed`, { dir, timeLimit: 60_000 });
+    assert.deepEqual([allowed.kit.roles.heading.family, allowed.kit.roles.body.family], ["Far Font", "Kept Out"]);
+    for (const name of ["Far Font", "Kept Out"]) {
+      const loaded = allowed.kit.families.find((f) => f.name === name);
+      assert.equal(loaded.files.length, 1, name);
+      assert.equal("notLoaded" in loaded, false, name);
+    }
+    assert.deepEqual(allowed.kit.notes, []);
+  } finally {
+    server.close();
+    far.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its process group, leaves the earlier kit as it was, ends its browser with its crash handler, leaves no crash report and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

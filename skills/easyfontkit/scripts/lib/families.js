@@ -288,9 +288,9 @@ function buildFamilies(scan) {
     };
   }
 
-  // The font files whose server answered, with an error or with no font:
-  // a note of their own says why, and trying again later is for a file
-  // that got no answer.
+  // The font files whose server answered, with an error or with no font,
+  // and those the browser refused, as by CORS: a note of their own says
+  // why, and trying again later is for a file that got no answer.
   const answered = new Set(skipped.map((skip) => bare(skip.url)));
   const notes = [...fallbacks].map(([family, late]) => {
     const where = late.roles.map((role) => ROLE_WORDS[role]);

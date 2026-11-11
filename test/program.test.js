@@ -277,8 +277,22 @@ test("a browser the system's loader cannot start, as its loader is missing, gets
   refused(root, cases);
 });
 
-test("a script in the browser's place that could not start what it runs, as a launcher whose browser is missing, a wrapper that runs a saved web page, one whose #!/usr/bin/env line or env line names a program not on PATH, one with Windows line breaks, a launcher that asks for the chromium snap, or one that crashed, stopped or closed its pipe, is named with the first line it printed, quoted, and how it ended, never with a program guessed from its words", { skip: process.platform !== "linux" && "the stand-ins are Linux scripts and programs" }, () => {
-  const root = path.join(dir, "scripts");
+test("a script in the browser's place that could not start what it runs, as a launcher whose browser is missing, a wrapper that runs a saved web page, one whose #!/usr/bin/env line or env line names a program not on PATH, one with Windows line breaks, a launcher that asks for the chromium snap, or one that crashed, stopped or closed its pipe, is named with the first line it printed, quoted, and how it ended, never with a program guessed from its words", { skip: process.platform !== "linux" && "the stand-ins are Linux scripts and programs" }, (t) => {
+  // A folder with a short path, whatever TMPDIR is: a shell writes the paths
+  // of the script and of what it ran in one line, and the message keeps the
+  // first 120 and the last 80 characters of a line longer than 200, which
+  // the patterns below would not find whole. Under /tmp where this user may
+  // make one, else in the temp folder.
+  const short = ["/tmp", os.tmpdir()].reduce((made, base) => {
+    if (made) return made;
+    try {
+      return fs.mkdtempSync(path.join(base, "efk-"));
+    } catch {
+      return "";
+    }
+  }, "");
+  t.after(() => fs.rmSync(short, { recursive: true, force: true }));
+  const root = path.join(short, "scripts");
   const at = (...names) => path.join(root, ...names);
   const { PATH } = process.env;
   const shells = ["/bin/sh", "/bin/bash"].filter((shell) => fs.existsSync(shell));

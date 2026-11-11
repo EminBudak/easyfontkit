@@ -475,7 +475,10 @@ async function launch({ width, height }) {
   // browser gets a session bus where nothing listens, a socket in its
   // profile that is never made (unset, the bus is looked for in
   // XDG_RUNTIME_DIR, where the desktop's is), no display, as it draws on
-  // none, and the stand-ins first on its PATH, the rest of PATH as it was.
+  // none and a program it starts could open a window there: no DISPLAY, and
+  // a Wayland display that is a socket in its profile that is never made
+  // (unset, a Wayland program looks for the desktop's in XDG_RUNTIME_DIR
+  // too), and the stand-ins first on its PATH, the rest of PATH as it was.
   // On macOS and Windows the browser asks the system, and the guard each
   // page gets (openPage) is what holds there.
   let config;
@@ -492,7 +495,8 @@ async function launch({ width, height }) {
   const browserEnv = { ...env, ...config, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") };
   if (STAND_INS) {
     delete browserEnv.DISPLAY;
-    delete browserEnv.WAYLAND_DISPLAY;
+    delete browserEnv.WAYLAND_SOCKET;
+    browserEnv.WAYLAND_DISPLAY = path.resolve(profile, "no-display");
   }
   let child;
   try {

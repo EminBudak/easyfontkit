@@ -347,19 +347,25 @@ const LOG = /^\[[^\]]*?:(FATAL|ERROR|WARNING|INFO|VERBOSE\d*):[^\]]*\]\s*/;
 // it, as "Failed to connect to the bus": the browser is started with a
 // session bus where nothing listens (see launch), and says so as it starts.
 const BUS = /^\[[^\]]*?:(ERROR|WARNING|INFO|VERBOSE\d*):dbus\//;
+// What libwayland says as Chrome starts when the Wayland display the run
+// gives it, a socket in its profile that is never made (see launch), has a
+// path too long for a socket, as in a long temp folder: it finds no display
+// either way.
+const NO_DISPLAY = /^error: socket path ".*\/no-display" plus null terminator exceeds \d+ bytes$/;
 
 // The line of what a program printed to quote when it ended before it
 // answered: the first line of Chrome's log that ended it, else the first
 // line with anything in it that is not a line of Chrome's log that only
 // tells or warns, as Chrome 157 starts by saying which channel it is, else
 // the first line with anything in it, or "". A line of Chrome's D-Bus code
-// that did not end it is never the one. The head of a line of Chrome's log
-// is left out, and the rest of the line is as it was printed.
+// that did not end it, or libwayland's on a display path too long, is
+// never the one. The head of a line of Chrome's log is left out, and the
+// rest of the line is as it was printed.
 function causeLine(text) {
   const lines = String(text || "")
     .split("\n")
     .map((line) => line.replace(/\r$/, ""))
-    .filter((line) => line.trim() && !BUS.test(line));
+    .filter((line) => line.trim() && !BUS.test(line) && !NO_DISPLAY.test(line));
   const grave = (line) => (LOG.exec(line) || [])[1];
   const line = lines.find((one) => grave(one) === "FATAL") || lines.find((one) => !/^(INFO|WARNING|VERBOSE\d*)$/.test(grave(one) || "")) || lines[0] || "";
   return line.replace(LOG, "").trim() || line.trim();

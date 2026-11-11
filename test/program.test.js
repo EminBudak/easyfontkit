@@ -359,6 +359,9 @@ test("a script in the browser's place that could not start what it runs, as a la
   const bus = [
     "[3425813:3426008:1111/084920.176503:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Failed to connect to socket /tmp/easyfontkit-chrome-x/no-bus: No such file or directory",
     "[3425813:3425813:1111/084920.444840:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+    // What libwayland says of the display the run gives the browser when
+    // its path is too long for a socket, as in a long temp folder.
+    'error: socket path "/home/user/a-long-temp-folder-for-jobs-of-the-hosted-service-of-many-users/easyfontkit-chrome-x/no-display" plus null terminator exceeds 108 bytes',
   ];
   const busLines = bus.map((line) => `echo '${line}' >&2\n`).join("");
   cases.push([...by(put(root, "bus", `#!/bin/sh\n${busLines}echo 'the real trouble' >&2\nexit 4\n`)), `chrome did not start: CHROME_PATH is ${at("bus", "chrome")}, which ended before it answered: it printed "the real trouble" and exited with 4. ${POINT}`]);

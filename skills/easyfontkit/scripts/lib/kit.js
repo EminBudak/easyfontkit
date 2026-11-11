@@ -815,16 +815,22 @@ function writeCss(kit, families, dir) {
   // comment says so, as fonts.css is taken as it is. It speaks of @import
   // lines only when there are some.
   const unloaded = unloadedFree(kit, byKey);
-  const about = withoutFiles(families)
-    ? commentLines(
-        `The font files were read but not saved, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts${imports.length ? ", which the @import lines load from Google Fonts or Fontsource" : ""}.${unloaded.names.length ? ` ${unloadedText(unloaded, (it) => `nothing here loads ${it}`, imports.length > 0)}` : ""} FONTS.md says how each one is licensed. */`,
-      )
-    : [
-        "   Each font file the page loaded has a @font-face rule below, under its",
-        "   family's name. --font-heading, --font-body, --font-button and --font-code",
-        "   are the site's own fonts; the -free ones are the closest free fonts.",
-        "   FONTS.md says how each one is licensed. */",
-      ];
+  // A kit with no font file of the page's at all, as for a site that draws
+  // its text with the visitor's own fonts, or one whose files were none of
+  // them usable, says that no rule follows.
+  const none = families.every((family) => !family.files.length);
+  const about = none
+    ? commentLines(`No font file of the page's is in the kit, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts${imports.length ? ", which the @import lines load from Google Fonts or Fontsource" : ""}. FONTS.md says how each one is licensed. */`)
+    : withoutFiles(families)
+      ? commentLines(
+          `The font files were read but not saved, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts${imports.length ? ", which the @import lines load from Google Fonts or Fontsource" : ""}.${unloaded.names.length ? ` ${unloadedText(unloaded, (it) => `nothing here loads ${it}`, imports.length > 0)}` : ""} FONTS.md says how each one is licensed. */`,
+        )
+      : [
+          "   Each font file the page loaded has a @font-face rule below, under its",
+          "   family's name. --font-heading, --font-body, --font-button and --font-code",
+          "   are the site's own fonts; the -free ones are the closest free fonts.",
+          "   FONTS.md says how each one is licensed. */",
+        ];
   const lines = [`/* Fonts of ${inComment(host)}, read from ${inComment(kit.url)} on ${kit.capturedAt.slice(0, 10)} by easyfontkit ${version}.`, ...about, "", ...imports];
   if (imports.length) lines.push("");
   for (const family of families) {
@@ -946,7 +952,11 @@ function writeMarkdown(kit, families, dir) {
     "",
     "## How to use",
     "",
-    saved ? "fonts.css declares every saved file under its family's name and sets a variable per role. Keep it next to the files folder:" : "fonts.css sets a variable per role. The font files were not saved, so it declares none of them:",
+    families.every((family) => !family.files.length)
+      ? "fonts.css sets a variable per role. No font file of the page's is in the kit, so it declares none:"
+      : saved
+        ? "fonts.css declares every saved file under its family's name and sets a variable per role. Keep it next to the files folder:"
+        : "fonts.css sets a variable per role. The font files were not saved, so it declares none of them:",
     "",
     "```css",
     '@import "fonts.css";',

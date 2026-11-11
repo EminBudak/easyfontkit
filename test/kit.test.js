@@ -1953,7 +1953,13 @@ test("a font file whose server sends no bytes, or one cut short, in its director
     assert.ok(kit.notes.includes(`${origin}/cut.ttf was not a usable font file: cut short or broken: its tables run past its 100 bytes.`), kit.notes.join("\n"));
     assert.ok(kit.notes.includes(`${origin}/almost.ttf was not a usable font file: cut short or broken: its tables run past its ${almost.length} bytes.`), kit.notes.join("\n"));
     assert.deepEqual(kit.families.flatMap((family) => family.files), [], "no cut file is in the kit");
-    assert.doesNotMatch(fs.readFileSync(path.join(dir, "fonts.css"), "utf8"), /@font-face \{/);
+    // With no font file in the kit, fonts.css and FONTS.md say that no rule
+    // follows, where fonts.css said each file had one below.
+    const css = fs.readFileSync(path.join(dir, "fonts.css"), "utf8");
+    assert.doesNotMatch(css, /@font-face \{/);
+    assert.match(css, /^\/\* Fonts of 127\.0\.0\.1, read from [^\n]+\n {3}No font file of the page's is in the kit, so no @font-face rule follows\./);
+    assert.doesNotMatch(css, /has a @font-face rule below/);
+    assert.ok(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8").includes("\nfonts.css sets a variable per role. No font file of the page's is in the kit, so it declares none:\n"));
     assert.doesNotMatch(kit.notes.join("\n"), /try again later|offset|out of range|loaded too late/);
     assert.equal(kit.notes.length, 6, kit.notes.join("\n"));
   } finally {

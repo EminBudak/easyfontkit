@@ -422,4 +422,13 @@ function endedEarly(place, { stderr = "", stdout = "", code = null, signal = nul
   return didNotStart(place, `ended before it answered: ${how}`, more);
 }
 
-module.exports = { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, quoted };
+// Whether the browser at `file` is one installed as a snap or a Flatpak,
+// which runs in a sandbox of its own, with a PATH of its own: snap's own
+// program, where the links in /snap/bin lead, or one under /snap/, or one in
+// a Flatpak's folders, as the links in its exports/bin and the app folder
+// they lead to are.
+function ownSandbox(file) {
+  return [file, real(file)].some((at) => at === "/usr/bin/snap" || at.startsWith("/snap/") || /\/flatpak\/(exports|app)\//.test(at));
+}
+
+module.exports = { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, quoted, ownSandbox };

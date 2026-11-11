@@ -2637,6 +2637,33 @@ async function privateBus(root) {
   return { address, runtime, calls: () => said.split("\n").filter((line) => line.startsWith("CALL ")), close };
 }
 
+// A browser installed as a snap or a Flatpak runs in a sandbox of its own,
+// which may not take the stand-ins or the bus it is started with: the note
+// on an address that reached it says so, and one the page's own guard
+// cancelled is still not opened.
+test("a browser installed as a snap or a Flatpak is not said to have opened nothing that reached it", { skip: noBrowser || (process.platform !== "linux" && "snaps and Flatpaks are on Linux"), timeout: 120_000 }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-flatpak-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The browser through a link in a Flatpak's exports, as such an install
+  // gives it.
+  const exports = path.join(parent, "share", "flatpak", "exports", "bin");
+  fs.mkdirSync(exports, { recursive: true });
+  const browser = path.join(exports, "org.chromium.Chromium");
+  fs.writeFileSync(browser, `#!/bin/sh\nexec "${findChrome()}" "$@"\n`, { mode: 0o755 });
+  const { server, origin } = await serve({
+    "/": { body: '<!doctype html><html><head><title>Mail</title></head><body><h1>Write to us</h1><p>A page that wants you to write.</p><iframe src="mailto:frame@example.com" style="width:1px;height:1px;border:0"></iframe><script>setTimeout(() => (location.href = "mailto:own@example.com"), 300);</script></body></html>' },
+  });
+  t.after(() => server.close());
+  const { env, started } = recordingHandlers(parent);
+  const result = await run([`${origin}/`, "--out", path.join(parent, "kit"), "--json"], { ...env, CHROME_PATH: browser });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).notes.sort(), [
+    "The page tried to open mailto:frame@example.com, which is not a web address, in a way easyfontkit may not stop in a browser installed as a snap or a Flatpak, so the system may have opened it with a program of its own, such as the mail program.",
+    "The page tried to open mailto:own@example.com, which is not a web address: it was not opened.",
+  ]);
+  assert.equal(started(), "", "no program of the machine was started");
+});
+
 // Chrome on Linux hands a frame's mailto:, a redirect to one or a frame of
 // another site that moves to one to the desktop's portal over the session
 // bus when it finds one there, which opens the user's own mail program, and

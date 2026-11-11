@@ -11,7 +11,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, sleep } = require("./time");
-const { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded } = require("./program");
+const { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, ownSandbox } = require("./program");
 
 // The browsers this process has started and not closed yet, each with its
 // profile, from the moment it is spawned.
@@ -635,7 +635,9 @@ async function launch({ width, height }) {
   // Known from the start: by the time the browser is stopped, its helpers
   // can have ended.
   started.crashHandler = crashHandlerOf(processesOf(child));
-  return { name, pipe, close };
+  // sandboxed: a browser installed as a snap or a Flatpak, which may not
+  // take the stand-ins or the bus it was started with.
+  return { name, pipe, close, sandboxed: ownSandbox(binary) };
 }
 
 // Every browser still open, killed at once with its helpers and its crash

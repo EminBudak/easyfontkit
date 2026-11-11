@@ -1039,10 +1039,13 @@ function notOpened(asked, { failed: { url, error, noAnswer }, first }) {
 // The notes on the addresses that are not web addresses the page tried to
 // open, the first three of them, each once, and how many more there were.
 // One the guard cancelled, or a window the page asked for, was not opened
-// on any system. On Linux the browser's stand-ins took the rest, as the
-// first address of a frame; on macOS and Windows the browser hands those to
-// the system, which can open them with a program of its own.
-function triedNotes(tried = []) {
+// on any system. On Linux the rest, as the first address of a frame, found
+// a session bus where nothing listens and the browser's stand-ins, unless
+// the browser runs in a sandbox of its own (sandboxed), as one installed as
+// a snap or a Flatpak, which may not take them; on macOS and Windows the
+// browser hands those to the system, which can open them with a program of
+// its own.
+function triedNotes(tried = [], { sandboxed = false } = {}) {
   const rank = { asked: 0, started: 1, window: 2, cancelled: 3 };
   const byAddress = new Map();
   for (const one of tried) {
@@ -1050,11 +1053,11 @@ function triedNotes(tried = []) {
     if (!known || rank[one.how] > rank[known.how]) byAddress.set(one.url, one);
   }
   const list = [...byAddress.values()];
-  const notes = list.slice(0, 3).map(({ url, how }) =>
-    STAND_INS || how === "cancelled" || how === "window"
-      ? `The page tried to open ${url}, which is not a web address: it was not opened.`
-      : `The page tried to open ${url}, which is not a web address, in a way easyfontkit stops only on Linux, so the system may have opened it with a program of its own, such as the mail program.`,
-  );
+  const notes = list.slice(0, 3).map(({ url, how }) => {
+    if ((STAND_INS && !sandboxed) || how === "cancelled" || how === "window") return `The page tried to open ${url}, which is not a web address: it was not opened.`;
+    if (sandboxed) return `The page tried to open ${url}, which is not a web address, in a way easyfontkit may not stop in a browser installed as a snap or a Flatpak, so the system may have opened it with a program of its own, such as the mail program.`;
+    return `The page tried to open ${url}, which is not a web address, in a way easyfontkit stops only on Linux, so the system may have opened it with a program of its own, such as the mail program.`;
+  });
   const more = list.length - 3;
   if (more > 0) notes.push(`It tried ${more} more ${more === 1 ? "address that is not a web address" : "addresses that are not web addresses"} as well.`);
   return notes;
@@ -1094,6 +1097,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
   try {
     let scan;
     const chrome = await launch(SCREEN);
+    const sandboxed = Boolean(chrome.sandboxed);
     let cdp;
     try {
       cdp = await openPage(chrome, SCREEN);
@@ -1130,7 +1134,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       if (files) saveFiles(built.families, part, own);
       const notes = [...built.notes];
       for (const skipped of scan.skipped) notes.push(`${skipped.url} was not a usable font file: ${skipped.reason}.`);
-      notes.push(...triedNotes(scan.tried));
+      notes.push(...triedNotes(scan.tried, { sandboxed }));
       if (scan.cut.length) notes.push(`The run's time ran out before the ${list(scan.cut.map((role) => ROLE_WORDS[role]))} could be read: give it more time with --timeout.`);
       if (!files) notes.push("Run with --no-files: the font files were read but not saved.");
       kit = {

@@ -542,6 +542,34 @@ test("a browser that ended before it answered, saying something else, is told th
   if (hard && Number(hard[1]) >= 1024) refused(path.join(root, "high"), [[{ PATH: process.env.PATH, CHROME_PATH: file }, message(0)]]);
 });
 
+test("the limit on processes is the soft one, which the system holds this user to as a process or a thread starts and which nothing raises, so a soft limit alone within 100 of what this user runs is said too, and that limit is named; of open files it is the hard one, to which Node raises this process's own as it starts", { skip: (process.platform !== "linux" && "the limits are read from /proc on Linux") || (process.getuid() === 0 && "the system holds root to no limit on processes") }, () => {
+  const { lowLimits } = require("../skills/easyfontkit/scripts/lib/program");
+  // A /proc of the test's own: the limits as /proc/self/limits gives them,
+  // and two processes of this user with 60 and 40 threads.
+  const proc = path.join(dir, "limits-proc");
+  const limits = (processes, files) => {
+    fs.rmSync(proc, { recursive: true, force: true });
+    fs.mkdirSync(path.join(proc, "self"), { recursive: true });
+    const row = (name, [soft, hard], units) => `${name.padEnd(26)}${String(soft).padEnd(21)}${String(hard).padEnd(21)}${units}`;
+    fs.writeFileSync(path.join(proc, "self", "limits"), `${["Limit                     Soft Limit           Hard Limit           Units     ", row("Max processes", processes, "processes"), row("Max open files", files, "files")].join(" \n")} \n`);
+    for (const [pid, threads] of [
+      [1001, 60],
+      [1002, 40],
+    ]) {
+      fs.mkdirSync(path.join(proc, String(pid)));
+      fs.writeFileSync(path.join(proc, String(pid), "stat"), `${pid} (sh) S${" 0".repeat(16)} ${threads}${" 0".repeat(30)}\n`);
+    }
+    return lowLimits(proc);
+  };
+  const processes = (most) => `This user runs 100 processes and threads and may run no more than ${most}, which can be too few for the browser: run it again once fewer are running.`;
+  assert.equal(limits([150, 204127], [524288, 524288]), processes(150), "a soft limit alone, as ulimit -Su or a soft nproc line of limits.conf sets");
+  assert.equal(limits([150, 150], [524288, 524288]), processes(150), "both, as ulimit -u sets");
+  assert.equal(limits([5000, 5000], [524288, 524288]), "", "far from what runs");
+  assert.equal(limits(["unlimited", "unlimited"], [524288, 524288]), "", "none");
+  assert.equal(limits([5000, 5000], [64, 4096]), "", "a soft limit on files alone, which Node raises");
+  assert.equal(limits([5000, 5000], [64, 64]), "This process may have no more than 64 files open, which can be too few for the browser: raise that limit, as ulimit -n does, and run it again.");
+});
+
 test("a browser that runs from a snap or a Flatpak is told by its processes once it runs, also when a launcher by another name, as Ubuntu's chromium-browser, started it: one whose program is under /snap/, or whose root is not this process's and holds the .flatpak-info every Flatpak's sandbox has", () => {
   const { ownSandbox } = require("../skills/easyfontkit/scripts/lib/program");
   // A /proc of the test's own: each process with the program it runs and

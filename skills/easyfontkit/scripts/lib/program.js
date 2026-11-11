@@ -404,45 +404,50 @@ const SHORT_SAID = [
 // so in words SHORT_SAID knows: the most files it may have open, as the
 // browser takes on this process's, when that is under 1024, and the most
 // processes and threads this user may run, when fewer than 100 more are
-// left. "" when neither is low, or they cannot be read.
-function lowLimits() {
+// left. "" when neither is low, or they cannot be read. Of files that is the
+// hard limit, as Node raises this process's own limit to it as it starts
+// and Chrome raises its own too; of processes it is the soft limit, which
+// the system holds a process to as it starts another or a thread, and
+// which neither raises. `proc` is where /proc is.
+function lowLimits(proc = "/proc") {
   if (process.platform !== "linux") return "";
   let limits;
   try {
-    limits = fs.readFileSync("/proc/self/limits", "utf8");
+    limits = fs.readFileSync(`${proc}/self/limits`, "utf8");
   } catch {
     return "";
   }
-  const hard = (name) => {
-    const found = new RegExp(`^${name}\\s+\\S+\\s+(\\d+)\\s`, "m").exec(limits);
-    return found ? Number(found[1]) : Infinity;
+  // A limit's soft (1) or hard (2) column, Infinity for unlimited or none.
+  const limit = (name, column) => {
+    const found = new RegExp(`^${name}\\s+(\\S+)\\s+(\\S+)\\s`, "m").exec(limits);
+    return found && /^\d+$/.test(found[column]) ? Number(found[column]) : Infinity;
   };
   const said = [];
-  const files = hard("Max open files");
+  const files = limit("Max open files", 2);
   if (files < 1024) said.push(`This process may have no more than ${files} files open, which can be too few for the browser: raise that limit, as ulimit -n does, and run it again.`);
-  const most = hard("Max processes");
+  const most = limit("Max processes", 1);
   if (most < Infinity && process.getuid && process.getuid() !== 0) {
-    const running = threadsOfUser();
+    const running = threadsOfUser(proc);
     if (most - running < 100) said.push(`This user runs ${running} processes and threads and may run no more than ${most}, which can be too few for the browser: run it again once fewer are running.`);
   }
   return said.join(" ");
 }
 
 // The processes and threads this user runs, as the system counts them
-// against the most it may run, read from /proc.
-function threadsOfUser() {
+// against the most it may run, read from /proc (`proc`).
+function threadsOfUser(proc = "/proc") {
   let count = 0;
   let names = [];
   try {
-    names = fs.readdirSync("/proc");
+    names = fs.readdirSync(proc);
   } catch {
     return 0;
   }
   for (const name of names) {
     if (!/^\d+$/.test(name)) continue;
     try {
-      if (fs.statSync(`/proc/${name}`).uid !== process.getuid()) continue;
-      const stat = fs.readFileSync(`/proc/${name}/stat`, "utf8");
+      if (fs.statSync(`${proc}/${name}`).uid !== process.getuid()) continue;
+      const stat = fs.readFileSync(`${proc}/${name}/stat`, "utf8");
       count += Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[17]) || 1;
     } catch {
       // Gone already.

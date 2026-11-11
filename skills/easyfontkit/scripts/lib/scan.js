@@ -70,8 +70,8 @@ function record(cdp) {
   cdp.on("Network.loadingFailed", ({ requestId, type, corsErrorStatus, blockedReason }) => {
     const [url] = addresses.get(requestId) || [];
     if (type !== "Font" || !url) return;
-    if (corsErrorStatus && corsErrorStatus.corsError) refused.set(requestId, { url, reason: `the browser refused it (CORS error: ${corsErrorStatus.corsError})` });
-    else if (blockedReason) refused.set(requestId, { url, reason: `the browser refused it (blocked: ${blockedReason})` });
+    const why = corsErrorStatus && corsErrorStatus.corsError ? `CORS error: ${corsErrorStatus.corsError}` : blockedReason ? `blocked: ${blockedReason}` : "";
+    if (why) refused.set(requestId, { url, why, reason: `the browser refused it (${why})` });
   });
   // The status of each request's last answer as the network got it, also
   // of one the browser then refused: a server's error page often comes
@@ -400,10 +400,12 @@ function decodeDataUrl(url) {
 // all is, and with that error when its server answered it with one. One
 // read all the same from that address, as by a preload the page made
 // without crossorigin, which the browser does not hold to CORS, is in the
-// kit and not skipped.
+// kit and not skipped, and the refusal goes with it (refusedRead): the
+// browser does not draw the page's text with it.
 async function readFiles(fonts, rules, faces, refused = new Map(), statuses = new Map()) {
   const files = new Map();
   const skipped = [];
+  const refusedRead = [];
   const add = (buffer, urls) => {
     const sha = crypto.createHash("sha1").update(buffer).digest("hex");
     const known = files.get(sha);
@@ -423,31 +425,36 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
   }
   const read = (url) => [...files.values()].some((file) => file.urls.includes(url));
   for (const [requestId, refusal] of refused) {
-    if (read(refusal.url) || skipped.some((skip) => skip.url === refusal.url)) continue;
+    if (read(refusal.url)) {
+      if (!refusedRead.some((known) => known.url === refusal.url)) refusedRead.push({ url: refusal.url, why: refusal.why });
+      continue;
+    }
+    if (skipped.some((skip) => skip.url === refusal.url)) continue;
     const status = statuses.get(requestId) || 0;
-    skipped.push(status >= 400 ? { url: refusal.url, reason: `the server answered ${status}` } : refusal);
+    skipped.push(status >= 400 ? { url: refusal.url, reason: `the server answered ${status}` } : { url: refusal.url, reason: refusal.reason });
   }
   const inline = [...rules.flatMap((rule) => rule.urls), ...faces.map((face) => String(face.src || ""))].filter((url) => url.startsWith("data:"));
   for (const url of new Set(inline)) {
     const body = decodeDataUrl(url);
     if (body && body.length) add(body, [url]);
   }
-  return { files: [...files.values()], skipped };
+  return { files: [...files.values()], skipped, refusedRead };
 }
 
 // Opens the page and reads it: the faces of each role, every font file it
-// loaded, the addresses of every one the browser asked for (asked), its
-// @font-face rules, the web fonts Chrome reports as loaded, the
-// families document.fonts holds, the status and address the server
-// answered the page with (answer), the address the page was first asked
-// from as Chrome wrote it (first), the address a redirect or the page led
-// on to that could not be opened or did not answer (failed), about:blank or
-// the like when the page moved itself on to that (left), and for a page that
-// did not draw, so it could not be scrolled, the style sheet it waited for,
-// if one had not come (stalled). pageUrl is the address of the page the
-// roles were read from, or the last web address the tab showed when it has
-// moved on to about:blank or to a blob: address, so it is always a web
-// address.
+// loaded, the ones it could not use and why (skipped), the browser's
+// refusals of files it read all the same (refusedRead), the addresses of
+// every one the browser asked for (asked), its @font-face rules, the web
+// fonts Chrome reports as loaded, the families document.fonts holds, the
+// status and address the server answered the page with (answer), the
+// address the page was first asked from as Chrome wrote it (first), the
+// address a redirect or the page led on to that could not be opened or did
+// not answer (failed), about:blank or the like when the page moved itself
+// on to that (left), and for a page that did not draw, so it could not be
+// scrolled, the style sheet it waited for, if one had not come (stalled).
+// pageUrl is the address of the page the roles were read from, or the last
+// web address the tab showed when it has moved on to about:blank or to a
+// blob: address, so it is always a web address.
 async function scanPage(cdp, url, log = () => {}) {
   const recorded = record(cdp);
   await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: 50_000_000 });
@@ -455,7 +462,7 @@ async function scanPage(cdp, url, log = () => {}) {
   await cdp.send("CSS.enable");
   const { frameTree } = await cdp.send("Page.getFrameTree");
   recorded.page.frame = frameTree.frame.id;
-  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, files: [], skipped: [], rules: [], faces: [], loaded: [], asked: [], ...found });
+  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, files: [], skipped: [], refusedRead: [], rules: [], faces: [], loaded: [], asked: [], ...found });
   log(`Opening ${url}`);
   let pageUrl;
   try {
@@ -509,13 +516,13 @@ async function scanPage(cdp, url, log = () => {}) {
     unicodeRange: face.unicodeRange && face.unicodeRange !== "U+0-10FFFF" ? face.unicodeRange : "",
     platformFamily: face.platformFontFamily || "",
   }));
-  const { files, skipped } = await readFiles(recorded.fonts, rules, faces, recorded.refused, recorded.statuses);
+  const { files, skipped, refusedRead } = await readFiles(recorded.fonts, rules, faces, recorded.refused, recorded.statuses);
   const { failed } = recorded.page;
   // The browser's own error page is titled with the host it could not
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, files, skipped, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked] };
+  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, files, skipped, refusedRead, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked] };
 }
 
 module.exports = { scanPage, fontFaceRules, decodeDataUrl };

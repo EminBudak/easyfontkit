@@ -155,6 +155,24 @@ test("text a web font has no glyphs for, as Japanese or an emoji in a Latin font
   assert.deepEqual(ranged.notes, ["Some of the headings were drawn with Liberation Sans, a fallback, as Acme Latin has no glyphs for those characters. That text is counted as Acme Latin, the font the site asks for."]);
 });
 
+test("text a fallback drew because the browser refused the web font's file to the page's @font-face rule, a file the kit read from another request, is said to be so, and not to have come too late", () => {
+  const far = file("http://cdn.example/far.ttf", { 1: "Far Sans" });
+  const { roles, families, notes } = buildFamilies({
+    pageUrl: PAGE,
+    roles: { heading: [face("Liberation Serif", 20, '"Far Font", serif', { custom: false, weight: "800", nodes: [["A heading", 20]] })] },
+    files: [far],
+    rules: [rule("Far Font", far.urls[0])],
+    faces: [],
+    loaded: [],
+    refusedRead: [{ url: far.urls[0], why: "CORS error: MissingAllowOriginHeader" }],
+  });
+  assert.equal(roles.heading.family, "Far Sans");
+  assert.equal(families[0].files.length, 1, "the file is in the kit");
+  assert.deepEqual(notes, [
+    "Some of the headings were drawn with Liberation Serif, a fallback, because the browser refused Far Sans's file http://cdn.example/far.ttf to the page's @font-face rule (CORS error: MissingAllowOriginHeader), as it does on every visit. That text is counted as Far Sans, the font the site asks for. The kit has that file from another request the page made for it, such as a preload without crossorigin.",
+  ]);
+});
+
 test("a web font whose file the browser asked for and did not get while the page was read is named as the CSS names it, with the file's address, an unknown license and a note, and is not taken for a font of the visitor's own", () => {
   const slow = "https://www.acme.com/fonts/slowpoke.woff2";
   const read = (asked, skipped = []) =>

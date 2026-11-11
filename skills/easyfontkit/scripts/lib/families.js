@@ -226,7 +226,7 @@ function regular(files) {
 const unloaded = (family) => Boolean(family.notLoaded && family.notLoaded.size && !family.files.length && !family.missing);
 
 function buildFamilies(scan) {
-  const { pageUrl, roles: rawRoles, files, rules, faces, loaded, asked = [], skipped = [] } = scan;
+  const { pageUrl, roles: rawRoles, files, rules, faces, loaded, asked = [], skipped = [], refusedRead = [] } = scan;
   declareFiles(files, rules, faces);
   const loadedNames = new Set(loaded.map((face) => lower(face.family)));
   const families = new Map();
@@ -310,8 +310,9 @@ function buildFamilies(scan) {
         // A system font, although the stack asks for a web font first: the
         // web font has no glyphs for this text, as for Japanese or an emoji
         // in a Latin font, it came too late for it (font-display optional or
-        // swap on a first visit), or its file had not come when the page was
-        // read. It counts as the web font, the one the site means.
+        // swap on a first visit), the browser refused its file to the page,
+        // or its file had not come when the page was read. It counts as the
+        // web font, the one the site means.
         family = webFamilyIn(stack) || unloadedIn(stack);
         if (family) {
           const why = family.files.length && lacksGlyphs(face, family) ? "glyphs" : "late";
@@ -351,8 +352,12 @@ function buildFamilies(scan) {
 
   // The font files whose server answered, with an error or with no font,
   // and those the browser refused, as by CORS: a note of their own says
-  // why, and trying again later is for a file that got no answer.
+  // why, and trying again later is for a file that got no answer. A file
+  // the browser refused to the page's @font-face rule and that the kit read
+  // all the same, from another request the page made for it, is in the
+  // kit, and the browser does not draw with it on any visit.
   const answered = new Set(skipped.map((skip) => bare(skip.url)));
+  const refusals = new Map(refusedRead.map((refusal) => [bare(refusal.url), refusal.why]));
   const notes = [...fallbacks.values()].map((fallback) => {
     const { family, why } = fallback;
     const where = fallback.roles.map((role) => ROLE_WORDS[role]);
@@ -368,6 +373,10 @@ function buildFamilies(scan) {
       return `${drawn}, because ${family.name}'s ${urls.length === 1 ? "file" : "files"} ${listOf(urls)} did not load while the page was read. ${counted} The kit has no file of it, so its license is unknown${waiting ? ": try again later" : ""}.`;
     }
     if (why === "glyphs") return `${drawn}, as ${family.name} has no glyphs for those characters. ${counted}`;
+    const refused = family.files.flatMap((file) => file.urls).find((url) => refusals.has(bare(url)));
+    if (refused) {
+      return `${drawn}, because the browser refused ${family.name}'s file ${refused} to the page's @font-face rule (${refusals.get(bare(refused))}), as it does on every visit. ${counted} The kit has that file from another request the page made for it, such as a preload without crossorigin.`;
+    }
     return `${drawn}, because ${family.name} loaded too late for ${many ? "them" : "it"}. ${counted}`;
   });
   const list = [...families.values()].map((family) => describeFamily(family, pageUrl));

@@ -1789,7 +1789,7 @@ test("a web font from another site whose server answers with an error and sends 
   }
 });
 
-test("a font file from another site with no CORS header that the page also preloads without crossorigin is in the kit from that preload, with no note that it was not usable", { skip: noBrowser }, async () => {
+test("a font file from another site with no CORS header that the page also preloads without crossorigin is in the kit from that preload, with no note that it was not usable, and its family's note says the browser refused it to the page's @font-face rule, not that it came too late", { skip: noBrowser }, async () => {
   // The preload is not held to CORS, so the browser gets the file, while
   // the @font-face rule's own request for that address is refused.
   const farFont = interAs({ names: { 1: "Far Font", 2: "Regular", 4: "Far Font", 6: "FarFont-Regular" } });
@@ -1813,7 +1813,13 @@ test("a font file from another site with no CORS header that the page also prelo
     assert.deepEqual(family.files.map((file) => file.url), [`${far.origin}/far.ttf`]);
     assert.equal("notLoaded" in family, false);
     assert.ok(fs.existsSync(path.join(dir, family.files[0].file)));
-    assert.deepEqual(kit.notes.filter((note) => /usable|refused/.test(note)), []);
+    // The browser draws the heading with a fallback on every visit, as it
+    // refuses the file to the @font-face rule: the note says so.
+    assert.equal(kit.notes.length, 1, kit.notes.join("\n"));
+    const refused = `because the browser refused Far Font's file ${far.origin}/far.ttf to the page's @font-face rule (CORS error: MissingAllowOriginHeader), as it does on every visit. That text is counted as Far Font, the font the site asks for. The kit has that file from another request the page made for it, such as a preload without crossorigin.`;
+    assert.match(kit.notes[0], /^Some of the headings were drawn with .+?, (a fallback|fallbacks), because /);
+    assert.ok(kit.notes[0].endsWith(refused), kit.notes[0]);
+    assert.doesNotMatch(kit.notes.join("\n"), /loaded too late|usable/);
   } finally {
     server.close();
     far.server.close();

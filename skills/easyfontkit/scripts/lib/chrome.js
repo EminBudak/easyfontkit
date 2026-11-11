@@ -231,6 +231,46 @@ function tempOf(profile) {
   return { profile: whole, cwd: whole, env: { ...process.env, TMPDIR: "." } };
 }
 
+// Chrome writes the first bytes of a file a page starts to download before
+// it refuses the download (below), in a hidden file in the user's Downloads
+// folder, and removes it a moment later: a run stopped in that moment would
+// leave it there. On Linux and the other systems that name that folder as
+// xdg-user-dirs does, in user-dirs.dirs in the config folder
+// (XDG_CONFIG_HOME, ~/.config by default), the browser is given a config
+// folder in its profile, whose user-dirs.dirs names a Downloads folder in
+// the profile, which goes with it. That folder links to every other entry
+// of the user's own config folder, so the browser reads the user's font,
+// proxy and other settings as before. The links are removed with the
+// profile, and what they lead to stays. Gives what to add to the browser's
+// environment.
+function downloadsIn(profile) {
+  if (process.platform === "darwin" || process.platform === "win32") return {};
+  const config = path.resolve(profile, "config");
+  const downloads = path.resolve(profile, "Downloads");
+  fs.mkdirSync(config);
+  fs.mkdirSync(downloads);
+  const given = process.env.XDG_CONFIG_HOME;
+  const own = path.resolve(given && path.isAbsolute(given) ? given : path.join(process.env.HOME || os.homedir(), ".config"));
+  let names = [];
+  try {
+    names = fs.readdirSync(own);
+  } catch {
+    // None, or not to be read: there is nothing to keep.
+  }
+  for (const name of names) {
+    if (name === "user-dirs.dirs") continue;
+    try {
+      fs.symlinkSync(path.join(own, name), path.join(config, name));
+    } catch {
+      // Left out.
+    }
+  }
+  // The path in quotes, with a backslash before a quote, a backslash, a $
+  // or a backquote, as the file is read.
+  fs.writeFileSync(path.join(config, "user-dirs.dirs"), `XDG_DOWNLOAD_DIR="${downloads.replace(/["\\$`]/g, (c) => `\\${c}`)}"\n`);
+  return { XDG_CONFIG_HOME: config };
+}
+
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
@@ -266,6 +306,13 @@ async function launch({ width, height }) {
   const quit = (failed) => new Error(notStarted(place, failed) || `${name} did not start. Try again, or point CHROME_PATH at another browser.`);
   const { profile, env = process.env, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
   const started = { child: null, profile, singleton: "", crashHandler: null };
+  let config;
+  try {
+    config = downloadsIn(profile);
+  } catch (err) {
+    removeProfile(started, 10, 100);
+    throw err;
+  }
   let child;
   try {
     child = spawn(
@@ -288,7 +335,7 @@ async function launch({ width, height }) {
         ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
         "about:blank",
       ],
-      { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], ...where, env: { ...env, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
+      { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], ...where, env: { ...env, ...config, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
     );
   } catch (error) {
     // Node gives some errors at once, as for a path that changed since it
@@ -363,17 +410,18 @@ async function launch({ width, height }) {
     removeProfile(started, 10, 100);
   };
   // A page cannot make the browser save a file: a download it starts, by a
-  // link, a script or a frame that goes to an attachment, is refused before
-  // anything is written, in the user's Downloads folder or anywhere else, and
-  // the page stays where it is. It is the first thing said on the pipe, to
-  // the whole browser, and it holds until the browser has ended: Chrome
-  // forgets it only when the connection that said it closes, and the pipe
-  // closes with the browser. The browser has started once it answers, and it
-  // has the time a browser has to start for that: one that does not answer
-  // in it ends the run, as a slow one could go on to open the page with
-  // nothing said. The time is told by the clock, as on a busy machine a
-  // wait takes longer than it asks. A browser that answers that it does not
-  // take it is not used, as a page could save files through it.
+  // link, a script or a frame that goes to an attachment, is refused, and the
+  // page stays where it is. The first bytes Chrome writes before it refuses
+  // it go into a folder in its profile on Linux (downloadsIn), and go with
+  // the profile. The refusal is the first thing said on the pipe, to the
+  // whole browser, and it holds until the browser has ended: Chrome forgets
+  // it only when the connection that said it closes, and the pipe closes with
+  // the browser. The browser has started once it answers, and it has the time
+  // a browser has to start for that: one that does not answer in it ends the
+  // run, as a slow one could go on to open the page with nothing said. The
+  // time is told by the clock, as on a busy machine a wait takes longer than
+  // it asks. A browser that answers that it does not take it is not used, as
+  // a page could save files through it.
   const wait = beforeReading();
   const how = await Promise.race([
     pipe.send("Browser.setDownloadBehavior", { behavior: "deny" }, wait).then(

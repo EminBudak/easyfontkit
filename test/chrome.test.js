@@ -71,6 +71,61 @@ printf '%s\\n%s\\n%s\\n%s\\n' "$TMPDIR" "$profile" "$(pwd -P)" "$BREAKPAD_DUMP_L
   }
 });
 
+test("on Linux, the browser's download folder is in its profile: its config folder there names that folder in user-dirs.dirs and links to every other entry of the user's own, which stays as it was when the profile goes", { skip: ["darwin", "win32"].includes(process.platform) && "Chrome reads its download folder from user-dirs.dirs on Linux and the like only" }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-config-"));
+  const saved = Object.fromEntries(["CHROME_PATH", "HOME", "XDG_CONFIG_HOME"].map((name) => [name, process.env[name]]));
+  // A browser that writes down its config folder, what user-dirs.dirs
+  // there says, and where each entry of that folder leads, then quits.
+  const seen = path.join(parent, "seen");
+  process.env.CHROME_PATH = path.join(parent, "chrome");
+  fs.writeFileSync(
+    process.env.CHROME_PATH,
+    `#!/bin/sh
+{ printf '%s\\n' "$XDG_CONFIG_HOME"; cat "$XDG_CONFIG_HOME/user-dirs.dirs"; for entry in "$XDG_CONFIG_HOME"/*; do printf '%s %s\\n' "\${entry##*/}" "$(readlink "$entry")"; done; } > ${JSON.stringify(seen)}
+`,
+    { mode: 0o755 },
+  );
+  // The user's own config folder, as ~/.config and as XDG_CONFIG_HOME.
+  const config = (folder) => {
+    fs.mkdirSync(path.join(folder, "fontconfig"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "fontconfig", "fonts.conf"), "<fontconfig/>\n");
+    fs.writeFileSync(path.join(folder, "mimeapps.list"), "[Default Applications]\n");
+    fs.writeFileSync(path.join(folder, "user-dirs.dirs"), 'XDG_DOWNLOAD_DIR="$HOME/Downloads"\n');
+    return fs.readdirSync(folder).sort();
+  };
+  const home = path.join(parent, "home");
+  const own = config(path.join(home, ".config"));
+  const elsewhere = path.join(parent, "elsewhere");
+  config(elsewhere);
+  process.env.HOME = home;
+  try {
+    for (const [given, folder] of [
+      [undefined, path.join(home, ".config")],
+      [elsewhere, elsewhere],
+    ]) {
+      if (given === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = given;
+      fs.rmSync(seen, { force: true });
+      await assert.rejects(launch({ width: 800, height: 600 }), /did not start/);
+      const [at, dirs, ...links] = fs.readFileSync(seen, "utf8").trim().split("\n").map((line) => line.trimEnd());
+      const profile = path.dirname(at);
+      assert.equal(path.basename(at), "config");
+      assert.ok(path.basename(profile).startsWith("easyfontkit-chrome-"), profile);
+      assert.equal(dirs, `XDG_DOWNLOAD_DIR="${path.join(profile, "Downloads")}"`);
+      assert.deepEqual(links.sort(), [`fontconfig ${path.join(folder, "fontconfig")}`, `mimeapps.list ${path.join(folder, "mimeapps.list")}`, "user-dirs.dirs"]);
+      assert.equal(fs.existsSync(profile), false, "the profile is removed");
+      assert.deepEqual(fs.readdirSync(folder).sort(), own, "the user's own config folder is as it was");
+      assert.equal(fs.readFileSync(path.join(folder, "fontconfig", "fonts.conf"), "utf8"), "<fontconfig/>\n");
+    }
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("Chrome's component updater is sent to a closed port, so it downloads nothing during a run", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-args-"));
   const saved = process.env.CHROME_PATH;

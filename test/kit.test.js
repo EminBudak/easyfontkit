@@ -2342,6 +2342,70 @@ test("a page cannot make the browser save a file and is read where it stays, and
   }
 });
 
+test("a download a page starts writes nothing in the Downloads folder of the home the browser runs with, not for a moment and not when the run is stopped then, as the browser's download folder is in its profile", { skip: noDownloads }, async () => {
+  // Chrome writes the first bytes of a download into a hidden file in its
+  // download folder before it refuses the download: the file that is held
+  // keeps that moment going.
+  let held = null;
+  const asked = { file: 0, held: 0 };
+  const server = http.createServer((req, res) => {
+    const route = req.url.split("?")[0];
+    if (route === "/file.bin") asked.file++;
+    if (route === "/held.bin") asked.held++;
+    if (route === "/file.bin") return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="from-the-site.txt"' }).end("written by the site\n".repeat(100));
+    if (route === "/held.bin") {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="from-the-site.txt"' });
+      res.write(Buffer.alloc(65_536, 120));
+      if (held) held(res);
+      return;
+    }
+    const to = route === "/held" ? "/held.bin" : "/file.bin";
+    res.writeHead(200, { "content-type": "text/html" }).end(startsDownload(`setTimeout(() => (location.href = "${to}"), 300)`));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-downloads-"));
+  const home = path.join(parent, "home");
+  const downloads = path.join(home, "Downloads");
+  fs.mkdirSync(downloads, { recursive: true });
+  const tmp = path.join(parent, "tmp");
+  fs.mkdirSync(tmp);
+  const env = { ...process.env, HOME: home, TMPDIR: tmp };
+  delete env.XDG_CONFIG_HOME;
+  delete env.XDG_DOWNLOAD_DIR;
+  // Every entry that shows up there, also one that goes again at once.
+  const seen = [];
+  const watcher = fs.watch(downloads, (event, name) => seen.push(`${event} ${name}`));
+  try {
+    const cli = await run([`${origin}/`, "--out", path.join(parent, "kit")], env);
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.ok(asked.file, "the page sent the browser to the file");
+    // A stop while the browser has the start of the file.
+    const stopped = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [CLI, `${origin}/held`, "--out", path.join(parent, "stopped")], { env, stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      held = (res) => setTimeout(() => {
+        child.kill("SIGTERM");
+        res.destroy();
+      }, 500);
+      child.on("close", (status, signal) => resolve({ status, signal, stderr }));
+    });
+    assert.equal(stopped.signal, "SIGTERM", stopped.stderr);
+    assert.ok(asked.held, "the page sent the browser to the held file");
+    await sleep(500);
+    assert.deepEqual(seen, [], "nothing came into the Downloads folder");
+    assert.deepEqual(fs.readdirSync(downloads), []);
+    assert.deepEqual(savedIn(home), []);
+    assert.deepEqual(fs.readdirSync(tmp), [], "the profile went, with the start of the file in it");
+  } finally {
+    watcher.close();
+    server.closeAllConnections();
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("the browser stays told to save nothing until it is closed, also once the session of its tab has been let go of", { skip: noDownloads }, async () => {
   let asked = 0;
   const { server, origin } = await serve({

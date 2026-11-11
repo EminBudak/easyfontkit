@@ -253,9 +253,9 @@ function tempOf(profile) {
 // user may run, as a folder or a file on a noexec mount, is told before it
 // is started; a file the system cannot start, as a script whose interpreter
 // or a program whose loader or library is missing, or one for another
-// system, and a script that could not start the browser it runs, once it
-// has failed to. The system can also be short of what it takes to start
-// one, as file descriptors.
+// system, a script that could not start the browser it runs, and a browser
+// whose sandbox could not start, once it has failed to. The system can also
+// be short of what it takes to start one, as file descriptors.
 async function launch({ width, height }) {
   const place = chromePlace();
   if (!place) throw new Error(NOTHING);
@@ -313,9 +313,9 @@ async function launch({ width, height }) {
   }).then(() => (exited = true));
   // What the browser says on stderr, its first 8 KB: the system's loader
   // says there which library is missing, /bin/sh what it made of a file
-  // that is no program, and a script's shell or env what it could not
-  // start. The rest is read and let go, so the browser never waits to
-  // write it.
+  // that is no program, a script's shell or env what it could not start,
+  // and Chrome why its sandbox could not start. The rest is read and let go,
+  // so the browser never waits to write it.
   const said = [];
   let saidBytes = 0;
   if (child.stderr) {

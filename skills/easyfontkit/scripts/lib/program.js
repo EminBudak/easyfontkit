@@ -7,9 +7,9 @@
 // noexec mount, and a file it cannot run as a program it hands to /bin/sh,
 // which reads it as a script and fails with words of its own. A script that
 // runs the browser, as Chrome's own launcher on Linux does, says what it
-// could not start. So the path is looked at before the browser is started,
-// and the file again, more closely, with what was said, when it did not
-// start.
+// could not start, and Chrome says why its sandbox could not start. So the
+// path is looked at before the browser is started, and the file again, more
+// closely, with what was said, when it did not start.
 
 const fs = require("fs");
 const path = require("path");
@@ -46,6 +46,9 @@ const FIX = {
   named: "Point CHROME_PATH at the program of a Chrome, Chromium, Edge or Brave that runs, or unset it and install one.",
   found: "Install Chrome, Chromium, Edge or Brave, or point CHROME_PATH at the program of one that runs.",
 };
+// What to do when Chrome's sandbox cannot start, which another browser does
+// not help with.
+const SANDBOX_FIX = "Run easyfontkit where Chrome's sandbox can start: on Linux, Google Chrome's own package sets the sandbox up, and a container has to let it start, as Docker does with --security-opt seccomp=unconfined.";
 
 // A name with no folder in it, which is looked up on PATH.
 const bare = (value) => !(value.includes("/") || (WINDOWS && value.includes("\\")));
@@ -518,6 +521,24 @@ function explain(file, { error = null, stderr = "", code = null } = {}) {
   return foreign(kind) || "not a program this system can run";
 }
 
+// Chrome's words for a sandbox it could not start, which it needs unless it
+// runs as root, from what it printed as it quit: its setuid sandbox could
+// not make its namespaces, as in a container whose seccomp keeps a user who
+// is not root from making them; its setuid helper is not set up; or it has
+// none at all, as on a system whose AppArmor keeps a browser it has no rule
+// for from making user namespaces. "" when it says none of these.
+function sandboxTrouble(stderr) {
+  const said = stderr.split("\n").map((line) => line.replace(/^\[[^\]]*\]\s*/, "").trim());
+  for (const line of said) {
+    if (/No usable sandbox/i.test(line)) return "No usable sandbox";
+    if (/SUID sandbox helper binary was found, but is not configured correctly/i.test(line)) return "The SUID sandbox helper binary was found, but is not configured correctly";
+    const namespaces = /\((setuid sandbox: [^)]*)\)/.exec(line);
+    if (namespaces) return namespaces[1];
+  }
+  const moved = said.find((line) => /^Failed to move to new namespace/i.test(line));
+  return moved ? moved.replace(/: PID namespaces supported, Network namespace supported, but failed/i, "") : "";
+}
+
 // Where this run's browser is: { file, name, value, where, what, none }, or
 // null when there is none at all. `value` is what CHROME_PATH holds when it
 // is set, which names the browser by its path or, as a shell would take it,
@@ -570,17 +591,18 @@ function findChrome() {
 
 // The message for a browser that cannot be started, `what` being what is
 // wrong with it: the path CHROME_PATH or the search gave, what is wrong
-// with it, and how to get one that runs. It starts as the kit's messages
-// did before: none was found, or the one found did not start.
-function cannotStart(place, what = place.what) {
+// with it, and how to get one that runs, or `fix`, what to do when another
+// browser would not help. It starts as the kit's messages did before: none
+// was found, or the one found did not start.
+function cannotStart(place, what = place.what, fix = "") {
   const lead = place.none ? NONE : `${place.name} did not start`;
   if (place.value !== undefined) {
     const at = bare(place.value) && place.file ? `, found on your PATH at ${place.file}` : "";
-    return `${lead}: CHROME_PATH is ${place.value}${at}, ${what}. ${FIX.named}`;
+    return `${lead}: CHROME_PATH is ${place.value}${at}, ${what}. ${fix || FIX.named}`;
   }
   // A file that was found is there, unless it went since.
   const is = what.startsWith("and ") ? `gone: ${what.slice(4)}` : what;
-  return `${lead}: ${place.file}, the ${place.name} ${place.where}, is ${is}. ${FIX.found}`;
+  return `${lead}: ${place.file}, the ${place.name} ${place.where}, is ${is}. ${fix || FIX.found}`;
 }
 
 // The errors that say the system is short of something to start a program
@@ -604,6 +626,10 @@ function notStarted(place, { error = null, stderr = "", code = null } = {}) {
     const seen = look(place.file);
     if (seen.what) return cannotStart({ ...place, ...seen });
   }
+  // A browser that started and quit at once, as its sandbox could not
+  // start.
+  const sandbox = !error && sandboxTrouble(stderr);
+  if (sandbox) return cannotStart(place, `a browser that quit at once, as its sandbox cannot start here (${sandbox})`, SANDBOX_FIX);
   const what = explain(place.file, { error, stderr, code });
   return what ? cannotStart(place, what) : "";
 }

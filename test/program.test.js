@@ -324,6 +324,34 @@ test("a script this user may run but not read, which its interpreter has to read
   }
 });
 
+test("a browser that quits at once as its sandbox cannot start, as in a container that keeps it from making namespaces or on a system that keeps it from making user namespaces, says so and how to let it start, where another browser would not help", { skip: process.platform === "win32" && "the stand-ins are shell scripts" }, () => {
+  const root = path.join(dir, "sandbox");
+  const fix = "Run easyfontkit where Chrome's sandbox can start: on Linux, Google Chrome's own package sets the sandbox up, and a container has to let it start, as Docker does with --security-opt seccomp=unconfined.";
+  // What Chrome 157 says as a user who is not root in a container with
+  // Docker's default seccomp, then without a setuid helper where user
+  // namespaces are kept from it, and with a helper that lost its setuid bit.
+  const said = {
+    namespaces: [
+      "Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted",
+      "[16:16:1111/001020.804903:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:242] Zygote process exited prematurely with exit code 82 (setuid sandbox: failed to move to new namespaces)",
+    ],
+    none: ["[1:1:1111/000000.000000:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:128] No usable sandbox! If you are running on Ubuntu 23.10+ or another Linux distro that has disabled unprivileged user namespaces with AppArmor, see https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md."],
+    helper: ["[1:1:1111/000000.000000:FATAL:sandbox/linux/suid/client/setuid_sandbox_host.cc:166] The SUID sandbox helper binary was found, but is not configured correctly. Rather than run without sandboxing I'm aborting now. You need to make sure that /opt/chrome/chrome-sandbox is owned by root and has mode 4755."],
+  };
+  const standIn = (folder, lines, name = "chrome") => put(root, folder, `#!/bin/sh\n${lines.map((line) => `echo '${line.replace(/'/g, "'\\''")}' >&2`).join("\n")}\nexit 1\n`, 0o755, name);
+  const namespaces = standIn("namespaces", said.namespaces);
+  const none = standIn("none", said.none);
+  const helper = standIn("helper", said.helper);
+  const found = standIn("found", said.namespaces, "google-chrome");
+  const { PATH } = process.env;
+  refused(root, [
+    [{ PATH, CHROME_PATH: namespaces }, `chrome did not start: CHROME_PATH is ${namespaces}, a browser that quit at once, as its sandbox cannot start here (setuid sandbox: failed to move to new namespaces). ${fix}`],
+    [{ PATH, CHROME_PATH: none }, `chrome did not start: CHROME_PATH is ${none}, a browser that quit at once, as its sandbox cannot start here (No usable sandbox). ${fix}`],
+    [{ PATH, CHROME_PATH: helper }, `chrome did not start: CHROME_PATH is ${helper}, a browser that quit at once, as its sandbox cannot start here (The SUID sandbox helper binary was found, but is not configured correctly). ${fix}`],
+    [{ PATH: `${path.dirname(found)}${path.delimiter}${PATH}` }, `google-chrome did not start: ${found}, the google-chrome on your PATH, is a browser that quit at once, as its sandbox cannot start here (setuid sandbox: failed to move to new namespaces). ${fix}`],
+  ]);
+});
+
 test("a run with no file descriptor left to start the browser stops before any work and says what to do", { skip: process.platform === "win32" && "it takes sh to lower the limit" }, () => {
   const root = path.join(dir, "no-descriptors");
   const browser = put(root, "bin", "#!/bin/sh\nexec google-chrome \"$@\"\n");

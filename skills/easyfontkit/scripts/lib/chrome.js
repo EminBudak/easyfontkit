@@ -443,6 +443,13 @@ async function launch({ width, height }) {
   if (!place) throw new Error(NOTHING);
   if (place.what) throw new Error(cannotStart(place));
   const { file: binary, name } = place;
+  // The folders of PATH are parted by its delimiter, so the folder of
+  // stand-ins in a temp folder whose path has one in it could not come first
+  // on the browser's PATH (see below), and the browser would find the real
+  // programs. Such a run starts nothing.
+  if (STAND_INS && os.tmpdir().includes(path.delimiter)) {
+    throw new Error(`${name} did not start: the temp folder's path, ${os.tmpdir()}, has a ${path.delimiter} in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.`);
+  }
   // A profile that cannot be made, as in a temp folder that is not there, may
   // not be written in or is full, or for want of file descriptors, stops the
   // run before the browser is started.

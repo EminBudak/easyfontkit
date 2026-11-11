@@ -227,6 +227,24 @@ exit 3
   assert.deepEqual(fs.readdirSync(parent), [], "the profile went");
 });
 
+test("on Linux, a temp folder whose path has a : in it, which parts the folders of PATH, stops the run before the browser starts, with nothing made there and no out folder, as the stand-ins could not come first on the browser's PATH", { skip: ["darwin", "win32"].includes(process.platform) && "the stand-ins are for Linux" }, (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-colon-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const temp = path.join(parent, "job:1");
+  fs.mkdirSync(temp);
+  // A browser that writes down that it was started.
+  const started = path.join(parent, "started");
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, `#!/bin/sh\necho started >> ${JSON.stringify(started)}\n`, { mode: 0o755 });
+  const out = path.join(parent, "out");
+  const run = spawnSync(process.execPath, [path.resolve(__dirname, "../skills/easyfontkit/scripts/easyfontkit.js"), "http://127.0.0.1:9/", "--out", out], { encoding: "utf8", env: { ...process.env, CHROME_PATH: chrome, TMPDIR: temp }, timeout: 60_000 });
+  assert.equal(run.status, 1, run.stderr);
+  assert.equal(run.stderr, `easyfontkit: chrome did not start: the temp folder's path, ${temp}, has a : in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.\n`);
+  assert.equal(fs.existsSync(started), false, "the browser was not started");
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing was made in the temp folder");
+  assert.equal(fs.existsSync(out), false, "no out folder");
+});
+
 test("Chrome's component updater is sent to a closed port, so it downloads nothing during a run", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-args-"));
   const saved = process.env.CHROME_PATH;

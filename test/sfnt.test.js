@@ -115,6 +115,41 @@ test("a font file is unpacked once: what says which characters it has glyphs for
   }
 });
 
+test("a font file whose cmap unpacks to more than the file itself is read, but its cmap is not kept for the glyph check, so many such files, as a page could serve, leave the process's memory as it was", async () => {
+  // A cmap with one subtable, of format 4, which maps no character, then
+  // 24 MB of zeros, in a WOFF2 file of a few kilobytes.
+  const cmap = Buffer.alloc(36);
+  cmap.writeUInt16BE(1, 2);
+  cmap.writeUInt16BE(3, 4);
+  cmap.writeUInt16BE(1, 6);
+  cmap.writeUInt32BE(12, 8);
+  for (const [at, value] of [[12, 4], [14, 24], [18, 2], [20, 2], [26, 0xffff], [30, 0xffff], [32, 1]]) cmap.writeUInt16BE(value, at);
+  const font = woff2With(cmap.length + 24 * 1024 * 1024, await packedZeros(24, true, cmap), 0);
+  assert.ok(font.length < 64 * 1024, `${font.length} bytes`);
+  require("node:v8").setFlagsFromString("--expose-gc");
+  const collect = require("node:vm").runInNewContext("gc");
+  // What every buffer no longer held leaves, once V8 has swept them, which
+  // it does a moment after it collects them.
+  const held = async () => {
+    for (let i = 0; i < 3; i++) {
+      collect();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return process.memoryUsage().arrayBuffers;
+  };
+  const before = await held();
+  // Kept, as the kit keeps the files a page loaded until the run ends.
+  const kept = [];
+  for (let i = 0; i < 8; i++) {
+    const copy = Buffer.from(font);
+    assert.equal(describeFont(copy).format, "woff2");
+    assert.equal(glyphsOf(copy), null, "nothing to look up");
+    kept.push(copy);
+  }
+  const grew = (await held()) - before;
+  assert.ok(grew < 16 * 1024 * 1024, `${kept.length} files hold ${Math.round(grew / 1024 / 1024)} MB`);
+});
+
 test("a font file's cmap says which characters it has glyphs for", () => {
   for (const font of [fixture("inter-latin-400.woff2"), fixture("inter-latin-400.woff"), interAs()]) {
     const has = glyphsOf(font);

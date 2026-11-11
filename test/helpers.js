@@ -96,13 +96,15 @@ function interAs({ names = {}, fsType } = {}) {
   return sfnt(tables);
 }
 
-// Data that unpacks to `megabytes` MB of zeros, packed as it streams so
-// the zeros are never held whole: with brotli, or with zlib's deflate.
-async function packedZeros(megabytes, brotli) {
+// Data that unpacks to `megabytes` MB of zeros, after `first` when it is
+// given, packed as it streams so the zeros are never held whole: with
+// brotli, or with zlib's deflate.
+async function packedZeros(megabytes, brotli, first = Buffer.alloc(0)) {
   const stream = brotli ? zlib.createBrotliCompress({ params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } }) : zlib.createDeflate({ level: 9 });
   const out = [];
   stream.on("data", (chunk) => out.push(chunk));
   const done = new Promise((resolve) => stream.on("end", resolve));
+  if (first.length) stream.write(first);
   const zeros = Buffer.alloc(1 << 20);
   for (let i = 0; i < megabytes; i++) if (!stream.write(zeros)) await new Promise((resolve) => stream.once("drain", resolve));
   stream.end();
@@ -110,9 +112,10 @@ async function packedZeros(megabytes, brotli) {
   return Buffer.concat(out);
 }
 
-// A WOFF2 file with one table, its name table, whose directory says it is
-// `declared` bytes long, followed by `packed` as its brotli stream.
-function woff2With(declared, packed) {
+// A WOFF2 file with one table, its name table or the one WOFF2 numbers
+// `table` (0 for cmap), whose directory says it is `declared` bytes long,
+// followed by `packed` as its brotli stream.
+function woff2With(declared, packed, table = 5) {
   const digits = [];
   for (let n = declared; ; n = Math.floor(n / 128)) {
     digits.unshift(n % 128);
@@ -125,7 +128,7 @@ function woff2With(declared, packed) {
   header.writeUInt16BE(1, 12);
   header.writeUInt32BE(Math.min(declared + 28, 0xffffffff), 16);
   header.writeUInt32BE(packed.length, 20);
-  const file = Buffer.concat([header, Buffer.from([5]), length, packed]);
+  const file = Buffer.concat([header, Buffer.from([table]), length, packed]);
   file.writeUInt32BE(file.length, 8);
   return file;
 }

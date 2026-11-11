@@ -287,7 +287,11 @@ function plainly(buf, read) {
 
 // Everything easyfontkit uses from a font file. Throws on a file that is not
 // a font; returns empty fields for tables a file leaves out. Its cmap is
-// kept for glyphsOf, so the file is not unpacked again.
+// kept for glyphsOf, so the file is not unpacked again, when it is no
+// longer than the file itself, as a font's own is: the largest, of a font
+// for Chinese, Japanese and Korean, is a few hundred kilobytes in a file of
+// megabytes. A page could serve many small files whose cmap unpacks to tens
+// of megabytes each, which the kit would hold until the run ends.
 const cmaps = new WeakMap();
 function describeFont(buf) {
   return plainly(buf, () => describeTables(buf));
@@ -295,7 +299,7 @@ function describeFont(buf) {
 
 function describeTables(buf) {
   const { format, tables } = readTables(buf);
-  cmaps.set(buf, tables.cmap ? Buffer.from(tables.cmap) : null);
+  cmaps.set(buf, tables.cmap && tables.cmap.length <= buf.length ? Buffer.from(tables.cmap) : null);
   const all = new Set();
   const names = readNames(tables.name, all);
   const upm = tables.head && tables.head.length >= 20 ? tables.head.readUInt16BE(18) : 0;
@@ -339,7 +343,7 @@ function describeTables(buf) {
 // Whether a font file has a glyph for a character, by its code point, read
 // from its cmap, the one describeFont kept when it read the file: a
 // function of the code point, or null when the file has no cmap that can
-// be read.
+// be read, or one longer than the file, which describeFont did not keep.
 function glyphsOf(buf) {
   try {
     const glyph = glyphLookup(cmaps.has(buf) ? cmaps.get(buf) : readTables(buf).tables.cmap);

@@ -58,13 +58,15 @@ function standIns(profile, made) {
 const handedOut = (url) => /^[a-z][a-z0-9+.-]*:/i.test(String(url || "")) && !/^(https?|about|data|blob|javascript|file|filesystem|chrome|chrome-error|chrome-extension|devtools|view-source):/i.test(String(url));
 
 // The world each document of the tab gets before its own scripts run, and
-// the guard it runs there: a move of the page, or of a frame of it that runs
-// in the same process, to an address that is not a web address, by a
-// script, a refresh, a form or a link, is cancelled before the browser acts
-// on it, on every system, and the address is kept for the kit's notes. The
-// page's own scripts cannot reach this world. A frame's first address and a
-// redirect are no move of a page's, and reach the browser: on Linux its
-// stand-ins take those (see launch).
+// the guard it runs there: a move of the page, or of a frame of it, to an
+// address that is not a web address, by a script, a refresh, a form or a
+// link, is cancelled before the browser acts on it, on every system, and the
+// address is kept for the kit's notes. A frame of another site, which runs
+// apart from the page, gets it as it is attached to (guardFrames). The
+// page's own scripts cannot reach this world. A frame's first address, a
+// frame the page sends to such an address by its script and a redirect are
+// no move of a page's own, and reach the browser: on Linux its stand-ins
+// take those (see launch).
 const GUARD_WORLD = "easyfontkit-guard";
 const GUARD = `(() => {
   if (typeof navigation === "undefined") return;
@@ -82,38 +84,81 @@ const GUARD = `(() => {
 })();`;
 
 // The addresses the guard cancelled in the tab's page as it stands now and
-// in its frames, read from their worlds: { url, how: "cancelled" } each. A
-// page the tab has moved on from took its own with it. A frame that cannot
-// be asked, as one of another site that runs apart, is passed over. It
-// takes a few seconds at most, and stops at a call the tab does not answer,
-// as a page whose own script keeps its thread busy answers none.
+// in its frames, read from their worlds: { url, how: "cancelled" } each,
+// those of the frames of other sites read through their own sessions
+// (cdp.frames). A page the tab has moved on from took its own with it. A
+// frame that cannot be asked, as one between two documents, is passed over.
+// It takes a few seconds at most, and stops at a call a session does not
+// answer, as a page whose own script keeps its thread busy answers none.
 async function triedSoFar(cdp) {
   const found = [];
   const until = Date.now() + Math.min(3_000, Math.max(1_000, timeLeft()));
   const left = () => Math.max(1, until - Date.now());
-  try {
-    const { frameTree } = await cdp.send("Page.getFrameTree", {}, left());
-    const frames = [];
-    for (let next = [frameTree]; next.length && frames.length < 20; ) {
-      const node = next.shift();
-      frames.push(node.frame.id);
-      next.push(...(node.childFrames || []));
-    }
-    for (const frameId of frames) {
-      if (Date.now() >= until) break;
-      try {
-        const { executionContextId } = await cdp.send("Page.createIsolatedWorld", { frameId, worldName: GUARD_WORLD }, left());
-        const { result = {} } = await cdp.send("Runtime.evaluate", { expression: "(globalThis.easyfontkitTried || []).slice(0, 20)", contextId: executionContextId, returnByValue: true }, left());
-        for (const url of Array.isArray(result.value) ? result.value : []) if (typeof url === "string") found.push({ url: url.slice(0, 300), how: "cancelled" });
-      } catch (err) {
-        if (err.timedOut || err.closed) break;
-        // A frame between two documents, or gone.
+  let asked = 0;
+  for (const session of [cdp, ...(cdp.frames || [])]) {
+    if (Date.now() >= until) break;
+    try {
+      const { frameTree } = await session.send("Page.getFrameTree", {}, left());
+      const frames = [];
+      for (let next = [frameTree]; next.length && frames.length < 20; ) {
+        const node = next.shift();
+        frames.push(node.frame.id);
+        next.push(...(node.childFrames || []));
       }
+      for (const frameId of frames) {
+        if (Date.now() >= until || asked++ >= 40) break;
+        try {
+          const { executionContextId } = await session.send("Page.createIsolatedWorld", { frameId, worldName: GUARD_WORLD }, left());
+          const { result = {} } = await session.send("Runtime.evaluate", { expression: "(globalThis.easyfontkitTried || []).slice(0, 20)", contextId: executionContextId, returnByValue: true }, left());
+          for (const url of Array.isArray(result.value) ? result.value : []) if (typeof url === "string") found.push({ url: url.slice(0, 300), how: "cancelled" });
+        } catch (err) {
+          if (err.timedOut || err.closed) break;
+          // A frame between two documents, gone, or one of another site's
+          // that this session does not hold, asked through its own.
+        }
+      }
+    } catch {
+      // A session that does not answer, or has closed.
     }
-  } catch {
-    // A tab that does not answer, or has closed.
   }
   return found;
+}
+
+// The frames of other sites a session's page or frame has, each of which
+// runs apart from it, in a process of its own that the page's guard does not
+// reach. The browser holds each before it runs anything
+// (waitForDebuggerOnStart) and lets it go once it has the guard, which its
+// own moves then meet as the page's do; its own frames of other sites are
+// held in the same way. The watchers are told of each with its session, on
+// which the browser tells what the frame does. Anything else held so, as a
+// worker, is let go of at once. A frame whose calls fail is let go of too,
+// as it would wait for good otherwise, and runs without the guard, as before.
+function guardFrames(pipe, session, frames, watchers) {
+  session.on("Target.attachedToTarget", ({ sessionId, targetInfo = {}, waitingForDebugger }) => {
+    let frame;
+    try {
+      frame = pipe.session(sessionId);
+    } catch {
+      return;
+    }
+    const go = () => (waitingForDebugger ? frame.send("Runtime.runIfWaitingForDebugger", {}, 5_000).catch(() => {}) : Promise.resolve());
+    if (targetInfo.type !== "iframe") return void go().then(() => frame.close());
+    frames.add(frame);
+    for (const watch of watchers) watch(frame);
+    guardFrames(pipe, frame, frames, watchers);
+    Promise.allSettled([
+      frame.send("Page.enable", {}, 5_000),
+      frame.send("Page.addScriptToEvaluateOnNewDocument", { source: GUARD, worldName: GUARD_WORLD }, 5_000),
+      frame.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, 5_000),
+    ]).then(go);
+  });
+  session.on("Target.detachedFromTarget", ({ sessionId }) => {
+    for (const frame of frames) {
+      if (frame.id !== sessionId) continue;
+      frames.delete(frame);
+      frame.close();
+    }
+  });
 }
 
 // Chrome keeps the socket that hands a second start of a profile over to
@@ -794,6 +839,7 @@ function connect(input, output) {
     listeners.set(sessionId, own);
     let ended = false;
     return {
+      id: sessionId,
       // A call that gets no answer in its time says so (timedOut), and
       // whether the end of the run's time cut that short (outOfTime). One on
       // a pipe that has closed fails at once (closed), where it would wait
@@ -898,6 +944,21 @@ async function openPage({ pipe, name }, { width, height }) {
     cdp = pipe.session(sessionId);
     await cdp.send("Page.enable", {}, left());
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: GUARD, worldName: GUARD_WORLD }, left());
+    // The frames of other sites, each with the guard: cdp.frames holds their
+    // sessions, and cdp.onFrame(watch) tells watch of each, those attached
+    // already and those to come. A browser that does not take the call goes
+    // on without, as before.
+    const frames = new Set();
+    const watchers = [];
+    cdp.frames = frames;
+    cdp.onFrame = (watch) => {
+      watchers.push(watch);
+      for (const frame of frames) watch(frame);
+    };
+    guardFrames(pipe, cdp, frames, watchers);
+    await cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, left()).catch((err) => {
+      if (err.timedOut || err.closed) throw err;
+    });
     await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }, left());
     const { userAgent = "" } = await pipe.send("Browser.getVersion", {}, left()).catch((err) => {
       if (err.timedOut) throw err;

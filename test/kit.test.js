@@ -2788,6 +2788,47 @@ test("a page's own move to an address that is not a web address is cancelled in 
   }
 });
 
+// A frame of another site runs apart from the page, in a process of its
+// own, which the page's guard does not reach: it is held as it starts until
+// it has a guard of its own.
+test("a frame of another site, which runs apart from the page, gets the guard too: its own move to an address that is not a web address is cancelled before the browser acts on it, on every system, and noted as not opened", { skip: noBrowser, timeout: 180_000 }, async (t) => {
+  const page = (body) => `<!doctype html><html><head><title>Mail</title></head><body><h1>Write to us</h1><p>A page that wants you to write.</p>${body}</body></html>`;
+  const routes = { "/far": { body: page('<script>setTimeout(() => (location.href = "mailto:far@example.com"), 200);</script>') } };
+  const { server, origin } = await serve(routes);
+  t.after(() => server.close());
+  // Another site: the same server by another name.
+  routes["/far-frame"] = { body: page(`<iframe src="${origin.replace("127.0.0.1", "localhost")}/far" style="width:1px;height:1px;border:0"></iframe>`) };
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-farframe-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const { env, started } = recordingHandlers(parent);
+  const saved = { ...process.env };
+  Object.assign(process.env, env);
+  for (const name of Object.keys(saved)) if (!(name in env)) delete process.env[name];
+  let chrome;
+  try {
+    setTimeLimit(60_000);
+    chrome = await launch({ width: 800, height: 600 });
+    const cdp = await openPage(chrome, { width: 800, height: 600 });
+    await navigate(cdp, `${origin}/far-frame`);
+    let tried = [];
+    for (let waited = 0; waited < 15_000 && !tried.length; waited += 500) {
+      await sleep(500);
+      tried = await triedSoFar(cdp);
+    }
+    assert.deepEqual(tried, [{ url: "mailto:far@example.com", how: "cancelled" }]);
+    cdp.close();
+  } finally {
+    if (chrome) await chrome.close();
+    for (const name of Object.keys(process.env)) if (!(name in saved)) delete process.env[name];
+    Object.assign(process.env, saved);
+    setTimeLimit(120_000);
+  }
+  const result = await run([`${origin}/far-frame`, "--out", path.join(parent, "kit"), "--json"], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).notes, ["The page tried to open mailto:far@example.com, which is not a web address: it was not opened."]);
+  assert.equal(started(), "", "no program of the machine was started");
+});
+
 test("the browser listens on no port, so no other program on the machine can read or drive it, and is driven over its pipe", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-port-"));
   const saved = process.env.TMPDIR;

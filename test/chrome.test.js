@@ -384,7 +384,7 @@ test("a browser slow to open its page gets it opened, and one that does not open
   const started = Date.now();
   const cdp = await openPage({ pipe: late.pipe, name: "chrome" }, SCREEN);
   assert.ok(Date.now() - started >= 10_000, `opened after ${Date.now() - started} ms`);
-  assert.deepEqual(late.sent(), ["browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Page.addScriptToEvaluateOnNewDocument", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"]);
+  assert.deepEqual(late.sent(), ["browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Page.addScriptToEvaluateOnNewDocument", "tab Target.setAutoAttach", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"]);
   cdp.close();
   // The tab that is not made, the session that is not given for it, and
   // its first call that gets no answer, with three seconds left.
@@ -653,7 +653,7 @@ test("a browser that stops answering once it has started, or quits, ends the run
   const stopped = "chrome stopped answering, so no kit was made. The machine may be busy; try again.";
   // The calls that start the browser and open its tab, and those after
   // them.
-  const opening = ["browser Browser.setDownloadBehavior", "browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Page.addScriptToEvaluateOnNewDocument", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"];
+  const opening = ["browser Browser.setDownloadBehavior", "browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Page.addScriptToEvaluateOnNewDocument", "tab Target.setAutoAttach", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"];
   for (const [what, options, timeLimit, calls, message] of [
     // A call that gets no answer until the run's time is out, and the
     // browser itself, asked then.

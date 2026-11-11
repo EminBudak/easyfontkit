@@ -2733,10 +2733,14 @@ test("no page makes the browser start a program of this machine, by moving to ma
     const moves = await run([`${origin}/moves`, "--out", path.join(parent, "moves"), "--json"], env);
     assert.equal(moves.status, 0, moves.stderr);
     const { notes } = JSON.parse(moves.stdout);
-    for (const url of ["mailto:hello@example.com?subject=Hi", "mailto:window@example.com", "news:comp.lang.c"]) {
-      assert.ok(notes.includes(`The page tried to open ${url}, which is not a web address: it was not opened.`), notes.join("\n"));
-    }
-    // A fourth, the frame's redirect, is counted past the first three.
+    // The first three of the four the page tried are named, in the order
+    // the browser told of them, which a busy machine can change, and the
+    // fourth is counted past them.
+    const four = ["mailto:hello@example.com?subject=Hi", "mailto:window@example.com", "news:comp.lang.c", "mailto:frame@example.com"];
+    const named = notes.map((note) => /^The page tried to open (.+), which is not a web address: it was not opened\.$/.exec(note)).filter(Boolean).map(([, url]) => url);
+    assert.equal(named.length, 3, notes.join("\n"));
+    assert.equal(new Set(named).size, 3, notes.join("\n"));
+    for (const url of named) assert.ok(four.includes(url), `${url}\n${notes.join("\n")}`);
     assert.ok(notes.includes("It tried 1 more address that is not a web address as well."), notes.join("\n"));
     const refresh = await run([`${origin}/refresh`, "--out", path.join(parent, "refresh"), "--json"], env);
     assert.equal(refresh.status, 0, refresh.stderr);

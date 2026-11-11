@@ -2569,7 +2569,8 @@ function listening(named, tables = ["/proc/net/tcp", "/proc/net/tcp6"]) {
 // started, so that no test starts the user's own mail program, as a test of
 // another kit's code once did on a desktop. Nor does a test run with a
 // display or a session bus to reach, through which the desktop could open
-// the address another way.
+// the address another way: its session bus is a socket that is never made,
+// in a runtime folder of its own, where libdbus would look for one.
 function recordingHandlers(root) {
   const dir = path.join(root, "handlers");
   fs.mkdirSync(dir, { recursive: true });
@@ -2577,10 +2578,114 @@ function recordingHandlers(root) {
   for (const name of ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser", "gio", "kde-open", "gnome-open", "exo-open"]) {
     fs.writeFileSync(path.join(dir, name), `#!/bin/sh\necho "$0 $*" >> '${log}'\n`, { mode: 0o755 });
   }
-  const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` };
-  for (const name of ["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "BROWSER"]) delete env[name];
+  const runtime = path.join(root, "run");
+  fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
+  const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}`, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runtime, "no-bus")}`, XDG_RUNTIME_DIR: runtime };
+  for (const name of ["DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "BROWSER"]) delete env[name];
   return { env, started: () => (fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "") };
 }
+
+// A stand-in for a desktop's portal: it owns the portal's names on a bus,
+// prints each call it gets, answers it with an error and opens nothing.
+const PORTAL = `import sys
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+conn = Gio.DBusConnection.new_for_address_sync(sys.argv[1], Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+def calls(connection, message, incoming):
+    if incoming and message.get_message_type() == Gio.DBusMessageType.METHOD_CALL and message.get_destination() != "org.freedesktop.DBus":
+        print("CALL", message.get_interface(), message.get_member(), message.get_body(), flush=True)
+        connection.send_message(message.new_method_error_literal("org.freedesktop.DBus.Error.NotSupported", "stand-in portal"), Gio.DBusSendMessageFlags.NONE)
+        return None
+    return message
+conn.add_filter(calls)
+for name in ("org.freedesktop.portal.Desktop", "org.freedesktop.FileManager1"):
+    conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", GLib.Variant("(su)", (name, 4)), None, Gio.DBusCallFlags.NONE, -1, None)
+print("owned", flush=True)
+GLib.MainLoop().run()
+`;
+
+// A session bus of the test's own in `root`, that starts no service of the
+// machine's, with the stand-in portal on it, as a desktop has: { address,
+// runtime, calls, close }, calls giving each call the portal got so far.
+// null where there is no dbus-daemon or no Python with Gio.
+async function privateBus(root) {
+  const python = spawnSync("python3", ["-I", "-c", "import gi; gi.require_version('Gio', '2.0'); from gi.repository import Gio"], { stdio: "ignore" });
+  if (python.status !== 0 || spawnSync("dbus-daemon", ["--version"], { stdio: "ignore" }).status !== 0) return null;
+  const runtime = path.join(root, "bus");
+  fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
+  const socket = path.join(runtime, "bus");
+  fs.writeFileSync(path.join(runtime, "bus.conf"), `<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">\n<busconfig><type>session</type><listen>unix:path=${socket}</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>\n`);
+  fs.writeFileSync(path.join(runtime, "portal.py"), PORTAL);
+  const bare = { PATH: "/usr/bin:/bin" };
+  const daemon = spawn("dbus-daemon", [`--config-file=${path.join(runtime, "bus.conf")}`, "--nofork", "--nopidfile"], { stdio: "ignore", env: bare });
+  let portal = null;
+  const close = () => {
+    if (portal) portal.kill();
+    daemon.kill();
+  };
+  for (let waited = 0; waited < 10_000 && !fs.existsSync(socket); waited += 50) await sleep(50);
+  const address = `unix:path=${socket}`;
+  portal = spawn("python3", ["-I", path.join(runtime, "portal.py"), address], { stdio: ["ignore", "pipe", "ignore"], env: bare });
+  let said = "";
+  portal.stdout.on("data", (chunk) => (said += chunk));
+  for (let waited = 0; waited < 20_000 && !said.includes("owned"); waited += 50) await sleep(50);
+  if (!said.includes("owned")) {
+    close();
+    throw new Error("the stand-in portal did not take its names");
+  }
+  return { address, runtime, calls: () => said.split("\n").filter((line) => line.startsWith("CALL ")), close };
+}
+
+// Chrome on Linux hands a frame's mailto:, a redirect to one or a frame of
+// another site that moves to one to the desktop's portal over the session
+// bus when it finds one there, which opens the user's own mail program, and
+// never looks on PATH. The run gives the browser a bus where nothing
+// listens, whatever bus it has itself.
+test("on Linux a site's mailto: reaches no desktop portal, also when this process has a session bus with one on it: not by a frame, a frame's redirect, another site's frame that moves there, the page's own move or a redirect of the address given", { skip: noBrowser || (process.platform !== "linux" && "the desktop's portal is on Linux"), timeout: 300_000 }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-portal-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const bus = await privateBus(parent);
+  if (!bus) return t.skip("no dbus-daemon, or no Python with Gio, to make a bus with a portal on it");
+  t.after(bus.close);
+  // The bus works, and its portal writes down what it is asked to open.
+  spawnSync("python3", ["-I", "-c", "import sys, gi; gi.require_version('Gio', '2.0'); from gi.repository import Gio, GLib; c = Gio.DBusConnection.new_for_address_sync(sys.argv[1], Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None); c.call_sync('org.freedesktop.portal.Desktop', '/org/freedesktop/portal/desktop', 'org.freedesktop.portal.OpenURI', 'OpenURI', GLib.Variant('(ssa{sv})', ('', 'mailto:control@example.com', {})), None, Gio.DBusCallFlags.NONE, 5000, None)", bus.address], { stdio: "ignore", timeout: 10_000, env: { PATH: "/usr/bin:/bin" } });
+  for (let waited = 0; waited < 5_000 && !bus.calls().length; waited += 50) await sleep(50);
+  assert.equal(bus.calls().length, 1);
+  assert.match(bus.calls()[0], /OpenURI OpenURI \('', 'mailto:control@example\.com'/);
+  const page = (body) => `<!doctype html><html><head><title>Mail</title></head><body><h1>Write to us</h1><p>A page that wants you to write.</p>${body}</body></html>`;
+  const frame = (src) => `<iframe src="${src}" style="width:1px;height:1px;border:0"></iframe>`;
+  const routes = {
+    "/frame": { body: page(frame("mailto:frame@example.com?subject=Hi")) },
+    "/frame-redirect": { body: page(frame("/to-mail-frame")) },
+    "/to-mail-frame": { status: 302, headers: { location: "mailto:frame-redirect@example.com" } },
+    "/far": { body: page('<script>setTimeout(() => (location.href = "mailto:far@example.com"), 200);</script>') },
+    "/moves": { body: page('<script>location.href = "mailto:own@example.com";</script>') },
+    "/to-mail": { status: 302, headers: { location: "mailto:redirect@example.com" } },
+  };
+  const { server, origin } = await serve(routes);
+  t.after(() => server.close());
+  // Another site: the same server by another name, whose frame runs apart
+  // from the page, with no guard of the kit's in it.
+  routes["/far-frame"] = { body: page(frame(`${origin.replace("127.0.0.1", "localhost")}/far`)) };
+  const { env, started } = recordingHandlers(parent);
+  Object.assign(env, { DBUS_SESSION_BUS_ADDRESS: bus.address, XDG_RUNTIME_DIR: bus.runtime });
+  // Each way in a browser of its own: a browser that has handed one such
+  // address on holds back the next ones for a while.
+  for (const [way, route, status] of [
+    ["a frame", "/frame", 0],
+    ["a frame's redirect", "/frame-redirect", 0],
+    ["another site's frame that moves there", "/far-frame", 0],
+    ["the page's own move", "/moves", 0],
+    ["a redirect of the address given", "/to-mail", 1],
+  ]) {
+    const result = await run([`${origin}${route}`, "--out", path.join(parent, route.slice(1)), "--json"], env);
+    assert.equal(result.status, status, `${way}: ${result.stderr}`);
+    if (way === "a frame" || way === "the page's own move") assert.match(JSON.parse(result.stdout).notes.join("\n"), /The page tried to open mailto:(frame|own)@example\.com.*, which is not a web address: it was not opened\./, way);
+    assert.deepEqual(bus.calls().slice(1), [], `the browser did not reach the bus for ${way}`);
+    assert.equal(started(), "", `nothing started for ${way}`);
+  }
+});
 
 // A page that goes to mailto: as it loads, by a script and by a refresh,
 // asks for a window at one and has a frame at news:, which Chrome on Linux

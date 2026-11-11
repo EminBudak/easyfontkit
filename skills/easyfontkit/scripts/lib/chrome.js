@@ -18,13 +18,18 @@ const { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, end
 const open = new Set();
 
 // The programs Chrome on Linux hands an address it does not open itself to,
-// such as mailto:, news: and snews:, without asking: xdg-settings, which it
+// such as mailto:, news: and snews:, without asking, when it finds no
+// desktop portal to hand it to over the session bus: xdg-settings, which it
 // asks first whether it is itself the program for such addresses, then
 // xdg-email for mailto: and xdg-open for the rest, and the browsers
 // xdg-open goes on to. It finds each by its name on PATH. On macOS and
 // Windows it asks the system instead.
 const HANDLERS = ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser"];
 const STAND_INS = process.platform !== "darwin" && process.platform !== "win32";
+
+// A path as a D-Bus address writes it: each byte but a letter, a digit and
+// -_/.\* as %xx.
+const busPath = (file) => Array.from(Buffer.from(file, "utf8"), (byte) => (/[-0-9A-Za-z_/.\\*]/.test(String.fromCharCode(byte)) ? String.fromCharCode(byte) : `%${byte.toString(16).padStart(2, "0")}`)).join("");
 
 // A folder in the profile of stand-ins for those programs, which goes first
 // on the browser's PATH, so that the system finds them before the real
@@ -455,19 +460,32 @@ async function launch({ width, height }) {
   const { profile, env = process.env, ...where } = tempOf(fresh);
   const started = { child: null, profile, singleton: "", crashHandler: null, made: { "": [] } };
   // A site can send the browser to mailto:, news: or snews:, which Chrome on
-  // Linux hands to a program of the machine through PATH without asking: the
-  // mail program, started as the user who runs the kit, with what the site
-  // wrote in the address, or on a server that runs the kit for others,
-  // xdg-open as its user. The stand-ins come first on its PATH, and the rest
-  // stays as it was. On macOS and Windows the browser asks the system, and
-  // the guard each page gets (openPage) is what holds there.
+  // Linux hands on without asking: over the session bus to the desktop's
+  // portal, which opens it with the user's own mail program, and with no
+  // portal to ask, to a program of the machine it finds through PATH, as the
+  // user who runs the kit, or on a server that runs the kit for others,
+  // xdg-open as its user, with what the site wrote in the address. So the
+  // browser gets a session bus where nothing listens, a socket in its
+  // profile that is never made (unset, the bus is looked for in
+  // XDG_RUNTIME_DIR, where the desktop's is), no display, as it draws on
+  // none, and the stand-ins first on its PATH, the rest of PATH as it was.
+  // On macOS and Windows the browser asks the system, and the guard each
+  // page gets (openPage) is what holds there.
   let config;
   try {
     config = downloadsIn(profile, started.made);
-    if (STAND_INS) config.PATH = [standIns(profile, started.made), process.env.PATH || "/usr/bin:/bin"].join(path.delimiter);
+    if (STAND_INS) {
+      config.PATH = [standIns(profile, started.made), process.env.PATH || "/usr/bin:/bin"].join(path.delimiter);
+      config.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath(path.resolve(profile, "no-bus"))}`;
+    }
   } catch (err) {
     removeProfile(started, 10, 100);
     throw unmade(err);
+  }
+  const browserEnv = { ...env, ...config, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") };
+  if (STAND_INS) {
+    delete browserEnv.DISPLAY;
+    delete browserEnv.WAYLAND_DISPLAY;
   }
   let child;
   try {
@@ -491,7 +509,7 @@ async function launch({ width, height }) {
         ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
         "about:blank",
       ],
-      { stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"], ...where, env: { ...env, ...config, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
+      { stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"], ...where, env: browserEnv },
     );
   } catch (error) {
     // Node gives some errors at once, as for a path that changed since it

@@ -180,6 +180,53 @@ test("on Linux, the browser's PATH starts with a folder in its profile of stand-
   await check({ TMPDIR: mount }, wrap);
 });
 
+test("on Linux, the browser starts with a session bus where nothing listens, a socket in its profile that is never made, and with no display, whatever bus and display this process has, so it cannot hand an address to the desktop's portal", { skip: !STAND_INS && "Chrome asks the system on macOS and Windows" }, async (t) => {
+  // A temp folder whose path has a space and a comma in it, which a D-Bus
+  // address writes as %20 and %2c.
+  const parent = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-bus-")), "te mp,1");
+  fs.mkdirSync(parent);
+  t.after(() => fs.rmSync(path.dirname(parent), { recursive: true, force: true }));
+  // A bus of this process's that a connection would reach, as a desktop's
+  // session bus is, and a display.
+  const desktop = path.join(path.dirname(parent), "desktop-bus");
+  const listening = require("node:net").createServer().listen(desktop);
+  await new Promise((resolve) => listening.once("listening", resolve));
+  t.after(() => listening.close());
+  // A browser that writes down the bus it was given, whether anything is at
+  // the path that address names, and its display, then quits.
+  const seen = path.join(path.dirname(parent), "seen");
+  const chrome = path.join(path.dirname(parent), "chrome");
+  fs.writeFileSync(
+    chrome,
+    `#!/bin/bash
+bus=$(printf '%b' "$(printf '%s' "\${DBUS_SESSION_BUS_ADDRESS#unix:path=}" | sed 's/%/\\\\x/g')")
+{ printf '%s\\n' "$DBUS_SESSION_BUS_ADDRESS"; [ -e "$bus" ] && echo there || echo nothing; printf '%s|%s\\n' "\${DISPLAY-unset}" "\${WAYLAND_DISPLAY-unset}"; } > ${JSON.stringify(seen)}
+exit 3
+`,
+    { mode: 0o755 },
+  );
+  const names = ["CHROME_PATH", "TMPDIR", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY"];
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: parent, DBUS_SESSION_BUS_ADDRESS: `unix:path=${desktop}`, DISPLAY: ":99", WAYLAND_DISPLAY: "wayland-99" });
+  setTimeLimit(30_000);
+  await assert.rejects(launch({ width: 800, height: 600 }), /ended before it answered: it printed nothing and exited with 3\./);
+  const [address, there, display] = fs.readFileSync(seen, "utf8").trim().split("\n");
+  const profile = /^unix:path=(.+)\/no-bus$/.exec(address);
+  assert.ok(profile, address);
+  assert.doesNotMatch(address, /[ ,]/, "a space and a comma are written as %xx");
+  assert.equal(path.dirname(decodeURIComponent(profile[1])), parent);
+  assert.match(path.basename(decodeURIComponent(profile[1])), /^easyfontkit-chrome-/);
+  assert.equal(there, "nothing", "the bus the browser was given leads nowhere");
+  assert.equal(display, "unset|unset", "the browser has no display");
+  assert.deepEqual(fs.readdirSync(parent), [], "the profile went");
+});
+
 test("Chrome's component updater is sent to a closed port, so it downloads nothing during a run", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-args-"));
   const saved = process.env.CHROME_PATH;

@@ -352,6 +352,17 @@ test("a script in the browser's place that could not start what it runs, as a la
   // One that says first what Chrome tells or warns of as it starts, then
   // what is wrong: its words are those quoted.
   cases.push([...by(put(root, "warns", "#!/bin/sh\necho '[1111/052926.234058:WARNING:chrome/app/chrome_main_linux.cc:84] Read channel stable from /opt/google/chrome/CHROME_VERSION_EXTRA' >&2\necho 'the real trouble' >&2\nexit 4\n")), `chrome did not start: CHROME_PATH is ${at("warns", "chrome")}, which ended before it answered: it printed "the real trouble" and exited with 4. ${POINT}`]);
+  // One that says first what Chrome's D-Bus code says as it starts with the
+  // session bus the run gives it, where nothing listens, then what is
+  // wrong: its words are those quoted. One that says nothing else has
+  // ended, with no line quoted, as those lines are not why.
+  const bus = [
+    "[3425813:3426008:1111/084920.176503:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Failed to connect to socket /tmp/easyfontkit-chrome-x/no-bus: No such file or directory",
+    "[3425813:3425813:1111/084920.444840:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+  ];
+  const busLines = bus.map((line) => `echo '${line}' >&2\n`).join("");
+  cases.push([...by(put(root, "bus", `#!/bin/sh\n${busLines}echo 'the real trouble' >&2\nexit 4\n`)), `chrome did not start: CHROME_PATH is ${at("bus", "chrome")}, which ended before it answered: it printed "the real trouble" and exited with 4. ${POINT}`]);
+  cases.push([...by(put(root, "busonly", `#!/bin/sh\n${busLines}exit 5\n`)), `chrome did not start: CHROME_PATH is ${at("busonly", "chrome")}, which ended before it answered: it exited with 5. ${POINT}`]);
   // One that closes the pipe it is driven through and goes on, which the
   // run then stops.
   cases.push([...by(put(root, "closer", '#!/bin/sh\necho "closing the pipe" >&2\nexec 3<&- 4>&-\nexec sleep 30\n')), `chrome did not start: CHROME_PATH is ${at("closer", "chrome")}, which closed its pipe before it answered, having printed "closing the pipe". ${POINT}`]);

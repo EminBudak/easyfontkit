@@ -343,18 +343,23 @@ function quoted(line) {
 // how grave it is and where in Chrome's code, in brackets. One whose
 // gravity is FATAL ended the browser.
 const LOG = /^\[[^\]]*?:(FATAL|ERROR|WARNING|INFO|VERBOSE\d*):[^\]]*\]\s*/;
+// A line of Chrome's log from its D-Bus code that is not the one that ended
+// it, as "Failed to connect to the bus": the browser is started with a
+// session bus where nothing listens (see launch), and says so as it starts.
+const BUS = /^\[[^\]]*?:(ERROR|WARNING|INFO|VERBOSE\d*):dbus\//;
 
 // The line of what a program printed to quote when it ended before it
 // answered: the first line of Chrome's log that ended it, else the first
 // line with anything in it that is not a line of Chrome's log that only
 // tells or warns, as Chrome 157 starts by saying which channel it is, else
-// the first line with anything in it, or "". The head of a line of Chrome's
-// log is left out, and the rest of the line is as it was printed.
+// the first line with anything in it, or "". A line of Chrome's D-Bus code
+// that did not end it is never the one. The head of a line of Chrome's log
+// is left out, and the rest of the line is as it was printed.
 function causeLine(text) {
   const lines = String(text || "")
     .split("\n")
     .map((line) => line.replace(/\r$/, ""))
-    .filter((line) => line.trim());
+    .filter((line) => line.trim() && !BUS.test(line));
   const grave = (line) => (LOG.exec(line) || [])[1];
   const line = lines.find((one) => grave(one) === "FATAL") || lines.find((one) => !/^(INFO|WARNING|VERBOSE\d*)$/.test(grave(one) || "")) || lines[0] || "";
   return line.replace(LOG, "").trim() || line.trim();
@@ -402,16 +407,18 @@ function couldNotStart(place, err) {
 // The message for a browser that ended before it answered on its pipe,
 // having printed `stderr` and `stdout`, with the exit status `code` or the
 // signal that stopped it: the line of what it printed that causeLine picks,
-// quoted, and how it ended. When its words say that its sandbox could not
-// start, what lets a sandbox start comes too. `closed` says that it closed its pipe and
-// was still running, so the run stopped it.
+// quoted, and how it ended. One that printed only lines of Chrome's D-Bus
+// code is said to have ended, with no line. When its words say that its
+// sandbox could not start, what lets a sandbox start comes too. `closed`
+// says that it closed its pipe and was still running, so the run stopped
+// it.
 function endedEarly(place, { stderr = "", stdout = "", code = null, signal = null, closed = false } = {}) {
   const line = causeLine(stderr) || causeLine(stdout);
   const more = sandboxSaid(stderr) || sandboxSaid(stdout) ? SANDBOX : "";
   if (closed) return didNotStart(place, `closed its pipe before it answered${line ? `, having printed ${quoted(line)}` : ""}`, more);
   const exited = code !== null && code !== undefined;
   const end = exited ? `exited with ${code}` : `was stopped by ${signal}`;
-  const how = line ? `it printed ${quoted(line)} and ${end}` : exited ? `it printed nothing and ${end}` : `it ${end}`;
+  const how = line ? `it printed ${quoted(line)} and ${end}` : exited && !/\S/.test(stderr + stdout) ? `it printed nothing and ${end}` : `it ${end}`;
   return didNotStart(place, `ended before it answered: ${how}`, more);
 }
 

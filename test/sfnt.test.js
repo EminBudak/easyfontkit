@@ -4,7 +4,20 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { describeFont, glyphsOf } = require("../skills/easyfontkit/scripts/lib/sfnt");
 const zlib = require("node:zlib");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { fixture, interAs, packedZeros, woff2With, woffWith } = require("./helpers");
+
+// What `script` prints as JSON, run in a Node.js process of its own with the
+// heap given, in megabytes, and killed after `seconds`: a test of what a
+// file costs, which on code that has no bound would take minutes or all the
+// memory there is, ends in that time and fails.
+function measured(script, { heap = 256, seconds = 60 } = {}) {
+  const setup = `const { describeFont, glyphsOf } = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/sfnt"))});\nconst { interAs } = require(${JSON.stringify(path.join(__dirname, "helpers"))});\n`;
+  const run = spawnSync(process.execPath, [`--max-old-space-size=${heap}`, "-e", setup + script], { encoding: "utf8", timeout: seconds * 1000 });
+  assert.equal(run.status, 0, `${run.error || ""} ${run.signal || ""} ${run.stderr}`);
+  return JSON.parse(run.stdout);
+}
 
 test("reads WOFF2 and WOFF alike: names, license link, embedding and the measurements", () => {
   const woff2 = describeFont(fixture("inter-latin-400.woff2"));
@@ -157,4 +170,44 @@ test("a font file's cmap says which characters it has glyphs for", () => {
     assert.deepEqual([..."日本🌱"].map((c) => has(c.codePointAt(0))), [false, false, false]);
   }
   assert.equal(glyphsOf(Buffer.from("<html>not found</html>")), null);
+});
+
+test("a font file's name table costs a run a moment and little memory however many records it has, as a page can serve one of 65535 records that each point at the same 64 KB in a file of a few kilobytes: only the names easyfontkit reads are decoded, a few times each at most, each kept to its first 2000 characters, and of the names Chrome can name a face by, 200 at most", () => {
+  const result = measured(`
+// 65535 records, each with a name ID of its own or all with ID 1 (the
+// family), whose strings start where the records do, 64 KB long or 100
+// bytes long at offsets of their own.
+function names(count, { id, length, step = 0 }) {
+  const table = Buffer.alloc(6 + count * 12);
+  table.writeUInt16BE(count, 2);
+  table.writeUInt16BE(6, 4);
+  for (let i = 0; i < count; i++) {
+    const at = 6 + i * 12;
+    table.writeUInt16BE(3, at);
+    table.writeUInt16BE(1, at + 2);
+    table.writeUInt16BE(0x409, at + 4);
+    table.writeUInt16BE(id === undefined ? i : id, at + 6);
+    table.writeUInt16BE(length, at + 8);
+    table.writeUInt16BE((i * step) % 60000, at + 10);
+  }
+  return table;
+}
+const fonts = [interAs({ name: names(65535, { length: 65534 }) }), interAs({ name: names(65535, { id: 1, length: 100, step: 7 }) })];
+const out = [];
+for (const font of fonts) {
+  global.gc && global.gc();
+  const before = process.memoryUsage().heapUsed;
+  const started = Date.now();
+  const read = describeFont(font);
+  out.push({ ms: Date.now() - started, heap: process.memoryUsage().heapUsed - before, names: read.names.length, license: read.license.length, copyright: read.copyright.length, kept: read });
+}
+console.log(JSON.stringify(out.map(({ kept, ...rest }) => rest)));
+`);
+  for (const [i, { ms, heap, names, license, copyright }] of result.entries()) {
+    assert.ok(ms < 5_000, `font ${i}: ${ms} ms`);
+    assert.ok(heap < 32 * 1024 * 1024, `font ${i}: the heap grew by ${Math.round(heap / 1024 / 1024)} MB`);
+    assert.ok(names <= 200, `font ${i}: ${names} names kept`);
+    assert.ok(license <= 2000 && copyright <= 2000, `font ${i}: a license of ${license} and a copyright of ${copyright} characters`);
+  }
+  assert.ok(result[0].license > 1000, "a long name keeps its first 2000 characters");
 });

@@ -135,36 +135,60 @@ function readTables(buf) {
   throw new Error("not a font file");
 }
 
-// Name records, Windows English first, then any Windows, then Mac Roman.
-// Every string the table holds, on any platform and in any language, also
-// goes into `all` when given: Chrome can name a face by any of them.
+// The names easyfontkit reads of a file, by their name ID: its copyright,
+// family, style, full name, PostScript name, maker, designer, the maker's
+// and the designer's links, its license and the license's link, and its
+// typographic family and style. The rest, as a description or sample text,
+// is never decoded.
+const READ = new Set([0, 1, 2, 4, 6, 8, 9, 11, 12, 13, 14, 16, 17]);
+// The names Chrome can name a face by, in any language: its family, full
+// name and PostScript name, and its typographic and WWS family.
+const FACE_NAMES = new Set([1, 4, 6, 16, 21]);
+// What is kept of a name: its first 2000 characters, which hold the whole
+// of any of them but a license written out whole, and of the names Chrome
+// can name a face by, the first 200 of at most 100 characters each, out of
+// the first 2000 records that hold one. A name table can have 65535 records
+// that each point at the same 64 KB, in a file of a few kilobytes.
+const LONGEST = 2_000;
+const FACES_KEPT = 200;
+const FACES_READ = 2_000;
+
+// A name record's bytes as text: UTF-16 on the Unicode and Windows
+// platforms, a byte a character on the Mac's.
+const decode = (platform, raw) => (platform === 1 ? raw.toString("latin1") : Buffer.from(raw.subarray(0, raw.length - (raw.length % 2))).swap16().toString("utf16le"));
+
+// Name records, Windows English first, then any Windows, then Mac Roman,
+// each decoded only when it is one easyfontkit reads and better than the one
+// it has. The names Chrome can name a face by, on any platform and in any
+// language, also go into `all` when given.
 function readNames(table, all) {
   const names = {};
   if (!table || table.length < 6) return names;
   const count = table.readUInt16BE(2);
   const strings = table.readUInt16BE(4);
   const rank = {};
+  let faces = 0;
   for (let i = 0; i < count; i++) {
     const record = 6 + i * 12;
     if (record + 12 > table.length) break;
     const platform = table.readUInt16BE(record);
+    if (platform !== 0 && platform !== 1 && platform !== 3) continue;
     const language = table.readUInt16BE(record + 4);
     const id = table.readUInt16BE(record + 6);
     const length = table.readUInt16BE(record + 8);
     const start = strings + table.readUInt16BE(record + 10);
     if (start + length > table.length) continue;
-    const raw = table.subarray(start, start + length);
-    let text;
-    if (platform === 3 || platform === 0) {
-      text = "";
-      for (let k = 0; k + 1 < raw.length; k += 2) text += String.fromCharCode(raw.readUInt16BE(k));
-    } else if (platform === 1) {
-      text = raw.toString("latin1");
-    } else continue;
-    if (all && text.trim() && text.length <= 100) all.add(text.trim());
     const score = platform === 3 && language === 0x409 ? 3 : platform === 3 ? 2 : 1;
-    if (!(id in names) || score > rank[id]) {
-      names[id] = text.trim();
+    const better = READ.has(id) && (!(id in names) || score > rank[id]);
+    const face = all && FACE_NAMES.has(id) && length <= 200 && all.size < FACES_KEPT && faces < FACES_READ;
+    if (!better && !face) continue;
+    const text = decode(platform, table.subarray(start, start + Math.min(length, platform === 1 ? LONGEST : LONGEST * 2))).trim();
+    if (face) {
+      faces++;
+      if (text && text.length <= 100) all.add(text);
+    }
+    if (better) {
+      names[id] = text;
       rank[id] = score;
     }
   }

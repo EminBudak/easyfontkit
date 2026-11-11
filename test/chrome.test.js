@@ -244,22 +244,46 @@ exit 3
   assert.deepEqual(fs.readdirSync(parent), [], "the profile went");
 });
 
-test("on Linux, a temp folder whose path has a : in it, which parts the folders of PATH, stops the run before the browser starts, with nothing made there and no out folder, as the stand-ins could not come first on the browser's PATH", { skip: ["darwin", "win32"].includes(process.platform) && "the stand-ins are for Linux" }, (t) => {
+test("on Linux, a temp folder whose path has a : in it, which parts the folders of PATH, stops the run before the browser starts, with nothing made there and no out folder, as the stand-ins could not come first on the browser's PATH: also a relative TMPDIR, by the whole path it names from a folder whose path has one, and a stand-ins' folder that has one however it came to", { skip: ["darwin", "win32"].includes(process.platform) && "the stand-ins are for Linux" }, (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-colon-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
-  const temp = path.join(parent, "job:1");
-  fs.mkdirSync(temp);
   // A browser that writes down that it was started.
   const started = path.join(parent, "started");
   const chrome = path.join(parent, "chrome");
   fs.writeFileSync(chrome, `#!/bin/sh\necho started >> ${JSON.stringify(started)}\n`, { mode: 0o755 });
-  const out = path.join(parent, "out");
-  const run = spawnSync(process.execPath, [path.resolve(__dirname, "../skills/easyfontkit/scripts/easyfontkit.js"), "http://127.0.0.1:9/", "--out", out], { encoding: "utf8", env: { ...process.env, CHROME_PATH: chrome, TMPDIR: temp }, timeout: 60_000 });
-  assert.equal(run.status, 1, run.stderr);
-  assert.equal(run.stderr, `easyfontkit: chrome did not start: the temp folder's path, ${temp}, has a : in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.\n`);
-  assert.equal(fs.existsSync(started), false, "the browser was not started");
-  assert.deepEqual(fs.readdirSync(temp), [], "nothing was made in the temp folder");
-  assert.equal(fs.existsSync(out), false, "no out folder");
+  const parts = (what, folder) => `easyfontkit: chrome did not start: ${what}, ${folder}, has a : in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.\n`;
+  // Runs the kit from `cwd` with TMPDIR `given`, the temp folder `temp`
+  // being where that leads, and node given `node` before the script: it
+  // stops with 1 and starts no browser, and nothing is left in the temp
+  // folder and no out folder is made. Gives what it printed.
+  const refused = (cwd, given, temp, node = []) => {
+    fs.mkdirSync(temp, { recursive: true });
+    const out = path.join(parent, "out");
+    const run = spawnSync(process.execPath, [...node, path.resolve(__dirname, "../skills/easyfontkit/scripts/easyfontkit.js"), "http://127.0.0.1:9/", "--out", out], { cwd, encoding: "utf8", env: { ...process.env, CHROME_PATH: chrome, TMPDIR: given }, timeout: 60_000 });
+    assert.equal(run.status, 1, run.stderr);
+    assert.equal(fs.existsSync(started), false, "the browser was not started");
+    assert.deepEqual(fs.readdirSync(temp), [], "nothing was left in the temp folder");
+    assert.equal(fs.existsSync(out), false, "no out folder");
+    return run.stderr;
+  };
+  const temp = path.join(parent, "job:1");
+  assert.equal(refused(parent, temp, temp), parts("the temp folder's path", temp));
+  // A relative TMPDIR is the folder of that name in the one the run was
+  // started in, whose path has the :, and so has the stand-ins' folder in
+  // it: it is named by that whole path.
+  const work = path.join(parent, "work:2");
+  assert.equal(refused(work, "tmp", path.join(work, "tmp")), parts("the temp folder's path", path.join(work, "tmp")));
+  // A profile whose own name has one, which no run makes today: the
+  // stand-ins' folder in it is refused as it goes on PATH, named by its
+  // path, and the profile goes.
+  const plain = path.join(parent, "plain");
+  const preload = path.join(parent, "colon-profile.js");
+  fs.writeFileSync(preload, 'const fs = require("node:fs");\nconst made = fs.mkdtempSync;\nfs.mkdtempSync = (prefix, ...rest) => {\n  const dir = made(prefix, ...rest);\n  if (!String(prefix).includes("easyfontkit-chrome-")) return dir;\n  fs.renameSync(dir, `${dir}:x`);\n  return `${dir}:x`;\n};\n');
+  const said = refused(plain, plain, plain, ["-r", preload]);
+  const folder = /the path of the stand-ins' folder, (.+), has a : in it/.exec(said);
+  assert.ok(folder, said);
+  assert.match(folder[1], new RegExp(`^${plain.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/easyfontkit-chrome-\\w+:x/stand-ins$`));
+  assert.equal(said, parts("the path of the stand-ins' folder", folder[1]));
 });
 
 test("on Linux, a temp folder on a disk that takes no links, as a FAT or exFAT disk, stops the run before the browser starts and says the stand-ins need one that does, with nothing left there", { skip: ["darwin", "win32"].includes(process.platform) && "the stand-ins are for Linux" }, (t) => {

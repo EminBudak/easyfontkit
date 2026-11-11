@@ -499,22 +499,26 @@ async function launch({ width, height }) {
   if (!place) throw new Error(NOTHING);
   if (place.what) throw new Error(cannotStart(place));
   const { file: binary, name } = place;
+  // The temp folder by its whole path: a relative TMPDIR names a folder in
+  // the one easyfontkit was started in, and the stand-ins' folder in it goes
+  // on the browser's PATH by its whole path (see below).
+  const temp = path.resolve(os.tmpdir());
   // The folders of PATH are parted by its delimiter, so the folder of
   // stand-ins in a temp folder whose path has one in it could not come first
-  // on the browser's PATH (see below), and the browser would find the real
-  // programs. Such a run starts nothing.
-  if (STAND_INS && os.tmpdir().includes(path.delimiter)) {
-    throw new Error(`${name} did not start: the temp folder's path, ${os.tmpdir()}, has a ${path.delimiter} in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.`);
-  }
+  // on the browser's PATH, and the browser would find the real programs.
+  // Such a run starts nothing. The stand-ins' folder is looked at again as
+  // it goes on PATH, so no other way to it can bring one in.
+  const parted = (what, folder) => new Error(`${name} did not start: ${what}, ${folder}, has a ${path.delimiter} in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.`);
+  if (STAND_INS && temp.includes(path.delimiter)) throw parted("the temp folder's path", temp);
   // A profile that cannot be made, as in a temp folder that is not there, may
   // not be written in or is full, or for want of file descriptors, stops the
   // run before the browser is started, and so do stand-ins the temp folder's
   // disk takes no links for.
   const unmade = (err) => {
-    const temp = process.platform === "win32" ? "TEMP" : "TMPDIR";
-    if (SHORT[err.code]) return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${os.tmpdir()}, as ${SHORT[err.code]}.`);
-    if (err.noLinks) return new Error(`${name} did not start: the stand-ins that keep a site from starting a program of this machine are links, and the disk of the temp folder ${os.tmpdir()} takes none (${worded(err)}). Set ${temp} to a folder on a disk that takes links.`);
-    return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${os.tmpdir()} (${worded(err)}). Set ${temp} to a folder this user may write in, with room to spare.`);
+    const variable = process.platform === "win32" ? "TEMP" : "TMPDIR";
+    if (SHORT[err.code]) return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${temp}, as ${SHORT[err.code]}.`);
+    if (err.noLinks) return new Error(`${name} did not start: the stand-ins that keep a site from starting a program of this machine are links, and the disk of the temp folder ${temp} takes none (${worded(err)}). Set ${variable} to a folder on a disk that takes links.`);
+    return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${temp} (${worded(err)}). Set ${variable} to a folder this user may write in, with room to spare.`);
   };
   let fresh;
   try {
@@ -540,15 +544,21 @@ async function launch({ width, height }) {
   // On macOS and Windows the browser asks the system, and the guard each
   // page gets (openPage) is what holds there.
   let config;
+  let standing = "";
   try {
     config = downloadsIn(profile, started.made);
     if (STAND_INS) {
-      config.PATH = [standIns(profile, started.made), process.env.PATH || "/usr/bin:/bin"].join(path.delimiter);
+      standing = standIns(profile, started.made);
+      config.PATH = [standing, process.env.PATH || "/usr/bin:/bin"].join(path.delimiter);
       config.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath(path.resolve(profile, "no-bus"))}`;
     }
   } catch (err) {
     removeProfile(started, 10, 100);
     throw unmade(err);
+  }
+  if (standing.includes(path.delimiter)) {
+    removeProfile(started, 10, 100);
+    throw parted("the path of the stand-ins' folder", standing);
   }
   const browserEnv = { ...env, ...config, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") };
   if (STAND_INS) {

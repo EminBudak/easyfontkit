@@ -11,11 +11,103 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, sleep } = require("./time");
-const { NOTHING, chromePlace, findChrome, cannotStart, notStarted } = require("./program");
+const { NOTHING, chromePlace, findChrome, cannotStart, notStarted, runnable } = require("./program");
 
 // The browsers this process has started and not closed yet, each with its
 // profile, from the moment it is spawned.
 const open = new Set();
+
+// The programs Chrome on Linux hands an address it does not open itself to,
+// such as mailto:, news: and snews:, without asking: xdg-settings, which it
+// asks first whether it is itself the program for such addresses, then
+// xdg-email for mailto: and xdg-open for the rest, and the browsers
+// xdg-open goes on to. It finds each by its name on PATH. On macOS and
+// Windows it asks the system instead.
+const HANDLERS = ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser"];
+const STAND_INS = process.platform !== "darwin" && process.platform !== "win32";
+
+// A folder in the profile of stand-ins for those programs, which goes first
+// on the browser's PATH, so that the system finds them before the real
+// ones: each a link to the system's own true, which starts nothing and
+// exits with 0. The system runs the file a link leads to, so a temp folder
+// mounted noexec runs them too. Where there is no true this user may run,
+// each is a link to itself, which the system cannot follow: the search for
+// that name ends there, and nothing starts. Gives the folder.
+function standIns(profile) {
+  const dir = path.resolve(profile, "stand-ins");
+  fs.mkdirSync(dir);
+  const nothing = ["/usr/bin/true", "/bin/true"].find(runnable);
+  for (const name of HANDLERS) {
+    const at = path.join(dir, name);
+    fs.symlinkSync(nothing || at, at);
+  }
+  return dir;
+}
+
+// Whether an address is one the browser does not open as a page but hands
+// to a program of the machine, as mailto:, news: or a scheme of an app: any
+// with a scheme of its own that is no web address and none of the
+// browser's own.
+const handedOut = (url) => /^[a-z][a-z0-9+.-]*:/i.test(String(url || "")) && !/^(https?|about|data|blob|javascript|file|filesystem|chrome|chrome-error|chrome-extension|devtools|view-source):/i.test(String(url));
+
+// The world each document of the tab gets before its own scripts run, and
+// the guard it runs there: a move of the page, or of a frame of it that runs
+// in the same process, to an address that is not a web address, by a
+// script, a refresh, a form or a link, is cancelled before the browser acts
+// on it, on every system, and the address is kept for the kit's notes. The
+// page's own scripts cannot reach this world. A frame's first address and a
+// redirect are no move of a page's, and reach the browser: on Linux its
+// stand-ins take those (see launch).
+const GUARD_WORLD = "easyfontkit-guard";
+const GUARD = `(() => {
+  if (typeof navigation === "undefined") return;
+  const tried = (globalThis.easyfontkitTried = []);
+  const web = /^(https?|data|blob|about|javascript):$/i;
+  navigation.addEventListener("navigate", (event) => {
+    let scheme = "";
+    try {
+      scheme = new URL(event.destination.url).protocol;
+    } catch {}
+    if (web.test(scheme) || !event.cancelable) return;
+    event.preventDefault();
+    if (tried.length < 20) tried.push(String(event.destination.url).slice(0, 300));
+  });
+})();`;
+
+// The addresses the guard cancelled in the tab's page as it stands now and
+// in its frames, read from their worlds: { url, how: "cancelled" } each. A
+// page the tab has moved on from took its own with it. A frame that cannot
+// be asked, as one of another site that runs apart, is passed over. It
+// takes a few seconds at most, and stops at a call the tab does not answer,
+// as a page whose own script keeps its thread busy answers none.
+async function triedSoFar(cdp) {
+  const found = [];
+  const until = Date.now() + Math.min(3_000, Math.max(1_000, timeLeft()));
+  const left = () => Math.max(1, until - Date.now());
+  try {
+    const { frameTree } = await cdp.send("Page.getFrameTree", {}, left());
+    const frames = [];
+    for (let next = [frameTree]; next.length && frames.length < 20; ) {
+      const node = next.shift();
+      frames.push(node.frame.id);
+      next.push(...(node.childFrames || []));
+    }
+    for (const frameId of frames) {
+      if (Date.now() >= until) break;
+      try {
+        const { executionContextId } = await cdp.send("Page.createIsolatedWorld", { frameId, worldName: GUARD_WORLD }, left());
+        const { result = {} } = await cdp.send("Runtime.evaluate", { expression: "(globalThis.easyfontkitTried || []).slice(0, 20)", contextId: executionContextId, returnByValue: true }, left());
+        for (const url of Array.isArray(result.value) ? result.value : []) if (typeof url === "string") found.push({ url: url.slice(0, 300), how: "cancelled" });
+      } catch (err) {
+        if (err.timedOut || err.closed) break;
+        // A frame between two documents, or gone.
+      }
+    }
+  } catch {
+    // A tab that does not answer, or has closed.
+  }
+  return found;
+}
 
 // Chrome keeps the socket that hands a second start of a profile over to
 // the first one in a folder of its own in the temp folder, linked from the
@@ -306,9 +398,17 @@ async function launch({ width, height }) {
   const quit = (failed) => new Error(notStarted(place, failed) || `${name} did not start. Try again, or point CHROME_PATH at another browser.`);
   const { profile, env = process.env, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
   const started = { child: null, profile, singleton: "", crashHandler: null };
+  // A site can send the browser to mailto:, news: or snews:, which Chrome on
+  // Linux hands to a program of the machine through PATH without asking: the
+  // mail program, started as the user who runs the kit, with what the site
+  // wrote in the address, or on a server that runs the kit for others,
+  // xdg-open as its user. The stand-ins come first on its PATH, and the rest
+  // stays as it was. On macOS and Windows the browser asks the system, and
+  // the guard each page gets (openPage) is what holds there.
   let config;
   try {
     config = downloadsIn(profile);
+    if (STAND_INS) config.PATH = [standIns(profile), process.env.PATH || "/usr/bin:/bin"].join(path.delimiter);
   } catch (err) {
     removeProfile(started, 10, 100);
     throw err;
@@ -683,9 +783,10 @@ function connect(input, output) {
 
 // A new tab, set to a desktop screen of the given size, in the browser
 // launch() gave, with a session of its own on the browser's pipe, opened in
-// the time a browser has for that. Headless Chrome says "HeadlessChrome" in
-// its user agent, and some sites answer that with a stripped page; the tab
-// says "Chrome", as the same browser with a window would.
+// the time a browser has for that, and with the guard in each document it
+// shows. Headless Chrome says "HeadlessChrome" in its user agent, and some
+// sites answer that with a stripped page; the tab says "Chrome", as the
+// same browser with a window would.
 async function openPage({ pipe, name }, { width, height }) {
   const wait = beforeReading();
   const until = Date.now() + wait;
@@ -696,6 +797,7 @@ async function openPage({ pipe, name }, { width, height }) {
     const { sessionId } = await pipe.send("Target.attachToTarget", { targetId, flatten: true }, left());
     cdp = pipe.session(sessionId);
     await cdp.send("Page.enable", {}, left());
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: GUARD, worldName: GUARD_WORLD }, left());
     await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }, left());
     const { userAgent = "" } = await pipe.send("Browser.getVersion", {}, left()).catch((err) => {
       if (err.timedOut) throw err;
@@ -753,4 +855,4 @@ async function currentAddress(cdp) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, connect, openPage, stoppedAnswering, navigate, currentAddress };
+module.exports = { findChrome, launch, killBrowsers, connect, openPage, stoppedAnswering, navigate, currentAddress, triedSoFar, handedOut, STAND_INS, HANDLERS };

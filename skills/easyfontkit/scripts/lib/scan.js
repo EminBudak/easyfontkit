@@ -8,7 +8,7 @@
 // to tie a CSS family to its files when a file hides its own names.
 
 const crypto = require("crypto");
-const { navigate, currentAddress } = require("./chrome");
+const { navigate, currentAddress, triedSoFar, handedOut } = require("./chrome");
 const { describeFont } = require("./sfnt");
 const { timeLeft, sleep } = require("./time");
 
@@ -131,7 +131,25 @@ function record(cdp) {
   const arrived = ({ requestId }) => due.delete(requestId);
   cdp.on("Network.loadingFinished", arrived);
   cdp.on("Network.loadingFailed", arrived);
-  return { fonts, asked, refused, statuses, faces, sheets, page, due };
+  // The addresses that are not web addresses, as mailto:, that the page or
+  // a frame of it tried to open, as the browser tells them: a move a script,
+  // a refresh, a form or a link asked for (asked), which the guard each
+  // document gets cancels, one the browser began to go to (started), as the
+  // first address of a frame or one a frame's page redirected to, and a
+  // window the page asked for (window), which the browser does not open
+  // without a click.
+  const tried = [];
+  const keep = (how) => ({ url }) => {
+    if (handedOut(url) && tried.length < 50) tried.push({ url: String(url).slice(0, 300), how });
+  };
+  cdp.on("Page.frameScheduledNavigation", keep("asked"));
+  cdp.on("Page.frameRequestedNavigation", keep("asked"));
+  cdp.on("Page.frameStartedNavigating", keep("started"));
+  cdp.on("Page.windowOpen", keep("window"));
+  cdp.on("Network.requestWillBeSent", ({ type, request, redirectResponse }) => {
+    if (type === "Document" && redirectResponse && request) keep("started")(request);
+  });
+  return { fonts, asked, refused, statuses, faces, sheets, page, due, tried };
 }
 
 async function evaluate(cdp, expression, timeoutMs = 10_000) {
@@ -450,8 +468,10 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
 // address the page was first asked from as Chrome wrote it (first), the
 // address a redirect or the page led on to that could not be opened or did
 // not answer (failed), about:blank or the like when the page moved itself
-// on to that (left), and for a page that did not draw, so it could not be
-// scrolled, the style sheet it waited for, if one had not come (stalled).
+// on to that (left), for a page that did not draw, so it could not be
+// scrolled, the style sheet it waited for, if one had not come (stalled),
+// and the addresses that are not web addresses the page tried to open
+// (tried).
 // pageUrl is the address of the page the roles were read from, or the last
 // web address the tab showed when it has moved on to about:blank or to a
 // blob: address, so it is always a web address.
@@ -462,7 +482,7 @@ async function scanPage(cdp, url, log = () => {}) {
   await cdp.send("CSS.enable");
   const { frameTree } = await cdp.send("Page.getFrameTree");
   recorded.page.frame = frameTree.frame.id;
-  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, files: [], skipped: [], refusedRead: [], rules: [], faces: [], loaded: [], asked: [], ...found });
+  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, files: [], skipped: [], refusedRead: [], rules: [], faces: [], loaded: [], asked: [], tried: [], ...found });
   log(`Opening ${url}`);
   let pageUrl;
   try {
@@ -494,6 +514,8 @@ async function scanPage(cdp, url, log = () => {}) {
   await sleep(500);
   const title = String((await evaluate(cdp, "document.title")) || "").trim();
   const roles = await readRoles(cdp);
+  // With what the guard cancelled in the page the roles were read from.
+  const tried = [...recorded.tried, ...(await triedSoFar(cdp))];
   // A script or a meta refresh can have moved the tab on since the load
   // event navigate() waited for: the page read is the one it shows now. One
   // that has moved on to about:blank shows nothing, and the roles were read
@@ -522,7 +544,7 @@ async function scanPage(cdp, url, log = () => {}) {
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, files, skipped, refusedRead, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked] };
+  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, files, skipped, refusedRead, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked], tried };
 }
 
 module.exports = { scanPage, fontFaceRules, decodeDataUrl };

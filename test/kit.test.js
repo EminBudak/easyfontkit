@@ -14,7 +14,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { Worker } = require("node:worker_threads");
 const { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit } = require("../skills/easyfontkit/scripts/lib/kit");
-const { findChrome, launch, openPage } = require("../skills/easyfontkit/scripts/lib/chrome");
+const { findChrome, launch, openPage, navigate, triedSoFar } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
 const { fixture, interAs } = require("./helpers");
 
@@ -2473,6 +2473,94 @@ function listening(named, tables = ["/proc/net/tcp", "/proc/net/tcp6"]) {
   }
   return ports;
 }
+
+// Stand-ins on PATH for the programs the browser hands an address that is
+// not a web address to (mailto:, news:), each writing down that it was
+// started, so that no test starts the user's own mail program, as a test of
+// another kit's code once did on a desktop. Nor does a test run with a
+// display or a session bus to reach, through which the desktop could open
+// the address another way.
+function recordingHandlers(root) {
+  const dir = path.join(root, "handlers");
+  fs.mkdirSync(dir, { recursive: true });
+  const log = path.join(root, "started.log");
+  for (const name of ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser", "gio", "kde-open", "gnome-open", "exo-open"]) {
+    fs.writeFileSync(path.join(dir, name), `#!/bin/sh\necho "$0 $*" >> '${log}'\n`, { mode: 0o755 });
+  }
+  const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` };
+  for (const name of ["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "BROWSER"]) delete env[name];
+  return { env, started: () => (fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "") };
+}
+
+// A page that goes to mailto: as it loads, by a script and by a refresh,
+// asks for a window at one and has a frame at news:, which Chrome on Linux
+// handed to xdg-email and xdg-open, after asking xdg-settings, without
+// asking anyone: the user's mail program would start with what the site
+// wrote. A redirect to mailto: reaches the browser too, and is no page.
+test("no page makes the browser start a program of this machine, by moving to mailto: as it loads, by a refresh, a window, a frame at news: or a frame that redirects to mailto:, and an address that redirects to mailto: gets no kit and says so", { skip: noBrowser || (process.platform !== "linux" && "the browser hands these addresses to programs on PATH on Linux and the like only"), timeout: 240_000 }, async () => {
+  const page = (head, body) => `<!doctype html><html><head><title>Mail</title>${head}</head><body><h1>Write to us</h1><p>A page that wants you to write.</p>${body}</body></html>`;
+  const { server, origin } = await serve({
+    "/moves": { body: page("", '<iframe src="news:comp.lang.c"></iframe><iframe src="/frame-to-mail"></iframe><script>location.href = "mailto:hello@example.com?subject=Hi"; window.open("mailto:window@example.com");</script>') },
+    "/refresh": { body: page('<meta http-equiv="refresh" content="0;url=mailto:refresh@example.com">', "") },
+    "/to-mail": { status: 302, headers: { location: "mailto:redirect@example.com" } },
+    "/frame-to-mail": { status: 302, headers: { location: "mailto:frame@example.com" } },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-mailto-"));
+  const { env, started } = recordingHandlers(parent);
+  try {
+    const moves = await run([`${origin}/moves`, "--out", path.join(parent, "moves"), "--json"], env);
+    assert.equal(moves.status, 0, moves.stderr);
+    const { notes } = JSON.parse(moves.stdout);
+    for (const url of ["mailto:hello@example.com?subject=Hi", "mailto:window@example.com", "news:comp.lang.c"]) {
+      assert.ok(notes.includes(`The page tried to open ${url}, which is not a web address: it was not opened.`), notes.join("\n"));
+    }
+    // A fourth, the frame's redirect, is counted past the first three.
+    assert.ok(notes.includes("It tried 1 more address that is not a web address as well."), notes.join("\n"));
+    const refresh = await run([`${origin}/refresh`, "--out", path.join(parent, "refresh"), "--json"], env);
+    assert.equal(refresh.status, 0, refresh.stderr);
+    assert.ok(JSON.parse(refresh.stdout).notes.includes("The page tried to open mailto:refresh@example.com, which is not a web address: it was not opened."), refresh.stdout);
+    const redirect = await run([`${origin}/to-mail`, "--out", path.join(parent, "redirect")], env);
+    assert.equal(redirect.status, 1, redirect.stdout);
+    assert.ok(redirect.stderr.includes(`easyfontkit: ${origin}/to-mail led to mailto:redirect@example.com, which is not a web address, so no kit was made. Give the address of a page of the site itself.\n`), redirect.stderr);
+    assert.equal(fs.existsSync(path.join(parent, "redirect")), false, "nothing written");
+    assert.equal(started(), "", "no program of the machine was started");
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+// The guard holds on every system, as it is the page's own browser that
+// cancels the move: a script's move to mailto: never reaches the part of
+// the browser that would hand it out.
+test("a page's own move to an address that is not a web address is cancelled in the page before the browser acts on it, and the address is kept for the notes", { skip: noBrowser, timeout: 120_000 }, async () => {
+  const { server, origin } = await serve({
+    "/": { body: '<!doctype html><html><head><title>Mail</title></head><body><h1>Hi</h1><script>location.href = "mailto:hello@example.com";</script></body></html>' },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-guard-"));
+  const { env, started } = recordingHandlers(parent);
+  const saved = { ...process.env };
+  Object.assign(process.env, env);
+  for (const name of Object.keys(saved)) if (!(name in env)) delete process.env[name];
+  let chrome;
+  try {
+    setTimeLimit(60_000);
+    chrome = await launch({ width: 800, height: 600 });
+    const cdp = await openPage(chrome, { width: 800, height: 600 });
+    await navigate(cdp, `${origin}/`);
+    await sleep(500);
+    assert.deepEqual(await triedSoFar(cdp), [{ url: "mailto:hello@example.com", how: "cancelled" }]);
+    cdp.close();
+    assert.equal(started(), "", "no program of the machine was started");
+  } finally {
+    if (chrome) await chrome.close();
+    for (const name of Object.keys(process.env)) if (!(name in saved)) delete process.env[name];
+    Object.assign(process.env, saved);
+    setTimeLimit(120_000);
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
 
 test("the browser listens on no port, so no other program on the machine can read or drive it, and is driven over its pipe", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-port-"));

@@ -8,8 +8,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { spawn } = require("node:child_process");
-const { launch, killBrowsers, connect, openPage, navigate } = require("../skills/easyfontkit/scripts/lib/chrome");
+const { spawn, spawnSync } = require("node:child_process");
+const { launch, killBrowsers, connect, openPage, navigate, HANDLERS, STAND_INS } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { makeFontKit } = require("../skills/easyfontkit/scripts/lib/kit");
 const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
 const { devtools, pipeTo } = require("./devtools");
@@ -124,6 +124,60 @@ test("on Linux, the browser's download folder is in its profile: its config fold
     }
     fs.rmSync(parent, { recursive: true, force: true });
   }
+});
+
+test("on Linux, the browser's PATH starts with a folder in its profile of stand-ins for xdg-open, xdg-email, xdg-settings and the browsers xdg-open goes on to, each of which starts nothing and exits with 0, also from a temp folder mounted noexec, and the rest of PATH is as it was", { skip: !STAND_INS && "Chrome hands such addresses to the system on macOS and Windows" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-handlers-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // A browser that writes down its PATH, where each stand-in leads, and what
+  // came of starting each by its name as Chrome does, through PATH, then
+  // quits. A program of that name later on PATH writes down that it was
+  // started, in place of a real one.
+  const seen = path.join(parent, "seen");
+  const later = path.join(parent, "later");
+  fs.mkdirSync(later);
+  for (const name of HANDLERS) fs.writeFileSync(path.join(later, name), `#!/bin/sh\necho "started $0" >> ${JSON.stringify(seen)}\n`, { mode: 0o755 });
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(
+    chrome,
+    `#!/bin/sh
+{ printf '%s\\n' "$PATH"; for name in ${HANDLERS.join(" ")}; do printf '%s %s ' "$name" "$(readlink "\${PATH%%:*}/$name")"; out=$("$name" mailto:hello@example.com 2>&1); printf '%s [%s]\\n' "$?" "$out"; done; } >> ${JSON.stringify(seen)}
+`,
+    { mode: 0o755 },
+  );
+  const ownPath = `${later}${path.delimiter}${process.env.PATH}`;
+  const check = async (env, wrap) => {
+    fs.rmSync(seen, { force: true });
+    // In a process of its own, so a run in a mount namespace can be given a
+    // temp folder mounted noexec.
+    const script = `const { launch } = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/chrome"))}); launch({ width: 800, height: 600 }).then(() => process.exit(2), (err) => { console.error(err.message); process.exit(/did not start/.test(err.message) ? 0 : 1); });`;
+    const command = [...wrap, process.execPath, "-e", script];
+    const result = await new Promise((resolve) => {
+      const child = spawn(command[0], command.slice(1), { env: { ...process.env, ...env, CHROME_PATH: chrome, PATH: ownPath }, stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      child.on("close", (status) => resolve({ status, stderr }));
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const [first, ...lines] = fs.readFileSync(seen, "utf8").trim().split("\n");
+    const [folder, ...rest] = first.split(path.delimiter);
+    assert.equal(path.basename(folder), "stand-ins");
+    assert.ok(path.basename(path.dirname(folder)).startsWith("easyfontkit-chrome-"), folder);
+    assert.equal(rest.join(path.delimiter), ownPath, "the rest of PATH is as it was");
+    const truth = ["/usr/bin/true", "/bin/true"].find((file) => fs.existsSync(file));
+    assert.deepEqual(lines, HANDLERS.map((name) => `${name} ${truth} 0 []`), "each starts nothing and exits with 0");
+    return folder;
+  };
+  const folder = await check({}, []);
+  assert.equal(fs.existsSync(folder), false, "the stand-ins go with the profile");
+  // A temp folder on a tmpfs mounted noexec, in a mount namespace of the
+  // test's own, where this user is root.
+  const mount = path.join(parent, "noexec");
+  fs.mkdirSync(mount);
+  const wrap = ["unshare", "-rm", "sh", "-c", 'mount -t tmpfs -o noexec,size=4m tmpfs "$1" && shift && exec "$@"', "sh", mount];
+  const probe = spawnSync(wrap[0], [...wrap.slice(1), "true"], { encoding: "utf8" });
+  if (probe.status !== 0) return t.skip(`no mount namespace for this user here: ${(probe.stderr || String(probe.error)).trim()}`);
+  await check({ TMPDIR: mount }, wrap);
 });
 
 test("Chrome's component updater is sent to a closed port, so it downloads nothing during a run", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async () => {
@@ -248,7 +302,7 @@ test("a browser slow to open its page gets it opened, and one that does not open
   const started = Date.now();
   const cdp = await openPage({ pipe: late.pipe, name: "chrome" }, SCREEN);
   assert.ok(Date.now() - started >= 10_000, `opened after ${Date.now() - started} ms`);
-  assert.deepEqual(late.sent(), ["browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"]);
+  assert.deepEqual(late.sent(), ["browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Page.addScriptToEvaluateOnNewDocument", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"]);
   cdp.close();
   // The tab that is not made, the session that is not given for it, and
   // its first call that gets no answer, with three seconds left.
@@ -517,7 +571,7 @@ test("a browser that stops answering once it has started, or quits, ends the run
   const stopped = "chrome stopped answering, so no kit was made. The machine may be busy; try again.";
   // The calls that start the browser and open its tab, and those after
   // them.
-  const opening = ["browser Browser.setDownloadBehavior", "browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"];
+  const opening = ["browser Browser.setDownloadBehavior", "browser Target.createTarget", "browser Target.attachToTarget", "tab Page.enable", "tab Page.addScriptToEvaluateOnNewDocument", "tab Emulation.setDeviceMetricsOverride", "browser Browser.getVersion"];
   for (const [what, options, timeLimit, calls, message] of [
     // A call that gets no answer until the run's time is out, and the
     // browser itself, asked then.

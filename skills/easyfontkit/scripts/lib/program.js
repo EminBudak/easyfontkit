@@ -634,4 +634,4 @@ function notStarted(place, { error = null, stderr = "", code = null } = {}) {
   return what ? cannotStart(place, what) : "";
 }
 
-module.exports = { NOTHING, chromePlace, findChrome, cannotStart, notStarted };
+module.exports = { NOTHING, chromePlace, findChrome, cannotStart, notStarted, runnable };

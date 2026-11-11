@@ -22,7 +22,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const { STATUS_CODES } = require("http");
 const path = require("path");
-const { launch, killBrowsers, openPage, stoppedAnswering } = require("./chrome");
+const { launch, killBrowsers, openPage, stoppedAnswering, handedOut, STAND_INS } = require("./chrome");
 const { scanPage } = require("./scan");
 const { buildFamilies, parseStack } = require("./families");
 const { SOURCE_NAMES } = require("./license");
@@ -998,7 +998,34 @@ function errorPage(asked, { answer: { status, url }, first }) {
 function notOpened(asked, { failed: { url, error, noAnswer }, first }) {
   if (noAnswer) return `${where(asked, url, first)} did not answer in ${noAnswer} s, so no kit was made. The site may be down or slow; try again later, or give it more time with --timeout.`;
   if (error === "net::ERR_TOO_MANY_REDIRECTS") return `Could not open ${asked}: ${error}`;
+  // A redirect to an address that is not a web address, as mailto:, which
+  // the browser hands to a program of the machine instead of a page.
+  if (handedOut(url)) return `${where(asked, url, first)} is not a web address, so no kit was made. Give the address of a page of the site itself.`;
   return `${where(asked, url, first)} could not be opened${error ? ` (${error})` : ""}, so no kit was made. Check the page in a normal browser.`;
+}
+
+// The notes on the addresses that are not web addresses the page tried to
+// open, the first three of them, each once, and how many more there were.
+// One the guard cancelled, or a window the page asked for, was not opened
+// on any system. On Linux the browser's stand-ins took the rest, as the
+// first address of a frame; on macOS and Windows the browser hands those to
+// the system, which can open them with a program of its own.
+function triedNotes(tried = []) {
+  const rank = { asked: 0, started: 1, window: 2, cancelled: 3 };
+  const byAddress = new Map();
+  for (const one of tried) {
+    const known = byAddress.get(one.url);
+    if (!known || rank[one.how] > rank[known.how]) byAddress.set(one.url, one);
+  }
+  const list = [...byAddress.values()];
+  const notes = list.slice(0, 3).map(({ url, how }) =>
+    STAND_INS || how === "cancelled" || how === "window"
+      ? `The page tried to open ${url}, which is not a web address: it was not opened.`
+      : `The page tried to open ${url}, which is not a web address, in a way easyfontkit stops only on Linux, so the system may have opened it with a program of its own, such as the mail program.`,
+  );
+  const more = list.length - 3;
+  if (more > 0) notes.push(`It tried ${more} more ${more === 1 ? "address that is not a web address" : "addresses that are not web addresses"} as well.`);
+  return notes;
 }
 
 // A page that moved itself on to about:blank shows nothing, and the font
@@ -1066,6 +1093,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       if (files) saveFiles(built.families, part, own);
       const notes = [...built.notes];
       for (const skipped of scan.skipped) notes.push(`${skipped.url} was not a usable font file: ${skipped.reason}.`);
+      notes.push(...triedNotes(scan.tried));
       if (!files) notes.push("Run with --no-files: the font files were read but not saved.");
       kit = {
         version: 1,

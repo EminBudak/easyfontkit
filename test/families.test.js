@@ -17,8 +17,11 @@ function file(url, names, fsType) {
   return { sha: crypto.createHash("sha1").update(buffer).update(url).digest("hex"), urls: [url], buffer, font: describeFont(buffer) };
 }
 
-function face(familyName, glyphs, stack, { custom = true, postScriptName = "", weight = "400" } = {}) {
-  return { familyName, postScriptName, custom, glyphs, italicGlyphs: 0, weights: { [weight]: glyphs }, stacks: { [stack]: glyphs } };
+// A face as readRole() reports it. A font of the visitor's own can carry
+// the nodes it drew, each with the text Chrome counted there and how many
+// glyphs the visitor's own fonts drew in it.
+function face(familyName, glyphs, stack, { custom = true, postScriptName = "", weight = "400", nodes } = {}) {
+  return { familyName, postScriptName, custom, glyphs, italicGlyphs: 0, weights: { [weight]: glyphs }, stacks: { [stack]: glyphs }, ...(nodes ? { nodes: nodes.map(([text, system]) => ({ text, length: text.length, system })) } : {}) };
 }
 
 const rule = (family, url) => ({ family, weight: "400", style: "normal", unicodeRange: "", urls: [url] });
@@ -95,6 +98,61 @@ test("the note on text a late web font left to a fallback agrees with the roles 
     loaded: [{ family: "acme-clean" }],
   }).notes;
   assert.deepEqual(two, ["Some of the headings were drawn with Liberation Sans and DejaVu Sans, fallbacks, because Acme Clean loaded too late for them. That text is counted as Acme Clean, the font the site asks for."]);
+});
+
+test("text a web font has no glyphs for, as Japanese or an emoji in a Latin font, is said to be drawn with a fallback for that, and text it has glyphs for that a fallback drew is said to have come too late", () => {
+  // Inter's latin file, which has no Japanese and no emoji, as Lato has
+  // none: the glyph counts are those Chrome gave for these texts.
+  const inter = file("https://www.acme.com/fonts/inter.ttf", { 1: "Acme Latin", 13: "This Font Software is licensed under the SIL Open Font License, Version 1.1." });
+  const stack = '"Acme Latin", "Noto Sans CJK JP", sans-serif';
+  const read = (roles) =>
+    buildFamilies({ pageUrl: PAGE, roles, files: [inter], rules: [rule("Acme Latin", inter.urls[0])], faces: [], loaded: [{ family: "Acme Latin" }] });
+  const lacking = (roles, fonts = "Noto Sans CJK JP, a fallback") => `Some of the ${roles} drawn with ${fonts}, as Acme Latin has no glyphs for those characters. That text is counted as Acme Latin, the font the site asks for.`;
+  const late = (roles, fonts, them) => `Some of the ${roles} drawn with ${fonts}, because Acme Latin loaded too late for ${them}. That text is counted as Acme Latin, the font the site asks for.`;
+  // Japanese text alone, and Japanese with Latin words the web font drew.
+  const japanese = read({
+    heading: [face("Noto Sans CJK JP", 16, stack, { custom: false, nodes: [["日本語の見出しです", 9], ["二つ目の見出し", 7]] })],
+    body: [face("Noto Sans CJK JP", 10, stack, { custom: false, nodes: [["Body text と日本語の本文です。Latin words come first here.", 10]] }), face("Acme Latin", 36, stack)],
+  });
+  assert.equal(japanese.roles.heading.family, "Acme Latin");
+  assert.deepEqual(japanese.notes, [lacking("headings and body text were")]);
+  // An emoji in a heading, which the emoji font draws.
+  const emoji = read({ heading: [face("Acme Latin", 6, '"Acme Latin", sans-serif'), face("Noto Color Emoji", 2, '"Acme Latin", sans-serif', { custom: false, nodes: [["🌱 Grow 🌿", 2]] })] });
+  assert.deepEqual(emoji.notes, [lacking("headings were", "Noto Color Emoji, a fallback")]);
+  // The same Latin words drawn by the fallback too, as when the web font
+  // came too late: they were late, though the fallback that drew them also
+  // drew the Japanese.
+  const mixed = read({ heading: [face("Noto Sans CJK JP", 13, stack, { custom: false, nodes: [["Lato で書かれた見出し", 13]] })] });
+  assert.deepEqual(mixed.notes, [late("headings were", "Noto Sans CJK JP, a fallback", "them")]);
+  // Latin text alone, and text that was not read, as before.
+  assert.deepEqual(read({ body: [face("Liberation Sans", 14, stack, { custom: false, nodes: [["A late heading", 14]] })] }).notes, [late("body text was", "Liberation Sans, a fallback", "it")]);
+  assert.deepEqual(read({ body: [face("Liberation Sans", 14, stack, { custom: false })] }).notes, [late("body text was", "Liberation Sans, a fallback", "it")]);
+  // A late fallback and one for characters the web font lacks in one role.
+  const both = read({
+    heading: [
+      face("Liberation Sans", 40, stack, { custom: false, nodes: [["A late heading 日本", 16]] }),
+      face("Noto Sans CJK JP", 30, stack, { custom: false, nodes: [["A late heading 日本", 16], ["日本語の見出しです", 9]] }),
+    ],
+  });
+  assert.deepEqual(both.notes, [late("headings were", "Liberation Sans and Noto Sans CJK JP, fallbacks", "them")]);
+  const apart = read({
+    heading: [
+      face("Liberation Sans", 40, stack, { custom: false, nodes: [["A late heading", 14]] }),
+      face("Noto Color Emoji", 30, stack, { custom: false, nodes: [["Grow 🌱", 1]] }),
+    ],
+  });
+  assert.deepEqual(apart.notes, [late("headings were", "Liberation Sans, a fallback", "them"), lacking("headings were", "Noto Color Emoji, a fallback")]);
+  // A file's unicode-range keeps the characters outside it from it, as the
+  // browser does.
+  const ranged = buildFamilies({
+    pageUrl: PAGE,
+    roles: { heading: [face("Liberation Sans", 2, '"Acme Latin", sans-serif', { custom: false, nodes: [["Grow é", 2]] }), face("Acme Latin", 5, '"Acme Latin", sans-serif')] },
+    files: [inter],
+    rules: [{ ...rule("Acme Latin", inter.urls[0]), unicodeRange: "U+0000-007F" }],
+    faces: [],
+    loaded: [{ family: "Acme Latin" }],
+  });
+  assert.deepEqual(ranged.notes, ["Some of the headings were drawn with Liberation Sans, a fallback, as Acme Latin has no glyphs for those characters. That text is counted as Acme Latin, the font the site asks for."]);
 });
 
 test("a web font whose file the browser asked for and did not get while the page was read is named as the CSS names it, with the file's address, an unknown license and a note, and is not taken for a font of the visitor's own", () => {

@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { describeFont } = require("../skills/easyfontkit/scripts/lib/sfnt");
+const { describeFont, glyphsOf } = require("../skills/easyfontkit/scripts/lib/sfnt");
 const { fixture, interAs } = require("./helpers");
 
 test("reads WOFF2 and WOFF alike: names, license link, embedding and the measurements", () => {
@@ -56,4 +56,13 @@ test("a font file cut short is said to be cut short or broken, in plain words an
   for (const font of [interAs(), fixture("inter-latin-400.woff"), fixture("inter-latin-400.woff2")]) {
     assert.throws(() => describeFont(font.subarray(0, 100)), { message: "cut short or broken: its tables run past its 100 bytes" });
   }
+});
+
+test("a font file's cmap says which characters it has glyphs for", () => {
+  for (const font of [fixture("inter-latin-400.woff2"), fixture("inter-latin-400.woff"), interAs()]) {
+    const has = glyphsOf(font);
+    assert.deepEqual([..."Ag é"].map((c) => has(c.codePointAt(0))), [true, true, true, true]);
+    assert.deepEqual([..."日本🌱"].map((c) => has(c.codePointAt(0))), [false, false, false]);
+  }
+  assert.equal(glyphsOf(Buffer.from("<html>not found</html>")), null);
 });

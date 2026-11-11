@@ -636,6 +636,19 @@ const PAGE = {
   "CSS.getComputedStyleForNode": { computedStyle: [{ name: "font-family", value: "Arial, sans-serif" }] },
 };
 
+test("a page whose own scripts hold up the read of a node's text, which tells a fallback for characters a web font lacks from a late font, is asked for it once, with a short wait, and the kit is made", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+  const { parent, pid, serve } = standIn(t);
+  // Every node is drawn with a font of the visitor's own, and the page
+  // never answers the call that reads a node's text.
+  const endpoint = await serve({ calls: { ...PAGE, "DOM.resolveNode": { object: { objectId: "text" } }, "Runtime.callFunctionOn": "hold" } });
+  const started = Date.now();
+  const { kit } = await makeFontKit("https://acme.example/", { dir: path.join(parent, "kit"), timeLimit: 60_000 });
+  assert.deepEqual(Object.keys(kit.roles), ["heading", "body", "button", "code"]);
+  assert.equal(asked(endpoint).filter((call) => call === "tab Runtime.callFunctionOn").length, 1, "asked once");
+  assert.ok(Date.now() - started < 30_000, `the run took ${Date.now() - started} ms`);
+  assert.ok(await waitFor(pid()), "the browser is ended");
+});
+
 test("a browser that stops answering, or quits, as its page is opened, scrolled or read ends the run naming it, where the site or the page was named or a kit made of what had been read, and the earlier kit stays; a server or a page that does not answer in a browser that does is named as before", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
   const { parent, temp, pid, serve } = standIn(t);
   const dir = path.join(parent, "kit");

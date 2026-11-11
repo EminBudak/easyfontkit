@@ -7,6 +7,7 @@
 
 const { licenseOf, sourceOf, redact } = require("./license");
 const { freeMatches, lookup, cleanName, words, key } = require("./match");
+const { glyphsOf } = require("./sfnt");
 
 const ROLE_ORDER = ["heading", "body", "button", "code"];
 const ROLE_WORDS = { heading: "headings", body: "body text", button: "buttons", code: "code" };
@@ -72,6 +73,64 @@ function unicodeRange(text) {
     .split(",")
     .map((part) => part.trim());
   return parts.every((part) => RANGE.test(part)) ? parts.join(", ") : "";
+}
+
+// Whether a unicode-range as unicodeRange() keeps it gives a file a code
+// point: every one when it gives none.
+function inRange(range) {
+  const spans = String(range || "")
+    .split(",")
+    .map((part) => /^u\+([0-9a-f?]{1,6})(?:-([0-9a-f]{1,6}))?$/i.exec(part.trim()))
+    .filter(Boolean)
+    .map(([, from, to]) => [parseInt(from.replace(/\?/g, "0"), 16), parseInt(to || from.replace(/\?/g, "f"), 16)]);
+  return spans.length ? (code) => spans.some(([from, to]) => code >= from && code <= to) : () => true;
+}
+
+// Whether a family's files have a glyph for a code point, each file for the
+// code points its unicode-range gives it: a function of the code point, or
+// null when no file's cmap can be read. Each family's files are read once,
+// and each code point looked up once.
+const glyphsKnown = new WeakMap();
+function glyphsOfFamily(family) {
+  if (glyphsKnown.has(family)) return glyphsKnown.get(family);
+  const files = family.files.map((file) => ({ has: glyphsOf(file.buffer), range: inRange(file.unicodeRange) })).filter(({ has }) => has);
+  const known = new Map();
+  const has = files.length
+    ? (code) => {
+        if (!known.has(code)) known.set(code, files.some((file) => file.range(code) && file.has(code)));
+        return known.get(code);
+      }
+    : null;
+  glyphsKnown.set(family, has);
+  return has;
+}
+
+// Whether the text a font of the visitor's own drew, under a stack that
+// asks for a web family whose files were read, is text that family has no
+// glyphs for, where it would draw that font anyway: in each node it drew,
+// the visitor's own fonts drew no more glyphs than there are characters
+// the family has no glyph for, with the spaces and the marks beside them,
+// which can go either way, and there is such a character. A web font that
+// came too late leaves all of a node's text to them, letters it has as
+// well. false when the files cannot tell, or the text was not read.
+function lacksGlyphs(face, family) {
+  if (!face.nodes || !face.nodes.length) return false;
+  const has = glyphsOfFamily(family);
+  if (!has) return false;
+  return face.nodes.every(({ text = "", length = 0, system }) => {
+    let missing = 0;
+    let slack = 0;
+    for (const char of text) {
+      if (/\s/u.test(char)) slack++;
+      else if (!has(char.codePointAt(0))) {
+        missing++;
+        if (/\p{M}/u.test(char)) slack++;
+      }
+    }
+    // The glyphs of the part of a long text that was read.
+    const drawn = length > text.length ? (system * text.length) / length : system;
+    return missing > 0 && drawn <= missing + slack;
+  });
 }
 
 // The CSS families each file is declared under: by its address in the
@@ -249,15 +308,17 @@ function buildFamilies(scan) {
         if (!family) family = webFamilyIn(stack) || missingFamily(face.familyName || "Unnamed font");
       } else {
         // A system font, although the stack asks for a web font first: the
-        // web font came too late for this text (font-display optional or
+        // web font has no glyphs for this text, as for Japanese or an emoji
+        // in a Latin font, it came too late for it (font-display optional or
         // swap on a first visit), or its file had not come when the page was
         // read. It counts as the web font, the one the site means.
         family = webFamilyIn(stack) || unloadedIn(stack);
         if (family) {
-          const late = fallbacks.get(family) || { drawnWith: new Set(), roles: [] };
-          late.drawnWith.add(face.familyName);
-          if (!late.roles.includes(role)) late.roles.push(role);
-          fallbacks.set(family, late);
+          const why = family.files.length && lacksGlyphs(face, family) ? "glyphs" : "late";
+          const fallback = fallbacks.get(`${family.key}\u0000${why}`) || { family, why, drawnWith: new Set(), roles: [] };
+          fallback.drawnWith.add(face.familyName);
+          if (!fallback.roles.includes(role)) fallback.roles.push(role);
+          fallbacks.set(`${family.key}\u0000${why}`, fallback);
         } else {
           const asked = stack.find((css) => !loadedNames.has(lower(css))) || face.familyName;
           const name = systemName(asked);
@@ -292,19 +353,22 @@ function buildFamilies(scan) {
   // and those the browser refused, as by CORS: a note of their own says
   // why, and trying again later is for a file that got no answer.
   const answered = new Set(skipped.map((skip) => bare(skip.url)));
-  const notes = [...fallbacks].map(([family, late]) => {
-    const where = late.roles.map((role) => ROLE_WORDS[role]);
+  const notes = [...fallbacks.values()].map((fallback) => {
+    const { family, why } = fallback;
+    const where = fallback.roles.map((role) => ROLE_WORDS[role]);
     // Headings and buttons are many; body text and code are one, unless
     // another role goes with them.
-    const many = where.length > 1 || late.roles.some((role) => role === "heading" || role === "button");
-    const fonts = [...late.drawnWith];
+    const many = where.length > 1 || fallback.roles.some((role) => role === "heading" || role === "button");
+    const fonts = [...fallback.drawnWith];
     const drawn = `Some of the ${listOf(where)} ${many ? "were" : "was"} drawn with ${listOf(fonts)}, ${fonts.length > 1 ? "fallbacks" : "a fallback"}`;
+    const counted = `That text is counted as ${family.name}, the font the site asks for.`;
     if (unloaded(family)) {
       const urls = [...family.notLoaded];
       const waiting = urls.some((url) => !answered.has(url));
-      return `${drawn}, because ${family.name}'s ${urls.length === 1 ? "file" : "files"} ${listOf(urls)} did not load while the page was read. That text is counted as ${family.name}, the font the site asks for. The kit has no file of it, so its license is unknown${waiting ? ": try again later" : ""}.`;
+      return `${drawn}, because ${family.name}'s ${urls.length === 1 ? "file" : "files"} ${listOf(urls)} did not load while the page was read. ${counted} The kit has no file of it, so its license is unknown${waiting ? ": try again later" : ""}.`;
     }
-    return `${drawn}, because ${family.name} loaded too late for ${many ? "them" : "it"}. That text is counted as ${family.name}, the font the site asks for.`;
+    if (why === "glyphs") return `${drawn}, as ${family.name} has no glyphs for those characters. ${counted}`;
+    return `${drawn}, because ${family.name} loaded too late for ${many ? "them" : "it"}. ${counted}`;
   });
   const list = [...families.values()].map((family) => describeFamily(family, pageUrl));
   const order = (family) => {

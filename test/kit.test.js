@@ -1821,6 +1821,30 @@ test("a font file from another site with no CORS header that the page also prelo
   }
 });
 
+test("text a web font has no glyphs for, as Cyrillic in a Latin font, is said to be drawn with a fallback for that, not to have come too late", { skip: noBrowser }, async () => {
+  // Inter's latin file has no Cyrillic: every system has a font that does.
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><meta charset="utf-8"><title>Cyrillic</title><style>
+        @font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); }
+        h1, p { font-family: "Body Sans", sans-serif; }
+      </style></head><body><h1>Hello Привет мир</h1><p>Body text in Inter, with a word in Cyrillic: Привет.</p></body></html>`,
+    },
+    "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-glyphs-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(origin, { dir, timeLimit: 60_000 });
+    assert.equal(kit.roles.heading.family, "Inter");
+    assert.equal(kit.notes.length, 1, kit.notes.join("\n"));
+    assert.match(kit.notes[0], /^Some of the headings (and body text )?were drawn with .+?, (a fallback|fallbacks), as Inter has no glyphs for those characters\. That text is counted as Inter, the font the site asks for\.$/);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a font file whose server sends no bytes, or one cut short, is noted with that in plain words, and its family's note does not say to try again later", { skip: noBrowser }, async () => {
   const { server, origin } = await serve({
     "/": {

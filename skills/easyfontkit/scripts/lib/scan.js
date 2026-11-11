@@ -186,8 +186,44 @@ async function walk(cdp) {
   await sleep(400);
 }
 
+// The text Chrome counts the glyphs of for a node: that of its own text
+// nodes and of its children's, as it is laid out, with each run of white
+// space one space. Read for a node drawn in part with a font of the
+// visitor's own, as one a web font has no glyphs for: { text, length },
+// the text cut to 20000 characters and how long it was. The page hands
+// back the text alone, however many children the node has. A page that
+// holds the call up, as its own scripts can, is not asked again in this
+// run: its text is not read, and the note on it is worded as before.
+const TEXT_KEPT = 20_000;
+const TEXT_WAIT = 5_000;
+const textHeld = new WeakSet();
+const OWN_TEXT = `function (kept) {
+  let text = "";
+  const own = (node) => { for (const child of node.childNodes) if (child.nodeType === 3) text += child.data; };
+  own(this);
+  for (const child of this.children) own(child);
+  text = text.replace(/\\s+/g, " ").trim();
+  return [text.slice(0, kept), text.length];
+}`;
+async function textOf(cdp, nodeId) {
+  const none = { text: "", length: 0 };
+  if (textHeld.has(cdp)) return none;
+  const held = (err) => {
+    if (err && err.timedOut) textHeld.add(cdp);
+    return {};
+  };
+  const { object } = await cdp.send("DOM.resolveNode", { nodeId }, TEXT_WAIT).catch(held);
+  if (!object || !object.objectId) return none;
+  const { result = {} } = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: OWN_TEXT, arguments: [{ value: TEXT_KEPT }], returnByValue: true }, TEXT_WAIT).catch(held);
+  await cdp.send("Runtime.releaseObject", { objectId: object.objectId }, TEXT_WAIT).catch(held);
+  const [text, length] = Array.isArray(result.value) ? result.value : [];
+  return typeof text === "string" && Number.isFinite(length) ? { text: text.slice(0, TEXT_KEPT), length: Math.max(length, text.length) } : none;
+}
+
 // The faces Chrome drew a role's text with, most glyphs first, with the
-// weights, styles and CSS stacks that text asked for.
+// weights, styles and CSS stacks that text asked for. A font of the
+// visitor's own also keeps, for each node it drew, the text Chrome counted
+// there and how many of its glyphs the visitor's own fonts drew (nodes).
 async function readRole(cdp, rootId, selector) {
   const { nodeIds = [] } = await cdp.send("DOM.querySelectorAll", { nodeId: rootId, selector }).catch(() => ({}));
   const faces = new Map();
@@ -203,6 +239,8 @@ async function readRole(cdp, rootId, selector) {
     const stack = css("font-family");
     const weight = css("font-weight") || "400";
     const italic = /italic|oblique/.test(css("font-style"));
+    const system = drawn.filter((font) => !font.isCustomFont).reduce((sum, font) => sum + font.glyphCount, 0);
+    const read = system ? await textOf(cdp, nodeId) : null;
     for (const font of drawn) {
       const key = `${font.isCustomFont ? "web" : "system"}\u0000${font.familyName}\u0000${font.postScriptName || ""}`;
       const face = faces.get(key) || {
@@ -213,8 +251,10 @@ async function readRole(cdp, rootId, selector) {
         italicGlyphs: 0,
         weights: {},
         stacks: {},
+        ...(font.isCustomFont ? {} : { nodes: [] }),
       };
       face.glyphs += font.glyphCount;
+      if (face.nodes) face.nodes.push({ ...read, system });
       if (italic) face.italicGlyphs += font.glyphCount;
       face.weights[weight] = (face.weights[weight] || 0) + font.glyphCount;
       face.stacks[stack] = (face.stacks[stack] || 0) + font.glyphCount;

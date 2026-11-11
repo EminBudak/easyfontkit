@@ -143,9 +143,10 @@ function embeddingOf(fsType) {
   return "installable";
 }
 
-// Glyph id for a character, from a format 4 or 12 cmap subtable.
+// Glyph id for a character, from a format 4 or 12 cmap subtable, or null
+// when the cmap has neither.
 function glyphLookup(cmap) {
-  if (!cmap || cmap.length < 4) return () => 0;
+  if (!cmap || cmap.length < 4) return null;
   const count = cmap.readUInt16BE(2);
   let best = null;
   for (let i = 0; i < count; i++) {
@@ -158,7 +159,7 @@ function glyphLookup(cmap) {
     const score = format === 12 && platform === 3 && encoding === 10 ? 3 : format === 4 && platform === 3 && encoding === 1 ? 2 : format === 4 || format === 12 ? 1 : 0;
     if (score && (!best || score > best.score)) best = { offset, format, score };
   }
-  if (!best) return () => 0;
+  if (!best) return null;
   const t = cmap.subarray(best.offset);
   if (best.format === 12) {
     const groups = t.readUInt32BE(12);
@@ -203,6 +204,7 @@ function lowercaseWidth(tables, upm) {
   const metrics = hhea.readUInt16BE(34);
   if (!metrics) return null;
   const glyph = glyphLookup(cmap);
+  if (!glyph) return null;
   let sum = 0;
   let found = 0;
   for (let code = 97; code <= 122; code++) {
@@ -293,4 +295,24 @@ function describeTables(buf) {
   };
 }
 
-module.exports = { describeFont };
+// Whether a font file has a glyph for a character, by its code point, read
+// from its cmap: a function of the code point, or null when the file has
+// no cmap that can be read.
+function glyphsOf(buf) {
+  try {
+    const { tables } = readTables(buf);
+    const glyph = glyphLookup(tables.cmap);
+    if (!glyph) return null;
+    return (code) => {
+      try {
+        return glyph(code) > 0;
+      } catch {
+        return false;
+      }
+    };
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { describeFont, glyphsOf };

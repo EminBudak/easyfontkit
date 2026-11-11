@@ -246,12 +246,19 @@ async function textOf(cdp, nodeId) {
 // weights, styles and CSS stacks that text asked for. A font of the
 // visitor's own also keeps, for each node it drew, the text Chrome counted
 // there and how many of its glyphs the visitor's own fonts drew (nodes).
+// The nodes are read while the run has 15 s left: `cut` says that its time
+// ran out before every node there was to read had been read.
 async function readRole(cdp, rootId, selector) {
   const { nodeIds = [] } = await cdp.send("DOM.querySelectorAll", { nodeId: rootId, selector }).catch(() => ({}));
   const faces = new Map();
   let withText = 0;
+  let cut = false;
   for (const nodeId of nodeIds.slice(0, NODES_TRIED)) {
-    if (withText >= NODES_WITH_TEXT || timeLeft() < 15_000) break;
+    if (withText >= NODES_WITH_TEXT) break;
+    if (timeLeft() < 15_000) {
+      cut = true;
+      break;
+    }
     const { fonts = [] } = await cdp.send("CSS.getPlatformFontsForNode", { nodeId }).catch(() => ({}));
     const drawn = fonts.filter((font) => font.glyphCount > 0);
     if (!drawn.length) continue;
@@ -283,22 +290,30 @@ async function readRole(cdp, rootId, selector) {
       faces.set(key, face);
     }
   }
-  return [...faces.values()].sort((a, b) => b.glyphs - a.glyphs);
+  return { faces: [...faces.values()].sort((a, b) => b.glyphs - a.glyphs), cut };
 }
 
+// The faces of each role, and the roles the run's time ran out before any
+// text of was read (cut): the time a slow browser or a font that never
+// comes took, which a role with no text does not tell from one never read.
 async function readRoles(cdp) {
   const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
   const roles = {};
+  const cut = [];
   for (const [role, selectors] of ROLES) {
     for (const selector of selectors) {
-      const faces = await readRole(cdp, root.nodeId, selector);
-      if (faces.length) {
-        roles[role] = faces;
+      const read = await readRole(cdp, root.nodeId, selector);
+      if (read.faces.length) {
+        roles[role] = read.faces;
+        break;
+      }
+      if (read.cut) {
+        cut.push(role);
         break;
       }
     }
   }
-  return roles;
+  return { roles, cut };
 }
 
 // A declaration list split on the semicolons outside quotes and brackets: a
@@ -474,8 +489,9 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
 // not answer (failed), about:blank or the like when the page moved itself
 // on to that (left), for a page that did not draw, so it could not be
 // scrolled, the style sheet it waited for, if one had not come (stalled),
-// and the addresses that are not web addresses the page tried to open
-// (tried).
+// the addresses that are not web addresses the page tried to open
+// (tried), and the roles the run's time ran out before any text of was
+// read (cut).
 // pageUrl is the address of the page the roles were read from, or the last
 // web address the tab showed when it has moved on to about:blank or to a
 // blob: address, so it is always a web address.
@@ -486,7 +502,7 @@ async function scanPage(cdp, url, log = () => {}) {
   await cdp.send("CSS.enable");
   const { frameTree } = await cdp.send("Page.getFrameTree");
   recorded.page.frame = frameTree.frame.id;
-  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, files: [], skipped: [], refusedRead: [], rules: [], faces: [], loaded: [], asked: [], tried: [], ...found });
+  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, cut: [], files: [], skipped: [], refusedRead: [], rules: [], faces: [], loaded: [], asked: [], tried: [], ...found });
   log(`Opening ${url}`);
   let pageUrl;
   try {
@@ -517,7 +533,7 @@ async function scanPage(cdp, url, log = () => {}) {
   await fontsReady(cdp);
   await sleep(500);
   const title = String((await evaluate(cdp, "document.title")) || "").trim();
-  const roles = await readRoles(cdp);
+  const { roles, cut } = await readRoles(cdp);
   // With what the guard cancelled in the page the roles were read from.
   const tried = [...recorded.tried, ...(await triedSoFar(cdp))];
   // A script or a meta refresh can have moved the tab on since the load
@@ -548,7 +564,7 @@ async function scanPage(cdp, url, log = () => {}) {
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, files, skipped, refusedRead, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked], tried };
+  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked], tried };
 }
 
 module.exports = { scanPage, fontFaceRules, decodeDataUrl };

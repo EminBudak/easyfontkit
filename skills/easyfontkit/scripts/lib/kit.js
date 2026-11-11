@@ -1083,6 +1083,11 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     if (scan.failed) throw new Error(notOpened(url, scan));
     if (scan.left) throw new Error(wentBlank(url, scan));
     if (scan.stalled) throw new Error(stalledPage(url, scan));
+    // A page none of whose text was read in the run's time is not one that
+    // has none.
+    if (!Object.keys(scan.roles).length && scan.cut.length) {
+      throw new Error(`The run's time ran out before the text of ${scan.pageUrl} could be read, so no kit was made. The machine or the site may be slow; try again, or give it more time with --timeout.`);
+    }
     if (!Object.keys(scan.roles).length && !scan.files.length) {
       throw new Error(`${scan.pageUrl} showed no text and loaded no fonts, so nothing was read. The site may turn away headless browsers; check the page in a normal browser.`);
     }
@@ -1094,6 +1099,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       const notes = [...built.notes];
       for (const skipped of scan.skipped) notes.push(`${skipped.url} was not a usable font file: ${skipped.reason}.`);
       notes.push(...triedNotes(scan.tried));
+      if (scan.cut.length) notes.push(`The run's time ran out before the ${list(scan.cut.map((role) => ROLE_WORDS[role]))} could be read: give it more time with --timeout.`);
       if (!files) notes.push("Run with --no-files: the font files were read but not saved.");
       kit = {
         version: 1,

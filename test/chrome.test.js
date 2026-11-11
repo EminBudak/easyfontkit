@@ -11,7 +11,7 @@ const test = require("node:test");
 const { spawn, spawnSync } = require("node:child_process");
 const { launch, killBrowsers, connect, openPage, navigate, HANDLERS, STAND_INS } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { makeFontKit } = require("../skills/easyfontkit/scripts/lib/kit");
-const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
+const { setTimeLimit, timeLeft } = require("../skills/easyfontkit/scripts/lib/time");
 const { devtools, pipeTo } = require("./devtools");
 
 // The stand-in browser that carries its pipe to the stand-in DevTools end.
@@ -755,6 +755,34 @@ test("a page whose own scripts hold up the read of a node's text, which tells a 
   assert.deepEqual(Object.keys(kit.roles), ["heading", "body", "button", "code"]);
   assert.equal(asked(endpoint).filter((call) => call === "tab Runtime.callFunctionOn").length, 1, "asked once");
   assert.ok(Date.now() - started < 30_000, `the run took ${Date.now() - started} ms`);
+  assert.ok(await waitFor(pid()), "the browser is ended");
+});
+
+// The run's time spent before the roles are read, as by a font that never
+// comes or a browser slow to start: a call answered only once the run has
+// less than the 15 s a role is read in.
+const whenTimeIsShort = (value) =>
+  new Promise((resolve) => {
+    const check = () => (timeLeft() < 14_000 ? resolve(value) : setTimeout(check, 100).unref());
+    check();
+  });
+
+test("a run whose time runs out before any of the page's text could be read makes no kit and says so, and the earlier kit stays, where it saved a kit that said the page had no text; one whose time runs out after some roles were read saves them with a note that names the others", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async (t) => {
+  const { parent, temp, pid, serve } = standIn(t);
+  const dir = path.join(parent, "kit");
+  fs.mkdirSync(dir);
+  const kit = { "fonts.json": JSON.stringify({ version: 1, generator: "easyfontkit 0.1.3", url: "https://acme.example/", families: [] }), "FONTS.md": "# Fonts of acme.example\n", "fonts.css": ":root {}\n" };
+  for (const [name, text] of Object.entries(kit)) fs.writeFileSync(path.join(dir, name), text);
+  await serve({ calls: { ...PAGE, "DOM.querySelectorAll": () => whenTimeIsShort({ nodeIds: [2] }) } });
+  await assert.rejects(makeFontKit("https://acme.example/", { dir, timeLimit: 30_000 }), { message: "The run's time ran out before the text of https://acme.example/ could be read, so no kit was made. The machine or the site may be slow; try again, or give it more time with --timeout." });
+  assert.deepEqual(Object.fromEntries(fs.readdirSync(dir).map((name) => [name, fs.readFileSync(path.join(dir, name), "utf8")])), kit, "the earlier kit is as it was");
+  assert.ok(await waitFor(pid()), "the browser is ended");
+  assert.deepEqual(fs.readdirSync(temp), [], "no profile is left");
+  // The headings read at once, and the rest once the time is short.
+  await serve({ calls: { ...PAGE, "DOM.querySelectorAll": (times) => (times ? whenTimeIsShort({ nodeIds: [2] }) : { nodeIds: [2] }) } });
+  const { kit: made } = await makeFontKit("https://acme.example/", { dir: path.join(parent, "some"), timeLimit: 30_000 });
+  assert.deepEqual(Object.keys(made.roles), ["heading"]);
+  assert.deepEqual(made.notes, ["The run's time ran out before the body text, buttons and code could be read: give it more time with --timeout."]);
   assert.ok(await waitFor(pid()), "the browser is ended");
 });
 

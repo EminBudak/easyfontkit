@@ -1821,6 +1821,33 @@ test("a font file from another site with no CORS header that the page also prelo
   }
 });
 
+test("a font file whose server sends no bytes, or one cut short, is noted with that in plain words, and its family's note does not say to try again later", { skip: noBrowser }, async () => {
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Odd</title><style>
+        @font-face { font-family: "Empty Font"; src: url("/empty.ttf") format("truetype"); }
+        @font-face { font-family: "Cut Font"; src: url("/cut.ttf") format("truetype"); }
+        h1 { font-family: "Empty Font", serif; } p { font-family: "Cut Font", sans-serif; }
+      </style></head><body><h1>A heading in a font with no bytes</h1><p>Body text in a font cut short.</p></body></html>`,
+    },
+    "/empty.ttf": { type: "font/ttf", body: "" },
+    "/cut.ttf": { type: "font/ttf", body: interAs().subarray(0, 100) },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-odd-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(origin, { dir, timeLimit: 60_000 });
+    assert.deepEqual([kit.roles.heading.family, kit.roles.body.family], ["Empty Font", "Cut Font"]);
+    assert.ok(kit.notes.includes(`${origin}/empty.ttf was not a usable font file: the server sent an empty file.`), kit.notes.join("\n"));
+    assert.ok(kit.notes.includes(`${origin}/cut.ttf was not a usable font file: cut short or broken: its tables run past its 100 bytes.`), kit.notes.join("\n"));
+    assert.doesNotMatch(kit.notes.join("\n"), /try again later|offset|out of range/);
+    assert.equal(kit.notes.length, 4, kit.notes.join("\n"));
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its process group, leaves the earlier kit as it was, ends its browser with its crash handler, leaves no crash report and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

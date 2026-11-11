@@ -48,6 +48,7 @@ function record(cdp) {
   cdp.on("Network.loadingFinished", ({ requestId }) => {
     const font = fonts.get(requestId);
     if (!font) return;
+    font.finished = true;
     font.body = cdp
       .send("Network.getResponseBody", { requestId })
       .then(({ body, base64Encoded }) => Buffer.from(body, base64Encoded ? "base64" : "utf8"))
@@ -355,10 +356,11 @@ function decodeDataUrl(url) {
 
 // The font files, each once: the same file can be asked for twice, under
 // two addresses or as a data URL. A file the browser refused is skipped
-// with why, as one its server answered with an error is, and with that
-// error when its server answered it with one. One read all the same from
-// that address, as by a preload the page made without crossorigin, which
-// the browser does not hold to CORS, is in the kit and not skipped.
+// with why, as one its server answered with an error or with no bytes at
+// all is, and with that error when its server answered it with one. One
+// read all the same from that address, as by a preload the page made
+// without crossorigin, which the browser does not hold to CORS, is in the
+// kit and not skipped.
 async function readFiles(fonts, rules, faces, refused = new Map(), statuses = new Map()) {
   const files = new Map();
   const skipped = [];
@@ -376,6 +378,8 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
     const body = font.body ? await font.body : null;
     if (body && body.length) add(body, font.urls);
     else if (font.status >= 400) skipped.push({ url: font.urls[0] || "", reason: `the server answered ${font.status}` });
+    // A whole answer with no bytes in it, as another run gets too.
+    else if (font.finished && body) skipped.push({ url: font.urls[0] || "", reason: "the server sent an empty file" });
   }
   const read = (url) => [...files.values()].some((file) => file.urls.includes(url));
   for (const [requestId, refusal] of refused) {

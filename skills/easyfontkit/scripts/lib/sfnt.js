@@ -48,6 +48,7 @@ function woffTables(buf) {
     const start = buf.readUInt32BE(entry + 4);
     const compressed = buf.readUInt32BE(entry + 8);
     const original = buf.readUInt32BE(entry + 12);
+    if (start + compressed > buf.length) throw new RangeError("a WOFF table runs past the file's end");
     const data = buf.subarray(start, start + compressed);
     tables[tag] = compressed < original ? zlib.inflateSync(data) : data;
   }
@@ -74,6 +75,7 @@ function woff2Tables(buf) {
     directory.push({ tag, length: transformed ? base128(buf, pos) : original, transformed });
   }
   if (buf.toString("latin1", 4, 8) === "ttcf") throw new Error("a WOFF2 font collection, which easyfontkit does not read yet");
+  if (pos.i + compressedLength > buf.length) throw new RangeError("the WOFF2 tables run past the file's end");
   const data = zlib.brotliDecompressSync(buf.subarray(pos.i, pos.i + compressedLength));
   const tables = {};
   let offset = 0;
@@ -229,9 +231,27 @@ function readAxes(fvar) {
   return axes;
 }
 
+// A file whose tables, or the header that says where they are, run past its
+// end, as in a file cut short or broken, makes Node's buffer reads throw
+// their own words, which name offsets: they are said plainly instead.
+function plainly(buf, read) {
+  try {
+    return read();
+  } catch (err) {
+    if (err instanceof RangeError || err.code === "ERR_OUT_OF_RANGE" || err.code === "ERR_BUFFER_OUT_OF_BOUNDS") {
+      throw new Error(`cut short or broken: its tables run past its ${buf.length} bytes`);
+    }
+    throw err;
+  }
+}
+
 // Everything easyfontkit uses from a font file. Throws on a file that is not
 // a font; returns empty fields for tables a file leaves out.
 function describeFont(buf) {
+  return plainly(buf, () => describeTables(buf));
+}
+
+function describeTables(buf) {
   const { format, tables } = readTables(buf);
   const all = new Set();
   const names = readNames(tables.name, all);

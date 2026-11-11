@@ -51,3 +51,9 @@ test("refuses what is not a font", () => {
   assert.throws(() => describeFont(Buffer.from("<html>not found</html>")), /not a font file/);
   assert.throws(() => describeFont(Buffer.alloc(4)), /too short/);
 });
+
+test("a font file cut short is said to be cut short or broken, in plain words and not in Node's own about offsets", () => {
+  for (const font of [interAs(), fixture("inter-latin-400.woff"), fixture("inter-latin-400.woff2")]) {
+    assert.throws(() => describeFont(font.subarray(0, 100)), { message: "cut short or broken: its tables run past its 100 bytes" });
+  }
+});

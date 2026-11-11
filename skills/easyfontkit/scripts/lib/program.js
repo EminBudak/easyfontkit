@@ -347,7 +347,9 @@ const LOG = /^\[[^\]]*?:(FATAL|ERROR|WARNING|INFO|VERBOSE\d*):[^\]]*\]\s*/;
 // A line of Chrome's log from its D-Bus code that is not the one that ended
 // it, as "Failed to connect to the bus": the browser is started with a
 // session bus where nothing listens (see launch), and says so as it starts.
-const BUS = /^\[[^\]]*?:(ERROR|WARNING|INFO|VERBOSE\d*):dbus\//;
+// Chrome names the file a line comes from by its folders and line
+// (dbus/bus.cc:405), and older builds by its name alone (bus.cc(399)).
+const BUS = /^\[[^\]]*?:(ERROR|WARNING|INFO|VERBOSE\d*):(dbus\/|(bus|object_proxy)\.cc\()/;
 // What libwayland says as Chrome starts when the Wayland display the run
 // gives it, a socket in its profile that is never made (see launch), has a
 // path too long for a socket, as in a long temp folder: it finds no display

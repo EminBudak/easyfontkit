@@ -6,14 +6,14 @@ const { describeFont, glyphsOf } = require("../skills/easyfontkit/scripts/lib/sf
 const zlib = require("node:zlib");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { fixture, interAs, packedZeros, woff2With, woffWith } = require("./helpers");
+const { fixture, interAs, cmap12, packedZeros, woff2With, woffWith } = require("./helpers");
 
 // What `script` prints as JSON, run in a Node.js process of its own with the
 // heap given, in megabytes, and killed after `seconds`: a test of what a
 // file costs, which on code that has no bound would take minutes or all the
 // memory there is, ends in that time and fails.
 function measured(script, { heap = 256, seconds = 60 } = {}) {
-  const setup = `const { describeFont, glyphsOf } = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/sfnt"))});\nconst { interAs } = require(${JSON.stringify(path.join(__dirname, "helpers"))});\n`;
+  const setup = `const { describeFont, glyphsOf } = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/sfnt"))});\nconst { interAs, cmap12 } = require(${JSON.stringify(path.join(__dirname, "helpers"))});\n`;
   const run = spawnSync(process.execPath, [`--max-old-space-size=${heap}`, "-e", setup + script], { encoding: "utf8", timeout: seconds * 1000 });
   assert.equal(run.status, 0, `${run.error || ""} ${run.signal || ""} ${run.stderr}`);
   return JSON.parse(run.stdout);
@@ -210,4 +210,51 @@ console.log(JSON.stringify(out.map(({ kept, ...rest }) => rest)));
     assert.ok(license <= 2000 && copyright <= 2000, `font ${i}: a license of ${license} and a copyright of ${copyright} characters`);
   }
   assert.ok(result[0].license > 1000, "a long name keeps its first 2000 characters");
+});
+
+test("a character is looked up in a cmap by halves, as the browser looks it up, in a format 12 and a format 4 subtable alike, so text in tens of thousands of characters looked up in a cmap of hundreds of thousands of groups takes a moment", () => {
+  // Format 12, against a lookup that walks every group.
+  const groups = 1000;
+  const twelve = glyphsOf(interAs({ cmap: cmap12(groups, (i) => 3 * i + 1) }));
+  for (let code = 0; code < 3 * groups + 10; code++) assert.equal(twelve(code), code % 3 === 1 && code < 3 * groups, `U+${code.toString(16)}`);
+  // Format 4: four segments, by idDelta and by idRangeOffset, and the last
+  // one, at U+FFFF, which the format asks for.
+  const segments = [
+    [0x41, 0x46, 0, 0],
+    [0x61, 0x63, 10, 0],
+    [0x4e00, 0x4e02, 0, 1],
+    [0xffff, 0xffff, 1, 0],
+  ];
+  const n = segments.length;
+  const four = Buffer.alloc(12 + 16 + n * 8 + 6);
+  four.writeUInt16BE(1, 2);
+  four.writeUInt16BE(3, 4);
+  four.writeUInt16BE(1, 6);
+  four.writeUInt32BE(12, 8);
+  const t = 12;
+  four.writeUInt16BE(4, t);
+  four.writeUInt16BE(16 + n * 8 + 6, t + 2);
+  four.writeUInt16BE(n * 2, t + 6);
+  segments.forEach(([start, end, delta, ranged], s) => {
+    four.writeUInt16BE(end, t + 14 + s * 2);
+    four.writeUInt16BE(start, t + 16 + n * 2 + s * 2);
+    four.writeInt16BE(delta, t + 16 + n * 4 + s * 2);
+    // The third segment's glyphs come from the array after the offsets:
+    // 7, 0 (none) and 9.
+    if (ranged) four.writeUInt16BE((n - s) * 2, t + 16 + n * 6 + s * 2);
+  });
+  [7, 0, 9].forEach((glyph, k) => four.writeUInt16BE(glyph, t + 16 + n * 8 + k * 2));
+  const has = glyphsOf(interAs({ cmap: four }));
+  const expect = { 0x40: false, 0x41: true, 0x46: true, 0x47: false, 0x60: false, 0x61: true, 0x63: true, 0x64: false, 0x4e00: true, 0x4e01: false, 0x4e02: true, 0x4e03: false, 0xfffe: false, 0x10000: false };
+  for (const [code, glyph] of Object.entries(expect)) assert.equal(has(Number(code)), glyph, `U+${Number(code).toString(16)}`);
+  // 350000 groups, and 20000 characters looked up in them.
+  const { ms, found } = measured(`
+const has = glyphsOf(interAs({ cmap: cmap12(350000) }));
+const started = Date.now();
+let found = 0;
+for (let i = 0; i < 20000; i++) if (has(0x4e00 + i)) found++;
+console.log(JSON.stringify({ ms: Date.now() - started, found }));
+`);
+  assert.equal(found, 10000);
+  assert.ok(ms < 5_000, `${ms} ms`);
 });

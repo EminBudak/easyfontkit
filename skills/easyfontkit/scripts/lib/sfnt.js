@@ -206,7 +206,12 @@ function embeddingOf(fsType) {
 }
 
 // Glyph id for a character, from a format 4 or 12 cmap subtable, or null
-// when the cmap has neither.
+// when the cmap has neither. The segments of a format 4 subtable come in
+// the order of their last code point, and the groups of a format 12 one in
+// the order of their first, so a character is looked for by halves, as the
+// browser looks for it, and never past what the subtable holds: a cmap can
+// have hundreds of thousands of groups, and the glyph check looks up every
+// character of the text a fallback drew.
 function glyphLookup(cmap) {
   if (!cmap || cmap.length < 4) return null;
   const count = cmap.readUInt16BE(2);
@@ -224,36 +229,48 @@ function glyphLookup(cmap) {
   if (!best) return null;
   const t = cmap.subarray(best.offset);
   if (best.format === 12) {
-    const groups = t.readUInt32BE(12);
+    if (t.length < 16) return null;
+    const groups = Math.min(t.readUInt32BE(12), Math.floor((t.length - 16) / 12));
     return (code) => {
-      for (let g = 0; g < groups; g++) {
+      let low = 0;
+      let high = groups - 1;
+      while (low <= high) {
+        const g = (low + high) >>> 1;
         const at = 16 + g * 12;
         const start = t.readUInt32BE(at);
-        const end = t.readUInt32BE(at + 4);
-        if (code >= start && code <= end) return t.readUInt32BE(at + 8) + (code - start);
+        if (code < start) high = g - 1;
+        else if (code > t.readUInt32BE(at + 4)) low = g + 1;
+        else return t.readUInt32BE(at + 8) + (code - start);
       }
       return 0;
     };
   }
-  const segments = t.readUInt16BE(6) / 2;
+  if (t.length < 16) return null;
+  const segments = Math.min(Math.floor(t.readUInt16BE(6) / 2), Math.floor((t.length - 16) / 8));
   const ends = 14;
   const starts = ends + segments * 2 + 2;
   const deltas = starts + segments * 2;
   const ranges = deltas + segments * 2;
   return (code) => {
-    for (let s = 0; s < segments; s++) {
-      if (code > t.readUInt16BE(ends + s * 2)) continue;
-      const start = t.readUInt16BE(starts + s * 2);
-      if (code < start) return 0;
-      const delta = t.readInt16BE(deltas + s * 2);
-      const rangeOffset = t.readUInt16BE(ranges + s * 2);
-      if (!rangeOffset) return (code + delta) & 0xffff;
-      const at = ranges + s * 2 + rangeOffset + (code - start) * 2;
-      if (at + 2 > t.length) return 0;
-      const glyph = t.readUInt16BE(at);
-      return glyph ? (glyph + delta) & 0xffff : 0;
+    // The first segment whose last code point is not below the character's.
+    let low = 0;
+    let high = segments;
+    while (low < high) {
+      const s = (low + high) >>> 1;
+      if (t.readUInt16BE(ends + s * 2) < code) low = s + 1;
+      else high = s;
     }
-    return 0;
+    if (low >= segments) return 0;
+    const s = low;
+    const start = t.readUInt16BE(starts + s * 2);
+    if (code < start) return 0;
+    const delta = t.readInt16BE(deltas + s * 2);
+    const rangeOffset = t.readUInt16BE(ranges + s * 2);
+    if (!rangeOffset) return (code + delta) & 0xffff;
+    const at = ranges + s * 2 + rangeOffset + (code - start) * 2;
+    if (at + 2 > t.length) return 0;
+    const glyph = t.readUInt16BE(at);
+    return glyph ? (glyph + delta) & 0xffff : 0;
   };
 }
 

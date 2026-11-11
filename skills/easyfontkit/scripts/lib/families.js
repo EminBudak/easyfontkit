@@ -8,6 +8,7 @@
 const { licenseOf, sourceOf, redact } = require("./license");
 const { freeMatches, lookup, cleanName, words, key } = require("./match");
 const { glyphsOf } = require("./sfnt");
+const { timeLeft } = require("./time");
 
 const ROLE_ORDER = ["heading", "body", "button", "code"];
 const ROLE_WORDS = { heading: "headings", body: "body text", button: "buttons", code: "code" };
@@ -88,12 +89,21 @@ function inRange(range) {
 
 // Whether a family's files have a glyph for a code point, each file for the
 // code points its unicode-range gives it: a function of the code point, or
-// null when no file's cmap can be read. Each family's files are read once,
-// and each code point looked up once.
+// null when no file's cmap can be read, or the run's time ran out before
+// all were read. Each family's files are read once, and each code point
+// looked up once.
 const glyphsKnown = new WeakMap();
 function glyphsOfFamily(family) {
   if (glyphsKnown.has(family)) return glyphsKnown.get(family);
-  const files = family.files.map((file) => ({ has: glyphsOf(file.buffer), range: inRange(file.unicodeRange) })).filter(({ has }) => has);
+  const files = [];
+  for (const file of family.files) {
+    if (timeLeft() <= 0) {
+      glyphsKnown.set(family, null);
+      return null;
+    }
+    const has = glyphsOf(file.buffer);
+    if (has) files.push({ has, range: inRange(file.unicodeRange) });
+  }
   const known = new Map();
   const has = files.length
     ? (code) => {
@@ -117,17 +127,21 @@ function glyphsOfFamily(family) {
 // (late, each { covers, urls }) is not one it has no glyph for: that file
 // may have it, and its address is among `files`. "late" when the files
 // cannot tell, or no node's text was read, as of an input whose label is
-// the browser's own.
+// the browser's own, and when the run's time runs out before the text has
+// been looked at: a page can serve files with hundreds of thousands of
+// groups in their cmap, and text in tens of thousands of characters.
 function fallbackOf(face, family, late) {
   const nodes = (face.nodes || []).filter(({ length = 0 }) => length > 0);
   const has = nodes.length ? glyphsOfFamily(family) : null;
   const due = new Set();
   if (!has) return { why: "late", files: [] };
   let lacks = true;
+  let looked = 0;
   for (const { text = "", length = 0, system } of nodes) {
     let missing = 0;
     let slack = 0;
     for (const char of text) {
+      if ((++looked & 1023) === 0 && timeLeft() <= 0) return { why: "late", files: [] };
       if (/\s/u.test(char)) {
         slack++;
         continue;

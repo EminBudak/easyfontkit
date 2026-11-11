@@ -88,14 +88,35 @@ function sfnt(tables) {
 }
 
 // Inter as a TrueType file under other names: { names: {1: "Acme Sans", ...},
-// fsType: 0x0004 }, or with a name table of the test's own, as it is:
-// { name }.
-function interAs({ names = {}, fsType, name } = {}) {
+// fsType: 0x0004 }, or with a name table or a cmap of the test's own, as
+// they are: { name, cmap }.
+function interAs({ names = {}, fsType, name, cmap } = {}) {
   const tables = woffTables(fixture("inter-latin-400.woff"));
   if (Object.keys(names).length) tables.name = nameTable(names);
   if (name) tables.name = name;
+  if (cmap) tables.cmap = cmap;
   if (fsType !== undefined) tables["OS/2"].writeUInt16BE(fsType, 8);
   return sfnt(tables);
+}
+
+// A cmap with one subtable, of format 12, whose groups each give one glyph
+// to a character: the first `count` of `codes(i)`, in order.
+function cmap12(count, codes = (i) => 2 * i) {
+  const table = Buffer.alloc(12 + 16 + count * 12);
+  table.writeUInt16BE(1, 2);
+  table.writeUInt16BE(3, 4);
+  table.writeUInt16BE(10, 6);
+  table.writeUInt32BE(12, 8);
+  table.writeUInt16BE(12, 12);
+  table.writeUInt32BE(16 + count * 12, 16);
+  table.writeUInt32BE(count, 24);
+  for (let i = 0; i < count; i++) {
+    const at = 28 + i * 12;
+    table.writeUInt32BE(codes(i), at);
+    table.writeUInt32BE(codes(i), at + 4);
+    table.writeUInt32BE(i + 1, at + 8);
+  }
+  return table;
 }
 
 // Data that unpacks to `megabytes` MB of zeros, after `first` when it is
@@ -152,4 +173,4 @@ function woffWith(declared, packed) {
   return file;
 }
 
-module.exports = { fixture, interAs, packedZeros, woff2With, woffWith };
+module.exports = { fixture, interAs, cmap12, packedZeros, woff2With, woffWith };

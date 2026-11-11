@@ -6,8 +6,11 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const test = require("node:test");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { buildFamilies } = require("../skills/easyfontkit/scripts/lib/families");
 const { describeFont } = require("../skills/easyfontkit/scripts/lib/sfnt");
+const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
 const { interAs } = require("./helpers");
 
 const PAGE = "https://www.acme.com/";
@@ -374,4 +377,43 @@ test("a heavy cut the CSS names as one word, like Arial-Black, is a family of it
   // A cut that is no heavy weight still goes with its family.
   assert.equal(read('"HelveticaNeue-Bold", Helvetica, sans-serif', '"Helvetica Neue", sans-serif').roles.heading.family, "Helvetica Neue");
   assert.equal(read("HelveticaNeue-Black, sans-serif", '"Helvetica Neue", sans-serif').roles.heading.family, "Helvetica Neue Black");
+});
+
+test("the check of which characters a web font has glyphs for holds the run's time: four files whose cmap has 350000 groups and text in 20000 characters take a moment, and once the run's time has run out the note is the one on a late font, with no check", () => {
+  // In a process of its own, killed after 60 s, as code that looks at
+  // every group for every character takes minutes.
+  const script = `
+const crypto = require("node:crypto");
+const { buildFamilies } = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/families"))});
+const { describeFont } = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/sfnt"))});
+const { interAs, cmap12 } = require(${JSON.stringify(path.join(__dirname, "helpers"))});
+const font = interAs({ names: { 1: "Bomb" }, cmap: cmap12(350000) });
+const files = [1, 2, 3, 4].map((n) => {
+  const url = "https://www.acme.com/fonts/bomb-" + n + ".ttf";
+  return { sha: crypto.createHash("sha1").update(font).update(url).digest("hex"), urls: [url], buffer: font, font: describeFont(font) };
+});
+let text = "";
+for (let i = 0; i < 20000; i++) text += String.fromCodePoint(0x4e01 + 2 * i);
+const stack = '"Bomb", sans-serif';
+const face = { familyName: "Noto Sans CJK JP", postScriptName: "", custom: false, glyphs: 20000, italicGlyphs: 0, weights: { 400: 20000 }, stacks: { [stack]: 20000 }, nodes: [{ text, length: text.length, system: 20000 }] };
+const started = Date.now();
+const { notes } = buildFamilies({ pageUrl: "https://www.acme.com/", roles: { body: [face] }, files, rules: files.map((file) => ({ family: "Bomb", weight: "400", style: "normal", unicodeRange: "", urls: file.urls })), faces: [], loaded: [{ family: "Bomb" }] });
+console.log(JSON.stringify({ ms: Date.now() - started, notes }));
+`;
+  const run = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 60_000 });
+  assert.equal(run.status, 0, `${run.error || ""} ${run.signal || ""} ${run.stderr}`);
+  const { ms, notes } = JSON.parse(run.stdout);
+  assert.deepEqual(notes, ["Some of the body text was drawn with Noto Sans CJK JP, a fallback, as Bomb has no glyphs for those characters. That text is counted as Bomb, the font the site asks for."]);
+  assert.ok(ms < 10_000, `${ms} ms`);
+  // A run whose time has run out by then: the files are not looked at, and
+  // the note says what it said before the check.
+  const inter = file("https://www.acme.com/fonts/inter.ttf", { 1: "Acme Latin" });
+  const stack = '"Acme Latin", "Noto Sans CJK JP", sans-serif';
+  setTimeLimit(-1);
+  try {
+    const { notes: late } = buildFamilies({ pageUrl: PAGE, roles: { heading: [face("Noto Sans CJK JP", 9, stack, { custom: false, nodes: [["日本語の見出しです", 9]] })] }, files: [inter], rules: [rule("Acme Latin", inter.urls[0])], faces: [], loaded: [{ family: "Acme Latin" }] });
+    assert.deepEqual(late, ["Some of the headings were drawn with Noto Sans CJK JP, a fallback, because Acme Latin loaded too late for them. That text is counted as Acme Latin, the font the site asks for."]);
+  } finally {
+    setTimeLimit(120_000);
+  }
 });

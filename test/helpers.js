@@ -88,13 +88,14 @@ function sfnt(tables) {
 }
 
 // Inter as a TrueType file under other names: { names: {1: "Acme Sans", ...},
-// fsType: 0x0004 }, or with a name table or a cmap of the test's own, as
-// they are: { name, cmap }.
-function interAs({ names = {}, fsType, name, cmap } = {}) {
+// fsType: 0x0004 }, or with a name table, a cmap or an fvar of the test's
+// own, as they are: { name, cmap, fvar }.
+function interAs({ names = {}, fsType, name, cmap, fvar } = {}) {
   const tables = woffTables(fixture("inter-latin-400.woff"));
   if (Object.keys(names).length) tables.name = nameTable(names);
   if (name) tables.name = name;
   if (cmap) tables.cmap = cmap;
+  if (fvar) tables.fvar = fvar;
   if (fsType !== undefined) tables["OS/2"].writeUInt16BE(fsType, 8);
   return sfnt(tables);
 }

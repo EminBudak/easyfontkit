@@ -297,10 +297,12 @@ function lowercaseWidth(tables, upm) {
   return found >= 20 ? Math.round((sum / found / upm) * 1000) / 1000 : null;
 }
 
+// A variable font's axes, the first 64 of them: no font has more than a
+// few tens, and a page could serve one whose fvar names 65535.
 function readAxes(fvar) {
   if (!fvar || fvar.length < 16) return [];
   const start = fvar.readUInt16BE(4);
-  const count = fvar.readUInt16BE(8);
+  const count = Math.min(fvar.readUInt16BE(8), 64);
   const size = fvar.readUInt16BE(10);
   const fixed = (at) => Math.round((fvar.readInt32BE(at) / 65536) * 100) / 100;
   const axes = [];

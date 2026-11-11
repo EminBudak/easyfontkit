@@ -258,3 +258,18 @@ console.log(JSON.stringify({ ms: Date.now() - started, found }));
   assert.equal(found, 10000);
   assert.ok(ms < 5_000, `${ms} ms`);
 });
+
+test("a variable font's axes are read up to 64, as no font has more than a few tens and a page could serve one whose fvar names 65535", () => {
+  const count = 65535;
+  const fvar = Buffer.alloc(16 + count * 20);
+  fvar.writeUInt16BE(1, 0);
+  fvar.writeUInt16BE(16, 4);
+  fvar.writeUInt16BE(2, 6);
+  fvar.writeUInt16BE(count, 8);
+  fvar.writeUInt16BE(20, 10);
+  for (let i = 0; i < count; i++) fvar.write("wght", 16 + i * 20, "latin1");
+  // Inter's latin file has no fvar of its own.
+  const axes = describeFont(interAs({ fvar })).axes;
+  assert.equal(axes.length, 64);
+  assert.deepEqual(axes[0], { tag: "wght", min: 0, default: 0, max: 0 });
+});

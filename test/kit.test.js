@@ -1928,27 +1928,34 @@ test("text a fallback drew while a file of the web font's for those characters h
   }
 });
 
-test("a font file whose server sends no bytes, or one cut short, is noted with that in plain words, and its family's note does not say to try again later", { skip: noBrowser }, async () => {
+test("a font file whose server sends no bytes, or one cut short, in its directory or after it, is noted with that in plain words, is not in the kit, and its family's note does not say to try again later", { skip: noBrowser }, async () => {
+  const ttf = interAs();
+  const almost = ttf.subarray(0, Math.floor(ttf.length * 0.95));
   const { server, origin } = await serve({
     "/": {
       body: `<!doctype html><html><head><title>Odd</title><style>
         @font-face { font-family: "Empty Font"; src: url("/empty.ttf") format("truetype"); }
         @font-face { font-family: "Cut Font"; src: url("/cut.ttf") format("truetype"); }
-        h1 { font-family: "Empty Font", serif; } p { font-family: "Cut Font", sans-serif; }
-      </style></head><body><h1>A heading in a font with no bytes</h1><p>Body text in a font cut short.</p></body></html>`,
+        @font-face { font-family: "Almost Font"; src: url("/almost.ttf") format("truetype"); }
+        h1 { font-family: "Empty Font", serif; } p { font-family: "Cut Font", sans-serif; } button { font-family: "Almost Font", sans-serif; }
+      </style></head><body><h1>A heading in a font with no bytes</h1><p>Body text in a font cut short.</p><button>A button in a font cut near its end</button></body></html>`,
     },
     "/empty.ttf": { type: "font/ttf", body: "" },
-    "/cut.ttf": { type: "font/ttf", body: interAs().subarray(0, 100) },
+    "/cut.ttf": { type: "font/ttf", body: ttf.subarray(0, 100) },
+    "/almost.ttf": { type: "font/ttf", body: almost },
   });
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-odd-"));
   const dir = path.join(parent, "kit");
   try {
     const { kit } = await makeFontKit(origin, { dir, timeLimit: 60_000 });
-    assert.deepEqual([kit.roles.heading.family, kit.roles.body.family], ["Empty Font", "Cut Font"]);
+    assert.deepEqual([kit.roles.heading.family, kit.roles.body.family, kit.roles.button.family], ["Empty Font", "Cut Font", "Almost Font"]);
     assert.ok(kit.notes.includes(`${origin}/empty.ttf was not a usable font file: the server sent an empty file.`), kit.notes.join("\n"));
     assert.ok(kit.notes.includes(`${origin}/cut.ttf was not a usable font file: cut short or broken: its tables run past its 100 bytes.`), kit.notes.join("\n"));
-    assert.doesNotMatch(kit.notes.join("\n"), /try again later|offset|out of range/);
-    assert.equal(kit.notes.length, 4, kit.notes.join("\n"));
+    assert.ok(kit.notes.includes(`${origin}/almost.ttf was not a usable font file: cut short or broken: its tables run past its ${almost.length} bytes.`), kit.notes.join("\n"));
+    assert.deepEqual(kit.families.flatMap((family) => family.files), [], "no cut file is in the kit");
+    assert.doesNotMatch(fs.readFileSync(path.join(dir, "fonts.css"), "utf8"), /@font-face \{/);
+    assert.doesNotMatch(kit.notes.join("\n"), /try again later|offset|out of range|loaded too late/);
+    assert.equal(kit.notes.length, 6, kit.notes.join("\n"));
   } finally {
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });

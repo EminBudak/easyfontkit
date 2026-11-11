@@ -4,8 +4,37 @@
 // (family, maker, copyright, license), how it may be embedded, and the
 // measurements a lookalike is matched on. WOFF2, WOFF, TrueType, OpenType
 // and the first font of a collection. Glyph outlines are never decoded.
+// A file is unpacked once, to no more than its own directory says and
+// never to more than MOST.
 
 const zlib = require("zlib");
+
+// The most the tables of one font file may unpack to: well above any web
+// font's, as the largest, for Chinese, Japanese or Korean, unpack to a few
+// tens of megabytes. A page could serve a file of a few hundred bytes whose
+// tables unpack to gigabytes, so one whose directory says more is not
+// unpacked.
+const MOST = 64 * 1024 * 1024;
+const inMB = (bytes) => `${Math.round(bytes / (1024 * 1024))} MB`;
+
+// A file's tables said not to fit in MOST, before anything is unpacked.
+function tooLarge(bytes) {
+  if (bytes > MOST) throw new Error(`its tables would unpack to ${inMB(bytes)}, more than the ${inMB(MOST)} easyfontkit reads of one font file`);
+}
+
+// Data unpacked by zlib's inflate or brotli, to no more than `length`
+// bytes, the size the file's directory gives it. What zlib and brotli say
+// of data they cannot unpack, as one cut short, garbled on the way or
+// mangled in an upload, is said plainly, and so is data that unpacks to
+// more than its directory says.
+function unpack(how, data, length) {
+  try {
+    return how(data, { maxOutputLength: Math.max(1, length) });
+  } catch (err) {
+    if (err.code === "ERR_BUFFER_TOO_LARGE") throw new Error("broken: its tables unpack to more than its directory says");
+    throw new Error("cut short or broken: its tables cannot be unpacked");
+  }
+}
 
 // WOFF2 names the common tables by index (WOFF2 spec, table 3).
 const WOFF2_TAGS = [
@@ -34,14 +63,17 @@ function sfntTables(buf, offset = 0) {
     const tag = buf.toString("latin1", entry, entry + 4);
     const start = buf.readUInt32BE(entry + 8);
     const length = buf.readUInt32BE(entry + 12);
-    if (start + length <= buf.length) tables[tag] = buf.subarray(start, start + length);
+    // A table that runs past the end, as in a file cut short after its
+    // directory: the browser refuses such a file too.
+    if (start + length > buf.length) throw new RangeError("a table runs past the file's end");
+    tables[tag] = buf.subarray(start, start + length);
   }
   return tables;
 }
 
 function woffTables(buf) {
   const count = buf.readUInt16BE(12);
-  const tables = {};
+  const directory = [];
   for (let i = 0; i < count; i++) {
     const entry = 44 + i * 20;
     const tag = buf.toString("latin1", entry, entry + 4);
@@ -49,9 +81,11 @@ function woffTables(buf) {
     const compressed = buf.readUInt32BE(entry + 8);
     const original = buf.readUInt32BE(entry + 12);
     if (start + compressed > buf.length) throw new RangeError("a WOFF table runs past the file's end");
-    const data = buf.subarray(start, start + compressed);
-    tables[tag] = compressed < original ? zlib.inflateSync(data) : data;
+    directory.push({ tag, data: buf.subarray(start, start + compressed), original });
   }
+  tooLarge(directory.reduce((sum, { data, original }) => sum + Math.max(data.length, original), 0));
+  const tables = {};
+  for (const { tag, data, original } of directory) tables[tag] = data.length < original ? unpack(zlib.inflateSync, data, original) : data;
   return tables;
 }
 
@@ -76,7 +110,11 @@ function woff2Tables(buf) {
   }
   if (buf.toString("latin1", 4, 8) === "ttcf") throw new Error("a WOFF2 font collection, which easyfontkit does not read yet");
   if (pos.i + compressedLength > buf.length) throw new RangeError("the WOFF2 tables run past the file's end");
-  const data = zlib.brotliDecompressSync(buf.subarray(pos.i, pos.i + compressedLength));
+  // The tables come in one brotli stream, which unpacks to their lengths
+  // as the directory gives them, one after the other.
+  const length = directory.reduce((sum, table) => sum + table.length, 0);
+  tooLarge(length);
+  const data = unpack(zlib.brotliDecompressSync, buf.subarray(pos.i, pos.i + compressedLength), length);
   const tables = {};
   let offset = 0;
   for (const table of directory) {
@@ -248,13 +286,16 @@ function plainly(buf, read) {
 }
 
 // Everything easyfontkit uses from a font file. Throws on a file that is not
-// a font; returns empty fields for tables a file leaves out.
+// a font; returns empty fields for tables a file leaves out. Its cmap is
+// kept for glyphsOf, so the file is not unpacked again.
+const cmaps = new WeakMap();
 function describeFont(buf) {
   return plainly(buf, () => describeTables(buf));
 }
 
 function describeTables(buf) {
   const { format, tables } = readTables(buf);
+  cmaps.set(buf, tables.cmap ? Buffer.from(tables.cmap) : null);
   const all = new Set();
   const names = readNames(tables.name, all);
   const upm = tables.head && tables.head.length >= 20 ? tables.head.readUInt16BE(18) : 0;
@@ -296,12 +337,12 @@ function describeTables(buf) {
 }
 
 // Whether a font file has a glyph for a character, by its code point, read
-// from its cmap: a function of the code point, or null when the file has
-// no cmap that can be read.
+// from its cmap, the one describeFont kept when it read the file: a
+// function of the code point, or null when the file has no cmap that can
+// be read.
 function glyphsOf(buf) {
   try {
-    const { tables } = readTables(buf);
-    const glyph = glyphLookup(tables.cmap);
+    const glyph = glyphLookup(cmaps.has(buf) ? cmaps.get(buf) : readTables(buf).tables.cmap);
     if (!glyph) return null;
     return (code) => {
       try {

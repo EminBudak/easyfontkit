@@ -96,4 +96,55 @@ function interAs({ names = {}, fsType } = {}) {
   return sfnt(tables);
 }
 
-module.exports = { fixture, interAs };
+// Data that unpacks to `megabytes` MB of zeros, packed as it streams so
+// the zeros are never held whole: with brotli, or with zlib's deflate.
+async function packedZeros(megabytes, brotli) {
+  const stream = brotli ? zlib.createBrotliCompress({ params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } }) : zlib.createDeflate({ level: 9 });
+  const out = [];
+  stream.on("data", (chunk) => out.push(chunk));
+  const done = new Promise((resolve) => stream.on("end", resolve));
+  const zeros = Buffer.alloc(1 << 20);
+  for (let i = 0; i < megabytes; i++) if (!stream.write(zeros)) await new Promise((resolve) => stream.once("drain", resolve));
+  stream.end();
+  await done;
+  return Buffer.concat(out);
+}
+
+// A WOFF2 file with one table, its name table, whose directory says it is
+// `declared` bytes long, followed by `packed` as its brotli stream.
+function woff2With(declared, packed) {
+  const digits = [];
+  for (let n = declared; ; n = Math.floor(n / 128)) {
+    digits.unshift(n % 128);
+    if (n < 128) break;
+  }
+  const length = Buffer.from(digits.map((digit, i) => (i < digits.length - 1 ? digit | 0x80 : digit)));
+  const header = Buffer.alloc(48);
+  header.write("wOF2", 0, "latin1");
+  header.writeUInt32BE(0x00010000, 4);
+  header.writeUInt16BE(1, 12);
+  header.writeUInt32BE(Math.min(declared + 28, 0xffffffff), 16);
+  header.writeUInt32BE(packed.length, 20);
+  const file = Buffer.concat([header, Buffer.from([5]), length, packed]);
+  file.writeUInt32BE(file.length, 8);
+  return file;
+}
+
+// A WOFF file with one table, its name table, `packed` with zlib's deflate,
+// whose directory says it unpacks to `declared` bytes.
+function woffWith(declared, packed) {
+  const header = Buffer.alloc(64);
+  header.write("wOFF", 0, "latin1");
+  header.writeUInt32BE(0x00010000, 4);
+  header.writeUInt16BE(1, 12);
+  header.writeUInt32BE(Math.min(declared + 28, 0xffffffff), 16);
+  header.write("name", 44, "latin1");
+  header.writeUInt32BE(64, 48);
+  header.writeUInt32BE(packed.length, 52);
+  header.writeUInt32BE(declared, 56);
+  const file = Buffer.concat([header, packed]);
+  file.writeUInt32BE(file.length, 8);
+  return file;
+}
+
+module.exports = { fixture, interAs, packedZeros, woff2With, woffWith };

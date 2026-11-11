@@ -253,8 +253,9 @@ function tempOf(profile) {
 // user may run, as a folder or a file on a noexec mount, is told before it
 // is started; a file the system cannot start, as a script whose interpreter
 // or a program whose loader or library is missing, or one for another
-// system, once it has failed to. The system can also be short of what it
-// takes to start one, as file descriptors.
+// system, and a script that could not start the browser it runs, once it
+// has failed to. The system can also be short of what it takes to start
+// one, as file descriptors.
 async function launch({ width, height }) {
   const place = chromePlace();
   if (!place) throw new Error(NOTHING);
@@ -299,17 +300,22 @@ async function launch({ width, height }) {
   open.add(started);
   let exited = false;
   let failure = null;
+  let code = null;
   const ended = new Promise((resolve) => {
-    child.on("exit", resolve);
+    child.on("exit", (status) => {
+      code = status;
+      resolve();
+    });
     child.on("error", (error) => {
       failure = failure || error;
       resolve();
     });
   }).then(() => (exited = true));
   // What the browser says on stderr, its first 8 KB: the system's loader
-  // says there which library is missing, and /bin/sh what it made of a file
-  // that is no program. The rest is read and let go, so the browser never
-  // waits to write it.
+  // says there which library is missing, /bin/sh what it made of a file
+  // that is no program, and a script's shell or env what it could not
+  // start. The rest is read and let go, so the browser never waits to
+  // write it.
   const said = [];
   let saidBytes = 0;
   if (child.stderr) {
@@ -386,7 +392,7 @@ async function launch({ width, height }) {
     }
     await close();
     // One that quit did not start; one still starting is slow.
-    if (how === "quit") throw quit({ error: failure, stderr: Buffer.concat(said).toString("utf8") });
+    if (how === "quit") throw quit({ error: failure, stderr: Buffer.concat(said).toString("utf8"), code });
     if (how === "slow") throw tooSlow(name, "start", wait);
     throw new Error(`${name} cannot be told to refuse the downloads a page starts (${how.refused}), so no kit was made: a site could save files on this machine through it. Point CHROME_PATH at another browser.`);
   }

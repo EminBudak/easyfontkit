@@ -5,9 +5,11 @@
 // on. The system says little: ENOENT for a script whose interpreter or a
 // program whose loader is not there, EACCES for a folder or a file on a
 // noexec mount, and a file it cannot run as a program it hands to /bin/sh,
-// which reads it as a script and fails with words of its own. So the path
-// is looked at before the browser is started, and the file again, more
-// closely, when it did not start.
+// which reads it as a script and fails with words of its own. A script that
+// runs the browser, as Chrome's own launcher on Linux does, says what it
+// could not start. So the path is looked at before the browser is started,
+// and the file again, more closely, with what was said, when it did not
+// start.
 
 const fs = require("fs");
 const path = require("path");
@@ -286,23 +288,30 @@ function textual(bytes) {
   return !/[\0-\x08\x0e-\x1a\x1c-\x1f\x7f]/.test(text);
 }
 
-// What a file holds, from its first bytes: { script: { interpreter, cr } }
-// from its #! line, { elf: { machine, loader } }, { windows } for a Windows
-// program, { macos } for a macOS one, { text } for text with no #! line,
-// { binary } for anything else, and {} when it is empty or cannot be read.
+// What a file holds, from its first bytes: { script: { interpreter, rest,
+// cr } } from its #! line, { elf: { machine, loader } }, { windows } for a
+// Windows program, { macos } for a macOS one, { text } for text with no #!
+// line, { binary } for anything else, { unreadable } for a file this user
+// may not read, and {} when it is empty or cannot be read otherwise.
 function kindOf(file) {
   let fd;
   try {
     fd = fs.openSync(file, "r");
+  } catch (err) {
+    return err.code === "EACCES" || err.code === "EPERM" ? { unreadable: true } : {};
+  }
+  try {
     const head = readAt(fd, 0, 4096);
     if (!head.length) return {};
     if (head[0] === 0x23 && head[1] === 0x21) {
       // The system takes the interpreter up to a space, a tab or the end of
-      // the line, and a carriage return as part of its name.
+      // the line, and the rest of the line as one word it is given, with a
+      // carriage return as part of either.
       const end = head.indexOf(0x0a);
       const line = head.subarray(2, end < 0 ? head.length : end).toString("latin1");
-      const name = /^[ \t]*([^ \t]*)/.exec(line)[1];
-      return { script: { interpreter: name.replace(/\r$/, ""), cr: name.endsWith("\r") } };
+      const [, name, rest] = /^[ \t]*([^ \t]*)[ \t]*(.*)$/s.exec(line);
+      const word = rest.replace(/[ \t]+$/, "");
+      return { script: { interpreter: name.replace(/\r$/, ""), rest: word.replace(/\r$/, ""), cr: name.endsWith("\r") || word.endsWith("\r") } };
     }
     if (head.length >= 52 && head.readUInt32BE(0) === 0x7f454c46) return { elf: elfOf(fd, head) };
     if (head[0] === 0x4d && head[1] === 0x5a) return { windows: true };
@@ -314,7 +323,7 @@ function kindOf(file) {
   } catch {
     return {};
   } finally {
-    if (fd !== undefined) fs.closeSync(fd);
+    fs.closeSync(fd);
   }
 }
 
@@ -353,19 +362,120 @@ function interpreterTrouble(script) {
 // system has it do with a file it cannot run as a program: what the shell
 // says starts with the file's path, then the line it failed on, as dash
 // says, "line" and the line, as bash says, or the path again, as bash says
-// of a file that is no script.
+// of a file that is no script. It is asked only of a file the system would
+// not run, as a script's own shell says the same of its lines.
 function readByShell(file, stderr) {
   if (!stderr.startsWith(`${file}: `)) return false;
   const rest = stderr.slice(file.length + 2);
   return /^(line )?\d+: /.test(rest) || rest.startsWith(`${file}: `);
 }
 
+// What the system told a shell of a program it could not start, by the
+// words dash, bash and BusyBox say after its name.
+const SHELL_SAYS = {
+  "not found": "ENOENT",
+  "command not found": "ENOENT",
+  "No such file or directory": "ENOENT",
+  "cannot execute: required file not found": "ENOENT",
+  "cannot execute: No such file or directory": "ENOENT",
+  "Permission denied": "EACCES",
+  "cannot execute: Permission denied": "EACCES",
+  "Is a directory": "EACCES",
+  "cannot execute: Is a directory": "EACCES",
+  "Exec format error": "ENOEXEC",
+  "cannot execute binary file": "ENOEXEC",
+  "cannot execute binary file: Exec format error": "ENOEXEC",
+};
+// A script's shell on a program one of its lines could not start, after the
+// script's path: the line, as dash says it, or "line" and the line, as bash
+// says it, then exec when it was that, the program and what was wrong.
+const COULD_NOT = new RegExp(`^(?:line )?\\d+: (?:exec: )?(.+?): (${Object.keys(SHELL_SAYS).join("|")})$`);
+// env's words for a program it was told to start and could not, as GNU's,
+// BusyBox's and the BSDs' env say them, in their quotes or none.
+const ENV_COULD_NOT = /^(?:\S*\/)?env: (?:can't execute )?['"\u2018]?(.+?)['"\u2019]?: (No such file or directory|Permission denied)$/;
+
+// The program a script's #! line has env start, as in "#!/usr/bin/env
+// chrome", where the system gives env the rest of the line as one word, or
+// "#!/usr/bin/env -S chrome --flag", where env splits it and passes over
+// its own options and any NAME=value. "" for any other #! line.
+function envTarget(script) {
+  if (path.basename(script.interpreter) !== "env" || !script.rest) return "";
+  if (!script.rest.startsWith("-S")) return script.rest.startsWith("-") ? "" : script.rest;
+  return script.rest.slice(2).split(/[ \t]+/).find((word) => word && !word.startsWith("-") && !word.includes("=")) || "";
+}
+
+// What is wrong with a program a script ran and could not start, `named` as
+// the script names it, by a path or by a name on PATH, with `said` the
+// shell's or env's words for it: words that follow its name after a comma.
+function startedByScript(named, said) {
+  let file;
+  let at = "";
+  if (bare(named)) {
+    const found = lookOnPath(named);
+    if (!found.file && !found.other) return "which is not on your PATH";
+    file = found.file || found.other;
+    at = `found on your PATH at ${file}, `;
+  } else {
+    file = path.resolve(named);
+  }
+  const seen = look(file);
+  if (seen.what) return `${at}${seen.what.replace(/^and there is no file there/, "which is not there")}`;
+  // A file this user may run, which the system did not start: one whose
+  // loader or interpreter is missing, or one for another system.
+  const code = SHELL_SAYS[said] || "EACCES";
+  const kind = kindOf(file);
+  if (code === "ENOENT" && kind.script) {
+    const trouble = interpreterTrouble(kind.script);
+    if (trouble) return `${at}${trouble}`;
+  }
+  if (code === "ENOENT" && kind.elf && kind.elf.loader && !there(kind.elf.loader)) return `${at}a program that needs the loader ${kind.elf.loader}, which is not on this machine`;
+  if (code === "ENOEXEC") return `${at}${foreign(kind) || (kind.text ? "a text file with no #! line, not a program" : "not a program this system can run")}`;
+  return `${at}which it could not start (${said})`;
+}
+
+// What a script that ran says of a program it could not start, as it ended
+// with `code`: env, of the one its first line has env start, or the
+// script's shell, of one a line of it runs, as Chrome's own launcher on
+// Linux runs the browser with exec. They end with 126 or 127 then, and with
+// 2 when the shell could not read a file the system gave it. "" for anything
+// else, as a script whose browser started and quit.
+function scriptStopped(file, script, stderr, code) {
+  if (![2, 126, 127].includes(code)) return "";
+  const lines = stderr.split("\n");
+  const env = envTarget(script);
+  if (env && code !== 2) {
+    for (const line of lines) {
+      const m = ENV_COULD_NOT.exec(line);
+      if (!m || m[1] !== env) continue;
+      if (script.cr) return "a script with Windows line breaks, so its first line has env start a program whose name ends in a carriage return, which is not there";
+      return `a script whose first line has env start ${env}, ${startedByScript(env, m[2])}`;
+    }
+  }
+  for (const line of lines) {
+    if (code === 2 || !line.startsWith(`${file}: `)) continue;
+    // A builtin's words, as bash's "cd: <folder>: No such file or
+    // directory", name no program.
+    const m = COULD_NOT.exec(line.slice(file.length + 2));
+    if (m && !m[1].includes(": ")) return `a script that starts ${m[1]}, ${startedByScript(m[1], m[2])}`;
+  }
+  // A file the system would not run as a program, which the script started
+  // and the system gave /bin/sh, as a web page saved in the browser's place:
+  // the shell's words start with that file's path.
+  for (const line of lines) {
+    const m = /^(.+?): (?:(?:line )?\d+: |\1: )/.exec(line);
+    if (!m || m[1] === file || !path.isAbsolute(m[1])) continue;
+    const kind = kindOf(m[1]);
+    if (kind.text || kind.binary || foreign(kind)) return `a script that starts ${m[1]}, ${foreign(kind) || (kind.text ? "a text file with no #! line, not a program" : "not a program this system can run")}`;
+  }
+  return "";
+}
+
 // What is wrong with a browser at `file` that did not start, from the
 // error the system gave as it was started (`error`), or from how it ended
-// before it answered (`stderr`, what it printed) and what the file is, as
-// words that follow its path after a comma. "" when nothing tells, as for
-// a browser that started and quit.
-function explain(file, { error = null, stderr = "" } = {}) {
+// before it answered (`stderr`, what it printed, and `code`, its exit
+// status) and what the file is, as words that follow its path after a
+// comma. "" when nothing tells, as for a browser that started and quit.
+function explain(file, { error = null, stderr = "", code = null } = {}) {
   const kind = kindOf(file);
   if (error) {
     if (kind.script && ["ENOENT", "EACCES", "EPERM", "ENOEXEC"].includes(error.code)) {
@@ -380,13 +490,30 @@ function explain(file, { error = null, stderr = "" } = {}) {
     if (error.code === "EACCES" || error.code === "EPERM") return "a file this user may not run";
     return `a program that cannot be started (${worded(error)})`;
   }
-  // The loader's words for a library it did not find, or one too old,
-  // which it says also of a program a script it is given starts.
-  const library = /error while loading shared libraries: ([^:\n]+): cannot open shared object file/.exec(stderr);
-  if (library) return `a program that needs the shared library ${library[1].trim()}, which is not on this machine`;
-  const old = /: ([^:\s]+): version `([^']+)' not found \(required by /.exec(stderr);
-  if (old) return `a program made for a newer system: it needs ${old[2]} of ${path.basename(old[1])}, which this machine's is too old to have`;
-  if (!readByShell(file, stderr)) return "";
+  // The loader's words for a library it did not find, or one too old. It
+  // names the program by the name it was started with: a script's
+  // interpreter, or a program a script starts, by its own, unless the
+  // script gives it the script's name, as Chrome's launcher on Linux does.
+  const by = (named, what) => {
+    if (!kind.script || named === file) return what;
+    return `${named === kind.script.interpreter ? "a script whose first line names" : "a script that starts"} ${named}, ${what}`;
+  };
+  const library = /^(.+?): error while loading shared libraries: ([^:\n]+): cannot open shared object file/m.exec(stderr);
+  if (library) return by(library[1], `a program that needs the shared library ${library[2].trim()}, which is not on this machine`);
+  const old = /^(.+?): ([^:\s]+): version `([^']+)' not found \(required by /m.exec(stderr);
+  if (old) return by(old[1], `a program made for a newer system: it needs ${old[3]} of ${path.basename(old[2])}, which this machine's is too old to have`);
+  // A script the system started, which says what it could not start, or
+  // nothing that tells.
+  if (kind.script) return scriptStopped(file, kind.script, stderr, code);
+  // A file this user may run and not read. The system starts a program so,
+  // but a script's interpreter has to read it, and says it may not, as
+  // dash's "cannot open <file>: Permission denied" does.
+  if (kind.unreadable) {
+    const denied = stderr.split("\n").some((line) => line.includes(file) && line.includes("Permission denied"));
+    return denied ? "a script without the permission to read it, which its interpreter needs and chmod +r gives" : "";
+  }
+  // A file the system would not run as a program and gave /bin/sh.
+  if (!(kind.text || kind.binary || foreign(kind)) || !readByShell(file, stderr)) return "";
   if (kind.text) return "a text file with no #! line, not a program";
   return foreign(kind) || "not a program this system can run";
 }
@@ -466,9 +593,10 @@ const SHORT = {
 };
 
 // The message for a browser the system did not start with `error`, or
-// that ended before it answered, having printed `stderr`: what is wrong
-// with it, or what the system is short of. "" when nothing tells.
-function notStarted(place, { error = null, stderr = "" } = {}) {
+// that ended before it answered, having printed `stderr`, with `code`:
+// what is wrong with it, or what the system is short of. "" when nothing
+// tells.
+function notStarted(place, { error = null, stderr = "", code = null } = {}) {
   if (error && SHORT[error.code]) return `${place.name} did not start: easyfontkit could not start ${place.file}, as ${SHORT[error.code]}.`;
   // A path the system could not follow, or a file it would not run, looked
   // at again: it can have changed since it was looked at first.
@@ -476,7 +604,7 @@ function notStarted(place, { error = null, stderr = "" } = {}) {
     const seen = look(place.file);
     if (seen.what) return cannotStart({ ...place, ...seen });
   }
-  const what = explain(place.file, { error, stderr });
+  const what = explain(place.file, { error, stderr, code });
   return what ? cannotStart(place, what) : "";
 }
 

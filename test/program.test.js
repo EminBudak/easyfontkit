@@ -255,6 +255,75 @@ test("a browser the system's loader cannot start, as its loader or a library it 
   refused(root, cases);
 });
 
+test("a script in the browser's place that could not start what it runs, as a launcher whose browser is not there, may not be run or lacks its loader or a library, or one whose first line has env start a program not on PATH, names that program and what is wrong with it, and one that ran and quit keeps the words for a browser that did not start", { skip: process.platform !== "linux" && "the stand-ins are Linux scripts and programs" }, () => {
+  const root = path.join(dir, "scripts");
+  const at = (...names) => path.join(root, ...names);
+  const { PATH } = process.env;
+  const shells = ["/bin/sh", "/bin/bash"].filter((shell) => fs.existsSync(shell));
+  const cases = [];
+  const named = (file) => [{ PATH, CHROME_PATH: file }];
+  const point = (file, what) => [...named(file), `chrome did not start: CHROME_PATH is ${file}, ${what}. ${POINT}`];
+  const plain = put(root, "plain", "x", 0o644);
+  for (const shell of shells) {
+    const name = path.basename(shell);
+    // exec, as Chrome's own launcher runs the browser, and a line that runs
+    // it without exec.
+    cases.push(point(put(root, `${name}-gone`, `#!${shell}\nexec ${at("nothing", "chrome")} "$@"\n`), `a script that starts ${at("nothing", "chrome")}, which is not there`));
+    cases.push(point(put(root, `${name}-gone-noexec`, `#!${shell}\n${at("nothing", "chrome")} "$@"\n`), `a script that starts ${at("nothing", "chrome")}, which is not there`));
+    cases.push(point(put(root, `${name}-plain`, `#!${shell}\nexec ${plain} "$@"\n`), `a script that starts ${plain}, a file without the permission to run it, which chmod +x gives`));
+    cases.push(point(put(root, `${name}-name`, `#!${shell}\nexec chrome-not-there-xyz "$@"\n`), "a script that starts chrome-not-there-xyz, which is not on your PATH"));
+    cases.push(point(put(root, `${name}-folder`, `#!${shell}\nexec ${root} "$@"\n`), `a script that starts ${root}, a folder, not a program`));
+  }
+  // A launcher that runs a web page saved in the browser's place, which the
+  // system gives /bin/sh.
+  const page = put(root, "page", "<!DOCTYPE html>\n<html><body>Not Found</body></html>\n");
+  cases.push(point(put(root, "sh-page", `#!/bin/sh\nexec ${page} "$@"\n`), `a script that starts ${page}, a text file with no #! line, not a program`));
+  // Programs the system's loader cannot start, run by a launcher.
+  const loader = unloadable(at("noloader", "chrome-real"), "loader");
+  if (loader) cases.push(point(put(root, "sh-noloader", `#!/bin/sh\nexec ${at("noloader", "chrome-real")} "$@"\n`), `a script that starts ${at("noloader", "chrome-real")}, a program that needs the loader ${loader}, which is not on this machine`));
+  const glibc = Boolean(process.report.getReport().header.glibcVersionRuntime);
+  const library = glibc && unloadable(at("nolib", "chrome-real"), "library");
+  if (library) cases.push(point(put(root, "sh-nolib", `#!/bin/sh\nexec ${at("nolib", "chrome-real")} "$@"\n`), `a script that starts ${at("nolib", "chrome-real")}, a program that needs the shared library ${library}, which is not on this machine`));
+  // env, as in the common #!/usr/bin/env form, with the name as one word
+  // and split by -S.
+  if (fs.existsSync("/usr/bin/env")) {
+    cases.push(point(put(root, "env", "#!/usr/bin/env no-such-browser-xyz\n"), "a script whose first line has env start no-such-browser-xyz, which is not on your PATH"));
+    cases.push(point(put(root, "env-split", "#!/usr/bin/env -S no-such-browser-xyz --flag\n"), "a script whose first line has env start no-such-browser-xyz, which is not on your PATH"));
+  }
+  // Chrome's own launcher on Linux, as a broken install leaves it, with no
+  // browser beside it: it runs that browser with exec -a.
+  const launcher = "/opt/google/chrome/google-chrome";
+  if (fs.existsSync(launcher) && fs.readFileSync(launcher, "latin1").startsWith("#!")) {
+    fs.mkdirSync(at("google"), { recursive: true });
+    fs.copyFileSync(launcher, at("google", "google-chrome"));
+    fs.chmodSync(at("google", "google-chrome"), 0o755);
+    // It names the browser by the folder its own path leads to.
+    const beside = path.join(fs.realpathSync(at("google")), "chrome");
+    cases.push([{ PATH, CHROME_PATH: at("google", "google-chrome") }, `google-chrome did not start: CHROME_PATH is ${at("google", "google-chrome")}, a script that starts ${beside}, which is not there. ${POINT}`]);
+  }
+  // Found on PATH by a browser's name.
+  const onPath = put(root, "onpath", `#!/bin/sh\nexec ${at("nothing", "chrome")} "$@"\n`, 0o755, "chromium");
+  cases.push([{ PATH: at("onpath") }, `chromium did not start: ${onPath}, the chromium on your PATH, is a script that starts ${at("nothing", "chrome")}, which is not there. ${INSTALL}`]);
+  // A script that ran its browser, which crashed, one that stopped with an
+  // error of its own, and a shell that would not take the browser's
+  // options: the browser started and quit, as far as anyone can tell.
+  const quit = (file, name = "chrome") => [...named(file), `${name} did not start. Try again, or point CHROME_PATH at another browser.`];
+  if (shells.includes("/bin/bash")) cases.push(quit(put(root, "crash", "#!/bin/bash\nsh -c 'kill -SEGV $$'\nexit 139\n")));
+  cases.push(quit(put(root, "unset", '#!/bin/sh\nset -u\nexec "$CHROME_REAL_XYZ" "$@"\n')));
+  cases.push(quit("/bin/sh", "sh"));
+  refused(root, cases);
+});
+
+test("a script this user may run but not read, which its interpreter has to read, is named as one, before any work", { skip: process.platform === "win32" ? "Windows keeps no such mode" : process.getuid() === 0 ? "root may read any file" : false }, () => {
+  const root = path.join(dir, "unreadable");
+  const file = put(root, "xonly", '#!/bin/sh\nexec google-chrome "$@"\n', 0o111);
+  try {
+    refused(root, [[{ PATH: process.env.PATH, CHROME_PATH: file }, `chrome did not start: CHROME_PATH is ${file}, a script without the permission to read it, which its interpreter needs and chmod +r gives. ${POINT}`]]);
+  } finally {
+    fs.chmodSync(file, 0o755);
+  }
+});
+
 test("a run with no file descriptor left to start the browser stops before any work and says what to do", { skip: process.platform === "win32" && "it takes sh to lower the limit" }, () => {
   const root = path.join(dir, "no-descriptors");
   const browser = put(root, "bin", "#!/bin/sh\nexec google-chrome \"$@\"\n");

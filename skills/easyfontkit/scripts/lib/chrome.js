@@ -690,10 +690,13 @@ async function launch({ width, height }) {
   started.singleton = singletonOf(profile);
   // Known from the start: by the time the browser is stopped, its helpers
   // can have ended.
-  started.crashHandler = crashHandlerOf(processesOf(child));
-  // sandboxed: a browser installed as a snap or a Flatpak, which may not
-  // take the stand-ins or the bus it was started with.
-  return { name, pipe, close, sandboxed: ownSandbox(binary) };
+  const processes = processesOf(child);
+  started.crashHandler = crashHandlerOf(processes);
+  // sandboxed: a browser that runs in a sandbox of its own, as one
+  // installed as a snap or a Flatpak does, also when a launcher by another
+  // name started it, which may not take the stand-ins or the bus it was
+  // started with.
+  return { name, pipe, close, sandboxed: ownSandbox(binary, processes.map(({ pid }) => pid)) };
 }
 
 // Every browser still open, killed at once with its helpers and its crash

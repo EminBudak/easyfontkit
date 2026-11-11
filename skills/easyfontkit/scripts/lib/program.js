@@ -428,13 +428,35 @@ function endedEarly(place, { stderr = "", stdout = "", code = null, signal = nul
   return didNotStart(place, `ended before it answered: ${how}`, more);
 }
 
-// Whether the browser at `file` is one installed as a snap or a Flatpak,
-// which runs in a sandbox of its own, with a PATH of its own: snap's own
-// program, where the links in /snap/bin lead, or one under /snap/, or one in
-// a Flatpak's folders, as the links in its exports/bin and the app folder
-// they lead to are.
-function ownSandbox(file) {
-  return [file, real(file)].some((at) => at === "/usr/bin/snap" || at.startsWith("/snap/") || /\/flatpak\/(exports|app)\//.test(at));
+// Whether the browser at `file` runs in a sandbox of its own, with a PATH
+// of its own, as one installed as a snap or a Flatpak does. By its path:
+// snap's own program, where the links in /snap/bin lead, or one under
+// /snap/, or one in a Flatpak's folders, as the links in its exports/bin and
+// the app folder they lead to are. Or, once it runs, by its processes
+// (`pids`), on Linux: one that runs a program under /snap/, or one whose
+// root is not this process's and holds the .flatpak-info file every
+// Flatpak's sandbox has, as when a launcher such as Ubuntu's
+// chromium-browser starts the chromium snap. `proc` is where /proc is.
+function ownSandbox(file, pids = [], proc = "/proc") {
+  if ([file, real(file)].some((at) => at === "/usr/bin/snap" || at.startsWith("/snap/") || /\/flatpak\/(exports|app)\//.test(at))) return true;
+  const rootOf = (pid) => {
+    try {
+      const { dev, ino } = fs.statSync(`${proc}/${pid}/root`);
+      return `${dev}:${ino}`;
+    } catch {
+      return "";
+    }
+  };
+  const own = rootOf("self");
+  return pids.some((pid) => {
+    try {
+      if (fs.readlinkSync(`${proc}/${pid}/exe`).startsWith("/snap/")) return true;
+    } catch {
+      // Gone, or not this user's to read.
+    }
+    const root = rootOf(pid);
+    return Boolean(root) && root !== own && fs.existsSync(`${proc}/${pid}/root/.flatpak-info`);
+  });
 }
 
 module.exports = { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, quoted, ownSandbox };

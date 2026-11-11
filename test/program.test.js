@@ -488,3 +488,42 @@ test("a temp folder the browser's profile cannot be made in, as one that is not 
     assert.deepEqual(fs.readdirSync(path.dirname(out)), [], "no out folder");
   }
 });
+
+test("a browser that runs from a snap or a Flatpak is told by its processes once it runs, also when a launcher by another name, as Ubuntu's chromium-browser, started it: one whose program is under /snap/, or whose root is not this process's and holds the .flatpak-info every Flatpak's sandbox has", () => {
+  const { ownSandbox } = require("../skills/easyfontkit/scripts/lib/program");
+  // A /proc of the test's own: each process with the program it runs and
+  // its root.
+  const proc = path.join(dir, "proc");
+  const sandbox = path.join(dir, "flatpak-root");
+  const container = path.join(dir, "container-root");
+  fs.mkdirSync(sandbox, { recursive: true });
+  fs.mkdirSync(container, { recursive: true });
+  fs.writeFileSync(path.join(sandbox, ".flatpak-info"), "[Application]\nname=org.chromium.Chromium\n");
+  const process_ = (pid, exe, root) => {
+    fs.mkdirSync(path.join(proc, String(pid)), { recursive: true });
+    if (exe) fs.symlinkSync(exe, path.join(proc, String(pid), "exe"));
+    fs.symlinkSync(root, path.join(proc, String(pid), "root"));
+  };
+  process_("self", "", "/");
+  process_(101, "/snap/chromium/3051/usr/lib/chromium-browser/chrome", "/");
+  process_(102, "/app/chromium/chrome", sandbox);
+  process_(103, "/opt/google/chrome/chrome", "/");
+  process_(104, "/opt/google/chrome/chrome", container);
+  process_(105, "", sandbox);
+  const launcher = "/usr/bin/chromium-browser";
+  assert.equal(ownSandbox(launcher, [], proc), false);
+  assert.equal(ownSandbox(launcher, [103], proc), false, "a browser of the machine's own");
+  assert.equal(ownSandbox(launcher, [104], proc), false, "a root of its own with no .flatpak-info");
+  assert.equal(ownSandbox(launcher, [103, 101], proc), true, "the chromium snap");
+  assert.equal(ownSandbox(launcher, [102], proc), true, "a Flatpak");
+  assert.equal(ownSandbox(launcher, [105], proc), true, "a Flatpak's process whose program cannot be read");
+  assert.equal(ownSandbox(launcher, [999], proc), false, "a process that has gone");
+  // easyfontkit itself in a Flatpak: a browser with the same root is not
+  // one in a sandbox of its own.
+  fs.rmSync(path.join(proc, "self", "root"));
+  fs.symlinkSync(sandbox, path.join(proc, "self", "root"));
+  assert.equal(ownSandbox(launcher, [105], proc), false);
+  // By its path, as before.
+  assert.equal(ownSandbox("/snap/bin/chromium"), true);
+  assert.equal(ownSandbox(path.join(dir, "share", "flatpak", "exports", "bin", "org.chromium.Chromium")), true);
+});

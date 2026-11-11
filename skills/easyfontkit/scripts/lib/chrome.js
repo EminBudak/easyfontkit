@@ -11,7 +11,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, sleep } = require("./time");
-const { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, ownSandbox } = require("./program");
+const { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, ownSandbox, lowLimits } = require("./program");
 
 // The browsers this process has started and not closed yet, each with its
 // profile, from the moment it is spawned.
@@ -388,19 +388,23 @@ const beforeReading = () => Math.max(1_000, Math.min(Math.max(30_000, timeLeft()
 
 // A browser that did not start, or did not open its page, in the time it
 // had: which browser, that no kit was made, and what to do. That time grows
-// with the run's, so more of it can help.
+// with the run's, so more of it can help, unless a limit of this process's
+// leaves the browser few files or processes, which is said then.
 function tooSlow(name, what, wait) {
-  return new Error(`${name} did not ${what} in ${Math.round(wait / 1000)} s, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`);
+  return new Error(`${name} did not ${what} in ${Math.round(wait / 1000)} s, so no kit was made. ${lowLimits() || "The machine may be busy; try again, or give it more time with --timeout."}`);
 }
 
 // A browser that stopped answering once it had started: a call that got no
 // answer in its time (timedOut), or a pipe to it that failed or closed
 // (closed), as when it has quit. A call cut short by the end of the run's
-// time says that. Any other error is given back as it is.
+// time says that. A limit of this process's that leaves the browser few
+// files or processes, as one that ran short of them can quit while it
+// opens the page, is said in place of the busy machine. Any other error is
+// given back as it is.
 function stoppedAnswering(name, err) {
   if (!err || !(err.timedOut || err.closed)) return err;
   if (err.timedOut && err.outOfTime) return new Error(`${name} did not answer before the run's time ran out, so no kit was made. The machine may be busy; try again, or give it more time with --timeout.`);
-  return new Error(`${name} stopped answering, so no kit was made. The machine may be busy; try again.`);
+  return new Error(`${name} stopped answering, so no kit was made. ${lowLimits() || "The machine may be busy; try again."}`);
 }
 
 // Chrome on Linux takes its temp folder from TMPDIR, and makes there the

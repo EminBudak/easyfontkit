@@ -310,10 +310,11 @@ function cannotStart(place, what = place.what) {
 // The message for a browser that was there to start and did not start:
 // `what` says what happened to it, in words that follow "which" or its
 // path, as "ended before it answered: ...", and `more` comes before the
-// words that say how to get one that runs.
-function didNotStart(place, what, more = "") {
+// words that say how to get one that runs, or `fix`, what to do in their
+// place.
+function didNotStart(place, what, more = "", fix = "") {
   const at = place.value !== undefined ? `CHROME_PATH is ${place.value}${bare(place.value) && place.file ? `, found on your PATH at ${place.file}` : ""}, which ${what}` : `${place.file}, the ${place.name} ${place.where}, ${what}`;
-  return `${place.name} did not start: ${at}.${more ? ` ${more}` : ""} ${place.value !== undefined ? FIX.named : FIX.found}`;
+  return `${place.name} did not start: ${at}.${more ? ` ${more}` : ""} ${fix || (place.value !== undefined ? FIX.named : FIX.found)}`;
 }
 
 // The errors that say the system is short of something to start a program
@@ -375,6 +376,69 @@ function causeLine(text) {
 // Chrome's own words for each way it cannot.
 const sandboxSaid = (text) => /No usable sandbox|SUID sandbox helper binary was found, but is not configured correctly|setuid sandbox: failed to move to new namespaces|^Failed to move to new namespace/m.test(String(text || ""));
 
+// Chrome's own words, as the system gives them for errno, for what the
+// system or the browser was short of as it started, and what to do then, in
+// place of how to get a browser that runs, as another would be short of the
+// same. Chrome writes the errno's number after its words, in brackets.
+const SHORT_SAID = [
+  [/Too many open files in system|: [^:\n]+ \(23\)$/m, "The system had as many files open as it may (file table overflow): run it again once fewer are open."],
+  [/Too many open files|: [^:\n]+ \(24\)$/m, "The browser had as many files open as it may (too many open files): raise that limit, as ulimit -n does, and run it again."],
+  [/\b(pthread_create|fork|clone)\b.*(Resource temporarily unavailable|: [^:\n]+ \(11\)$)/m, "The system started no more processes or threads for this user (resource temporarily unavailable): run it again once fewer are running."],
+  [/Cannot allocate memory|: [^:\n]+ \(12\)$|\bOut of memory\b/m, "The system had no memory left for the browser: run it again once more is free."],
+];
+
+// A limit of this process's, on Linux, that leaves the browser it starts
+// few files or processes, which the browser can be short of without saying
+// so in words SHORT_SAID knows: the most files it may have open, as the
+// browser takes on this process's, when that is under 1024, and the most
+// processes and threads this user may run, when fewer than 100 more are
+// left. "" when neither is low, or they cannot be read.
+function lowLimits() {
+  if (process.platform !== "linux") return "";
+  let limits;
+  try {
+    limits = fs.readFileSync("/proc/self/limits", "utf8");
+  } catch {
+    return "";
+  }
+  const hard = (name) => {
+    const found = new RegExp(`^${name}\\s+\\S+\\s+(\\d+)\\s`, "m").exec(limits);
+    return found ? Number(found[1]) : Infinity;
+  };
+  const said = [];
+  const files = hard("Max open files");
+  if (files < 1024) said.push(`This process may have no more than ${files} files open, which can be too few for the browser: raise that limit, as ulimit -n does, and run it again.`);
+  const most = hard("Max processes");
+  if (most < Infinity && process.getuid && process.getuid() !== 0) {
+    const running = threadsOfUser();
+    if (most - running < 100) said.push(`This user runs ${running} processes and threads and may run no more than ${most}, which can be too few for the browser: run it again once fewer are running.`);
+  }
+  return said.join(" ");
+}
+
+// The processes and threads this user runs, as the system counts them
+// against the most it may run, read from /proc.
+function threadsOfUser() {
+  let count = 0;
+  let names = [];
+  try {
+    names = fs.readdirSync("/proc");
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      if (fs.statSync(`/proc/${name}`).uid !== process.getuid()) continue;
+      const stat = fs.readFileSync(`/proc/${name}/stat`, "utf8");
+      count += Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[17]) || 1;
+    } catch {
+      // Gone already.
+    }
+  }
+  return count;
+}
+
 // The first line of a file that starts with #!, as the system reads it to
 // find the program that runs the file, or null.
 function bangLine(file) {
@@ -414,18 +478,24 @@ function couldNotStart(place, err) {
 // having printed `stderr` and `stdout`, with the exit status `code` or the
 // signal that stopped it: the line of what it printed that causeLine picks,
 // quoted, and how it ended. One that printed only lines of Chrome's D-Bus
-// code is said to have ended, with no line. When its words say that its
-// sandbox could not start, what lets a sandbox start comes too. `closed`
-// says that it closed its pipe and was still running, so the run stopped
-// it.
+// code is said to have ended, with no line. What it printed, any line of it,
+// can also say that its sandbox could not start, and then what lets a
+// sandbox start comes too, or that the system or the browser was short of
+// open files, processes or memory, and then what to do comes in place of
+// how to get a browser that runs, which another browser would not help
+// with either. A limit of this process's that leaves the browser few files
+// or processes is said too. `closed` says that it closed its pipe and was
+// still running, so the run stopped it.
 function endedEarly(place, { stderr = "", stdout = "", code = null, signal = null, closed = false } = {}) {
   const line = causeLine(stderr) || causeLine(stdout);
-  const more = sandboxSaid(stderr) || sandboxSaid(stdout) ? SANDBOX : "";
-  if (closed) return didNotStart(place, `closed its pipe before it answered${line ? `, having printed ${quoted(line)}` : ""}`, more);
+  const said = `${stderr}\n${stdout}`;
+  const [, short = ""] = SHORT_SAID.find(([words]) => words.test(said)) || [];
+  const more = [sandboxSaid(said) ? SANDBOX : "", short ? "" : lowLimits()].filter(Boolean).join(" ");
+  if (closed) return didNotStart(place, `closed its pipe before it answered${line ? `, having printed ${quoted(line)}` : ""}`, more, short);
   const exited = code !== null && code !== undefined;
   const end = exited ? `exited with ${code}` : `was stopped by ${signal}`;
   const how = line ? `it printed ${quoted(line)} and ${end}` : exited && !/\S/.test(stderr + stdout) ? `it printed nothing and ${end}` : `it ${end}`;
-  return didNotStart(place, `ended before it answered: ${how}`, more);
+  return didNotStart(place, `ended before it answered: ${how}`, more, short);
 }
 
 // Whether the browser at `file` runs in a sandbox of its own, with a PATH
@@ -459,4 +529,4 @@ function ownSandbox(file, pids = [], proc = "/proc") {
   });
 }
 
-module.exports = { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, quoted, ownSandbox };
+module.exports = { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, quoted, ownSandbox, lowLimits };

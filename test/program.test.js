@@ -489,6 +489,41 @@ test("a temp folder the browser's profile cannot be made in, as one that is not 
   }
 });
 
+test("a browser that ended before it answered, as the system or the browser was short of open files, processes or memory, which Chrome's own words say as errno gives them, is told what to do about that in place of how to get another browser, which would be short of the same", { skip: process.platform === "win32" && "the stand-ins are shell scripts" }, () => {
+  const root = path.join(dir, "short");
+  // What Chrome 155 printed with ulimit -n 32 and ulimit -u a few above
+  // this user's threads, and the same for the system's file table and for
+  // memory, each ended as Chrome ended.
+  const cases = [
+    ["files", "[1:1:1111/000000.000000:FATAL:base/files/scoped_file.cc:43] Check failed: . : Too many open files (24)", "ABRT", "The browser had as many files open as it may (too many open files): raise that limit, as ulimit -n does, and run it again."],
+    ["table", "[1:1:1111/000000.000000:FATAL:base/files/scoped_file.cc:43] Check failed: . : Too many open files in system (23)", "ABRT", "The system had as many files open as it may (file table overflow): run it again once fewer are open."],
+    ["threads", "[1:9:1111/000000.000000:ERROR:base/threading/platform_thread_posix.cc:147] pthread_create: Resource temporarily unavailable (11)", "TRAP", "The system started no more processes or threads for this user (resource temporarily unavailable): run it again once fewer are running."],
+    ["memory", "[1:1:1111/000000.000000:FATAL:base/memory/page_size_posix.cc:24] mmap: Cannot allocate memory (12)", "ABRT", "The system had no memory left for the browser: run it again once more is free."],
+    // Its words in another language, with errno's number after them.
+    ["number", "[1:1:1111/000000.000000:FATAL:base/files/scoped_file.cc:43] Check failed: . : Zu viele offene Dateien (24)", "ABRT", "The browser had as many files open as it may (too many open files): raise that limit, as ulimit -n does, and run it again."],
+  ];
+  const { PATH } = process.env;
+  refused(
+    root,
+    cases.map(([folder, said, signal, what]) => {
+      // The line that says it can come after the one that ended it.
+      const file = put(root, folder, `#!/bin/sh\necho '[1:1:1111/000000.000000:ERROR:chrome/browser/ui/startup.cc:1] first' >&2\necho '${said}' >&2\nkill -${signal} $$\n`);
+      return [{ PATH, CHROME_PATH: file }, `chrome did not start: CHROME_PATH is ${file}, which ended before it answered: it printed "${said.includes(":FATAL:") ? said.replace(/^\[[^\]]*\] /, "") : "first"}" and was stopped by SIG${signal}. ${what}`];
+    }),
+  );
+});
+
+test("a browser that ended before it answered, saying something else, is told the limit on open files this process and the browser have when it is low, as Chrome can run short of them and say only what failed for it", { skip: process.platform !== "linux" && "the limits are read from /proc on Linux" }, () => {
+  const root = path.join(dir, "low-limit");
+  const said = "[1:1:1111/000000.000000:ERROR:components/ukm/ukm_database.cc:1] Failed to open UKM database: 0 unable to open database file";
+  const file = put(root, "ukm", `#!/bin/sh\necho '${said}' >&2\nkill -TRAP $$\n`);
+  const message = (limit) => `chrome did not start: CHROME_PATH is ${file}, which ended before it answered: it printed "Failed to open UKM database: 0 unable to open database file" and was stopped by SIGTRAP.${limit ? ` This process may have no more than ${limit} files open, which can be too few for the browser: raise that limit, as ulimit -n does, and run it again.` : ""} ${POINT}`;
+  refused(root, [[{ PATH: process.env.PATH, CHROME_PATH: file }, message(64)]], { wrap: ["sh", "-c", 'ulimit -n 64 && exec "$@"', "sh"] });
+  // With the limit this machine gives, nothing is said of it.
+  const hard = /^Max open files\s+\S+\s+(\d+)/m.exec(fs.readFileSync("/proc/self/limits", "utf8"));
+  if (hard && Number(hard[1]) >= 1024) refused(path.join(root, "high"), [[{ PATH: process.env.PATH, CHROME_PATH: file }, message(0)]]);
+});
+
 test("a browser that runs from a snap or a Flatpak is told by its processes once it runs, also when a launcher by another name, as Ubuntu's chromium-browser, started it: one whose program is under /snap/, or whose root is not this process's and holds the .flatpak-info every Flatpak's sandbox has", () => {
   const { ownSandbox } = require("../skills/easyfontkit/scripts/lib/program");
   // A /proc of the test's own: each process with the program it runs and
@@ -526,4 +561,15 @@ test("a browser that runs from a snap or a Flatpak is told by its processes once
   // By its path, as before.
   assert.equal(ownSandbox("/snap/bin/chromium"), true);
   assert.equal(ownSandbox(path.join(dir, "share", "flatpak", "exports", "bin", "org.chromium.Chromium")), true);
+});
+
+test("a browser that stopped answering once it had started, as one short of open files can stop while it opens the page, is told the limit on open files when it is low, in place of the busy machine", { skip: process.platform !== "linux" && "the limits are read from /proc on Linux" }, () => {
+  const script = `const { stoppedAnswering } = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/chrome"))}); process.stdout.write(stoppedAnswering("google-chrome", Object.assign(new Error("closed"), { closed: true })).message);`;
+  const low = spawnSync("sh", ["-c", 'ulimit -n 160 && exec "$@"', "sh", process.execPath, "-e", script], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(low.stdout, "google-chrome stopped answering, so no kit was made. This process may have no more than 160 files open, which can be too few for the browser: raise that limit, as ulimit -n does, and run it again.", low.stderr);
+  const hard = /^Max open files\s+\S+\s+(\d+)/m.exec(fs.readFileSync("/proc/self/limits", "utf8"));
+  if (hard && Number(hard[1]) >= 1024) {
+    const high = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(high.stdout, "google-chrome stopped answering, so no kit was made. The machine may be busy; try again.", high.stderr);
+  }
 });

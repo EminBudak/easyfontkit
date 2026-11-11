@@ -1876,6 +1876,58 @@ test("text a web font has no glyphs for, as Cyrillic in a Latin font, is said to
   }
 });
 
+test("text a web font has no glyphs for on an input button, alone or among buttons, is said to be drawn with a fallback for that, not to have come too late", { skip: noBrowser }, async () => {
+  // Inter's latin file has no Cyrillic: every system has a font that does.
+  // An input button's label is its value, which no text node holds.
+  const page = (buttons) => `<!doctype html><html><head><meta charset="utf-8"><title>Form</title><style>
+    @font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); }
+    body, input, button { font: 18px "Body Sans", sans-serif; }
+  </style></head><body><h1>A heading in Inter</h1><p>Body text in Inter.</p>${buttons}</body></html>`;
+  const { server, origin } = await serve({
+    "/input": { body: page('<input type="submit" value="Отправить">') },
+    "/mixed": { body: page('<button>Привет</button><button>Далее</button><input type="submit" value="Поиск">') },
+    "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-inputs-"));
+  try {
+    for (const route of ["/input", "/mixed"]) {
+      const { kit } = await makeFontKit(`${origin}${route}`, { dir: path.join(parent, route.slice(1)), timeLimit: 60_000 });
+      assert.equal(kit.roles.button.family, "Inter", route);
+      assert.equal(kit.notes.length, 1, `${route}: ${kit.notes.join("\n")}`);
+      assert.match(kit.notes[0], /^Some of the buttons were drawn with .+?, (a fallback|fallbacks), as Inter has no glyphs for those characters\. That text is counted as Inter, the font the site asks for\.$/, route);
+    }
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("text a fallback drew while a file of the web font's for those characters had not come, as one of a family split by unicode-range, is said to have waited for that file, with its address, not to lack glyphs", { skip: noBrowser }, async () => {
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><meta charset="utf-8"><title>Split</title><style>
+        @font-face { font-family: "Body Sans"; src: url("/latin.woff2") format("woff2"); unicode-range: U+0000-00FF; }
+        @font-face { font-family: "Body Sans"; src: url("/cyrillic.woff2") format("woff2"); unicode-range: U+0400-04FF; }
+        h1, p { font-family: "Body Sans", sans-serif; }
+      </style></head><body><h1>Hello Привет мир</h1><p>Body text in Inter.</p></body></html>`,
+    },
+    "/latin.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+    "/cyrillic.woff2": { hold: true },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-split-"));
+  try {
+    // A run's time short enough that the wait for a page that does not
+    // finish loading is cut to a few seconds.
+    const { kit } = await makeFontKit(origin, { dir: path.join(parent, "kit"), timeLimit: 65_000 });
+    assert.equal(kit.roles.heading.family, "Inter");
+    assert.deepEqual(kit.notes.filter((note) => /has no glyphs/.test(note)), [], kit.notes.join("\n"));
+    assert.ok(kit.notes.some((note) => new RegExp(`^Some of the headings were drawn with .+?, (a fallback|fallbacks), because Inter's file ${origin}/cyrillic\\.woff2 did not load while the page was read\\. That text is counted as Inter, the font the site asks for\\. The kit has no file of it for those characters: try again later\\.$`).test(note)), kit.notes.join("\n"));
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a font file whose server sends no bytes, or one cut short, is noted with that in plain words, and its family's note does not say to try again later", { skip: noBrowser }, async () => {
   const { server, origin } = await serve({
     "/": {

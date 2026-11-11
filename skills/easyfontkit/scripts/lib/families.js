@@ -105,32 +105,48 @@ function glyphsOfFamily(family) {
   return has;
 }
 
-// Whether the text a font of the visitor's own drew, under a stack that
-// asks for a web family whose files were read, is text that family has no
-// glyphs for, where it would draw that font anyway: in each node it drew,
-// the visitor's own fonts drew no more glyphs than there are characters
-// the family has no glyph for, with the spaces and the marks beside them,
-// which can go either way, and there is such a character. A web font that
-// came too late leaves all of a node's text to them, letters it has as
-// well. false when the files cannot tell, or the text was not read.
-function lacksGlyphs(face, family) {
-  if (!face.nodes || !face.nodes.length) return false;
-  const has = glyphsOfFamily(family);
-  if (!has) return false;
-  return face.nodes.every(({ text = "", length = 0, system }) => {
+// Why a font of the visitor's own drew text under a stack that asks for a
+// web family whose files were read: { why: "glyphs" } when that family has
+// no glyphs for the text, where it would draw that font anyway, else {
+// why: "late", files }. It has none when, in each node whose text was read,
+// the visitor's own fonts drew no more glyphs than there are characters the
+// family has no glyph for, with the spaces and the marks beside them, which
+// can go either way, and there is such a character. A web font that came
+// too late leaves all of a node's text to them, letters it has as well. A
+// character that a rule of the family's whose file had not come covers
+// (late, each { covers, urls }) is not one it has no glyph for: that file
+// may have it, and its address is among `files`. "late" when the files
+// cannot tell, or no node's text was read, as of an input whose label is
+// the browser's own.
+function fallbackOf(face, family, late) {
+  const nodes = (face.nodes || []).filter(({ length = 0 }) => length > 0);
+  const has = nodes.length ? glyphsOfFamily(family) : null;
+  const due = new Set();
+  if (!has) return { why: "late", files: [] };
+  let lacks = true;
+  for (const { text = "", length = 0, system } of nodes) {
     let missing = 0;
     let slack = 0;
     for (const char of text) {
-      if (/\s/u.test(char)) slack++;
-      else if (!has(char.codePointAt(0))) {
-        missing++;
-        if (/\p{M}/u.test(char)) slack++;
+      if (/\s/u.test(char)) {
+        slack++;
+        continue;
       }
+      const code = char.codePointAt(0);
+      if (has(code)) continue;
+      const coming = late.filter((rule) => rule.covers(code));
+      if (coming.length) {
+        for (const rule of coming) rule.urls.forEach((url) => due.add(url));
+        continue;
+      }
+      missing++;
+      if (/\p{M}/u.test(char)) slack++;
     }
     // The glyphs of the part of a long text that was read.
     const drawn = length > text.length ? (system * text.length) / length : system;
-    return missing > 0 && drawn <= missing + slack;
-  });
+    if (!(missing > 0 && drawn <= missing + slack)) lacks = false;
+  }
+  return lacks ? { why: "glyphs", files: [] } : { why: "late", files: [...due] };
 }
 
 // The CSS families each file is declared under: by its address in the
@@ -272,6 +288,18 @@ function buildFamilies(scan) {
   // while other text that asks for the web font first made the browser ask
   // for that font's file.
   const askedFor = new Set(asked.map(bare));
+  // The @font-face rules of a family's CSS names whose file the browser
+  // asked for and had not got while the page was read, with what each
+  // covers by its unicode-range, every character for one that gives none,
+  // and the addresses of its files the browser asked for.
+  const lateRules = (family) => {
+    const names = new Set([...family.cssNames].map(lower));
+    const read = new Set(family.files.flatMap((file) => file.urls.map(bare)));
+    return rules
+      .filter((rule) => names.has(lower(rule.family)) && !rule.urls.some((url) => read.has(bare(url))))
+      .map((rule) => ({ covers: inRange(unicodeRange(rule.unicodeRange)), urls: rule.urls.map(bare).filter((url) => askedFor.has(url)) }))
+      .filter((rule) => rule.urls.length);
+  };
   const unloadedIn = (stack) => {
     for (const name of stack) {
       const declared = rules.filter((rule) => lower(rule.family) === lower(name));
@@ -315,11 +343,15 @@ function buildFamilies(scan) {
         // web font, the one the site means.
         family = webFamilyIn(stack) || unloadedIn(stack);
         if (family) {
-          const why = family.files.length && lacksGlyphs(face, family) ? "glyphs" : "late";
-          const fallback = fallbacks.get(`${family.key}\u0000${why}`) || { family, why, drawnWith: new Set(), roles: [] };
+          const { why, files: due } = family.files.length ? fallbackOf(face, family, lateRules(family)) : { why: "late", files: [] };
+          // Text left to a fallback by a file of the family's that had not
+          // come gets a note of its own.
+          const id = `${family.key}\u0000${why}${due.length ? "\u0000due" : ""}`;
+          const fallback = fallbacks.get(id) || { family, why, drawnWith: new Set(), roles: [], due: new Set() };
           fallback.drawnWith.add(face.familyName);
           if (!fallback.roles.includes(role)) fallback.roles.push(role);
-          fallbacks.set(`${family.key}\u0000${why}`, fallback);
+          due.forEach((url) => fallback.due.add(url));
+          fallbacks.set(id, fallback);
         } else {
           const asked = stack.find((css) => !loadedNames.has(lower(css))) || face.familyName;
           const name = systemName(asked);
@@ -376,6 +408,13 @@ function buildFamilies(scan) {
     const refused = family.files.flatMap((file) => file.urls).find((url) => refusals.has(bare(url)));
     if (refused) {
       return `${drawn}, because the browser refused ${family.name}'s file ${refused} to the page's @font-face rule (${refusals.get(bare(refused))}), as it does on every visit. ${counted} The kit has that file from another request the page made for it, such as a preload without crossorigin.`;
+    }
+    // A file of the family for some of those characters, as of a family
+    // split by unicode-range, that had not come.
+    if (fallback.due.size) {
+      const urls = [...fallback.due];
+      const waiting = urls.some((url) => !answered.has(url));
+      return `${drawn}, because ${family.name}'s ${urls.length === 1 ? "file" : "files"} ${listOf(urls)} did not load while the page was read. ${counted} The kit has no file of it for those characters${waiting ? ": try again later" : ""}.`;
     }
     return `${drawn}, because ${family.name} loaded too late for ${many ? "them" : "it"}. ${counted}`;
   });

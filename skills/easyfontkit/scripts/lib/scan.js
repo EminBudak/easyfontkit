@@ -206,7 +206,8 @@ async function walk(cdp) {
 
 // The text Chrome counts the glyphs of for a node: that of its own text
 // nodes and of its children's, as it is laid out, with each run of white
-// space one space. Read for a node drawn in part with a font of the
+// space one space, or the label of an input button, its value, which no
+// text node holds. Read for a node drawn in part with a font of the
 // visitor's own, as one a web font has no glyphs for: { text, length },
 // the text cut to 20000 characters and how long it was. The page hands
 // back the text alone, however many children the node has. A page that
@@ -218,8 +219,11 @@ const textHeld = new WeakSet();
 const OWN_TEXT = `function (kept) {
   let text = "";
   const own = (node) => { for (const child of node.childNodes) if (child.nodeType === 3) text += child.data; };
-  own(this);
-  for (const child of this.children) own(child);
+  if (this.localName === "input") text = String(this.value || "");
+  else {
+    own(this);
+    for (const child of this.children) own(child);
+  }
   text = text.replace(/\\s+/g, " ").trim();
   return [text.slice(0, kept), text.length];
 }`;

@@ -155,6 +155,43 @@ test("text a web font has no glyphs for, as Japanese or an emoji in a Latin font
   assert.deepEqual(ranged.notes, ["Some of the headings were drawn with Liberation Sans, a fallback, as Acme Latin has no glyphs for those characters. That text is counted as Acme Latin, the font the site asks for."]);
 });
 
+test("text a fallback drew in characters that a file of the web font's for them, which had not come while the page was read, covers by its unicode-range, as a family split into latin and latin-ext or into Cyrillic, is said to have waited for that file, not to lack glyphs; characters no rule of the family covers still lack them, and an input button whose label was not read does not change that", () => {
+  // Inter's latin file, as the family's file for U+0000-00FF, which was
+  // read, and the family's other files, for latin-ext and for Cyrillic,
+  // which the browser asked for and had not got.
+  const latin = file("https://www.acme.com/fonts/latin.ttf", { 1: "Acme Latin", 13: "This Font Software is licensed under the SIL Open Font License, Version 1.1." });
+  const ext = "https://www.acme.com/fonts/latin-ext.ttf";
+  const cyrillic = "https://www.acme.com/fonts/cyrillic.ttf";
+  const stack = '"Acme Latin", sans-serif';
+  const rules = [
+    { ...rule("Acme Latin", latin.urls[0]), unicodeRange: "U+0000-00FF" },
+    { ...rule("Acme Latin", ext), unicodeRange: "U+0100-024F" },
+    { ...rule("Acme Latin", cyrillic), unicodeRange: "U+0400-04FF" },
+  ];
+  const read = (roles, { asked = [latin.urls[0], ext, cyrillic], skipped = [] } = {}) => buildFamilies({ pageUrl: PAGE, roles, files: [latin], rules, faces: [], loaded: [{ family: "Acme Latin" }], asked, skipped });
+  const polish = { heading: [face("Liberation Sans", 9, stack, { custom: false, nodes: [["Zażółć gęślą jaźń", 9]] }), face("Acme Latin", 8, stack)] };
+  const waited = (urls, end = ": try again later") => `Some of the headings were drawn with Liberation Sans, a fallback, because Acme Latin's ${urls.length === 1 ? "file" : "files"} ${urls.join(" and ")} did not load while the page was read. That text is counted as Acme Latin, the font the site asks for. The kit has no file of it for those characters${end}.`;
+  assert.deepEqual(read(polish).notes, [waited([ext])]);
+  assert.deepEqual(read({ heading: [face("Liberation Sans", 10, stack, { custom: false, nodes: [["Hello Привет мир", 10]] }), face("Acme Latin", 5, stack)] }).notes, [waited([cyrillic])]);
+  // One whose server answered with an error has a note of its own, and a
+  // later run gets the same answer.
+  assert.deepEqual(read(polish, { skipped: [{ url: ext, reason: "the server answered 503" }] }).notes, [waited([ext], "")]);
+  // A rule whose file the browser never asked for takes nothing, as the
+  // browser asks for a file once the text needs it.
+  const lacking = "Some of the headings were drawn with Liberation Sans, a fallback, as Acme Latin has no glyphs for those characters. That text is counted as Acme Latin, the font the site asks for.";
+  assert.deepEqual(read(polish, { asked: [latin.urls[0]] }).notes, [lacking]);
+  // Japanese, which no rule of the family covers, as on a page whose
+  // latin-ext file had not come either.
+  const japanese = (nodes) => read({ button: [face("Noto Sans CJK JP", 12, '"Acme Latin", "Noto Sans CJK JP", sans-serif', { custom: false, nodes })] }).notes;
+  const buttons = ["Some of the buttons were drawn with Noto Sans CJK JP, a fallback, as Acme Latin has no glyphs for those characters. That text is counted as Acme Latin, the font the site asks for."];
+  assert.deepEqual(japanese([["送信する", 4], ["次へ", 2]]), buttons);
+  // An input button whose label the kit could not read, as one whose label
+  // is the browser's own, among buttons whose labels it read.
+  assert.deepEqual(japanese([["送信する", 4], ["次へ", 2], ["", 6]]), buttons);
+  // With no label read at all, nothing tells, and the note is as before.
+  assert.deepEqual(japanese([["", 6]]), ["Some of the buttons were drawn with Noto Sans CJK JP, a fallback, because Acme Latin loaded too late for them. That text is counted as Acme Latin, the font the site asks for."]);
+});
+
 test("text a fallback drew because the browser refused the web font's file to the page's @font-face rule, a file the kit read from another request, is said to be so, and not to have come too late", () => {
   const far = file("http://cdn.example/far.ttf", { 1: "Far Sans" });
   const { roles, families, notes } = buildFamilies({

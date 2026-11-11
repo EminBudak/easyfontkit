@@ -11,7 +11,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, sleep } = require("./time");
-const { NOTHING, chromePlace, findChrome, cannotStart, notStarted, runnable } = require("./program");
+const { NOTHING, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable } = require("./program");
 
 // The browsers this process has started and not closed yet, each with its
 // profile, from the moment it is spawned.
@@ -380,22 +380,18 @@ function downloadsIn(profile) {
 // a server that runs several at a time.
 //
 // A browser that cannot be started stops the run before anything is made,
-// with the path CHROME_PATH or the search for one gave and what is wrong
-// with it: a path the browser is not at, or one that names no program this
-// user may run, as a folder or a file on a noexec mount, is told before it
-// is started; a file the system cannot start, as a script whose interpreter
-// or a program whose loader or library is missing, or one for another
-// system, a script that could not start the browser it runs, and a browser
-// whose sandbox could not start, once it has failed to. The system can also
-// be short of what it takes to start one, as file descriptors.
+// with the path CHROME_PATH or the search for one gave: a path the browser
+// is not at, or one that names no program this user may run, as a folder or
+// a file on a noexec mount, is told before it is started, with what is
+// wrong with it; one the system could not start at all, with the system's
+// own reason; and one that ended before it answered, with what it printed
+// and how it ended. The system can also be short of what it takes to start
+// one, as file descriptors.
 async function launch({ width, height }) {
   const place = chromePlace();
   if (!place) throw new Error(NOTHING);
   if (place.what) throw new Error(cannotStart(place));
   const { file: binary, name } = place;
-  // One that ended before it answered, and what is wrong with it when that
-  // can be told, or the words for a browser that started and quit.
-  const quit = (failed) => new Error(notStarted(place, failed) || `${name} did not start. Try again, or point CHROME_PATH at another browser.`);
   const { profile, env = process.env, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
   const started = { child: null, profile, singleton: "", crashHandler: null };
   // A site can send the browser to mailto:, news: or snews:, which Chrome on
@@ -435,22 +431,24 @@ async function launch({ width, height }) {
         ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
         "about:blank",
       ],
-      { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], ...where, env: { ...env, ...config, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
+      { stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"], ...where, env: { ...env, ...config, BREAKPAD_DUMP_LOCATION: path.resolve(profile, "Crash Reports") } },
     );
   } catch (error) {
     // Node gives some errors at once, as for a path that changed since it
     // was looked at and now goes round a loop of links.
     removeProfile(started, 10, 100);
-    throw quit({ error });
+    throw new Error(couldNotStart(place, error));
   }
   started.child = child;
   open.add(started);
   let exited = false;
   let failure = null;
   let code = null;
+  let signal = null;
   const ended = new Promise((resolve) => {
-    child.on("exit", (status) => {
+    child.on("exit", (status, stoppedBy) => {
       code = status;
+      signal = stoppedBy;
       resolve();
     });
     child.on("error", (error) => {
@@ -458,27 +456,33 @@ async function launch({ width, height }) {
       resolve();
     });
   }).then(() => (exited = true));
-  // What the browser says on stderr, its first 8 KB: the system's loader
-  // says there which library is missing, /bin/sh what it made of a file
-  // that is no program, a script's shell or env what it could not start,
-  // and Chrome why its sandbox could not start. The rest is read and let go,
-  // so the browser never waits to write it.
-  const said = [];
-  let saidBytes = 0;
-  if (child.stderr) {
-    child.stderr.on("data", (chunk) => {
-      if (saidBytes < 8_192) said.push(chunk.subarray(0, 8_192 - saidBytes));
-      saidBytes += chunk.length;
-    });
-    child.stderr.on("error", () => {});
-  }
+  // What the browser prints, the first 8 KB of its output and of its error
+  // output: a browser that ends before it answers often says why there, as
+  // the system's loader names a library it did not find, a script's shell
+  // or env a program it could not start, and Chrome why its sandbox could
+  // not start. The rest is read and let go, so the browser never waits to
+  // write it.
+  const printed = (stream) => {
+    const kept = [];
+    let bytes = 0;
+    if (stream) {
+      stream.on("data", (chunk) => {
+        if (bytes < 8_192) kept.push(chunk.subarray(0, 8_192 - bytes));
+        bytes += chunk.length;
+      });
+      stream.on("error", () => {});
+    }
+    return () => Buffer.concat(kept).toString("utf8");
+  };
+  const stdout = printed(child.stdout);
+  const stderr = printed(child.stderr);
   // With no file descriptor left, Node makes no pipes, and says why a
   // moment later.
   if (!child.stdio || !child.stdio[3] || !child.stdio[4]) {
     await ended;
     open.delete(started);
     removeProfile(started, 10, 100);
-    throw quit({ error: failure });
+    throw new Error(failure ? couldNotStart(place, failure) : `${name} did not start: easyfontkit could not make the pipes it drives the browser through.`);
   }
   const pipe = connect(child.stdio[3], child.stdio[4]);
   // Chrome is asked to quit first: killed outright, its helper processes go
@@ -504,6 +508,7 @@ async function launch({ width, height }) {
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
     pipe.close();
     endAll(processes, profile);
+    if (child.stdout) child.stdout.destroy();
     if (child.stderr) child.stderr.destroy();
     open.delete(started);
     started.singleton = started.singleton || singletonOf(profile);
@@ -531,16 +536,20 @@ async function launch({ width, height }) {
     ended.then(() => "quit"),
   ]);
   if (how !== "started") {
-    // All it said as it ended, a second at most: helpers it started can
-    // hold its stderr open.
-    if (how === "quit" && child.stderr && !child.stderr.closed) {
+    // How it ended, and all it printed as it ended, a second at most: a
+    // pipe can close a moment before the browser ends, and helpers it
+    // started can hold its output open.
+    let byItself = exited;
+    if (how === "quit") {
       let timer;
-      await Promise.race([new Promise((resolve) => child.stderr.once("close", resolve)), new Promise((resolve) => (timer = setTimeout(resolve, 1_000)))]);
+      const closing = [child.stdout, child.stderr].filter((stream) => stream && !stream.closed).map((stream) => new Promise((resolve) => stream.once("close", resolve)));
+      await Promise.race([Promise.all([ended, ...closing]), new Promise((resolve) => (timer = setTimeout(resolve, 1_000)))]);
       clearTimeout(timer);
+      byItself = exited;
     }
     await close();
     // One that quit did not start; one still starting is slow.
-    if (how === "quit") throw quit({ error: failure, stderr: Buffer.concat(said).toString("utf8"), code });
+    if (how === "quit") throw new Error(failure ? couldNotStart(place, failure) : endedEarly(place, { stderr: stderr(), stdout: stdout(), code, signal, closed: !byItself }));
     if (how === "slow") throw tooSlow(name, "start", wait);
     throw new Error(`${name} cannot be told to refuse the downloads a page starts (${how.refused}), so no kit was made: a site could save files on this machine through it. Point CHROME_PATH at another browser.`);
   }

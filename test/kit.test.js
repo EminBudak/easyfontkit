@@ -1500,6 +1500,31 @@ function cssParts(css) {
   return { comments, rules: css.replace(/\/\*[\s\S]*?\*\//g, "") };
 }
 
+// What a browser prints is read only when it ended before it answered: a
+// wrapper whose first words are a warning, with no #! line, starts the
+// browser all the same, as the system runs it with /bin/sh.
+test("a wrapper in the browser's place that prints a warning first, and one with no #! line, still start the browser and make the kit", { skip: noBrowser || noSignals }, async () => {
+  const { server, origin } = await serve(PAGE);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-wrapper-"));
+  const chrome = findChrome();
+  try {
+    for (const [name, text] of [
+      ["warns", `#!/bin/sh\necho "warning: this wrapper is old" >&2\nexec "${chrome}" "$@"\n`],
+      ["bare", `exec "${chrome}" "$@"\n`],
+    ]) {
+      const wrapper = path.join(parent, name);
+      fs.writeFileSync(wrapper, text, { mode: 0o755 });
+      const dir = path.join(parent, `kit-${name}`);
+      const cli = await run([origin, "--out", dir], { ...process.env, CHROME_PATH: wrapper });
+      assert.equal(cli.status, 0, `${name}: ${cli.stderr}`);
+      assert.deepEqual(fs.readdirSync(dir).sort(), ["FONTS.md", "files", "fonts.css", "fonts.json"], name);
+    }
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("the page's address goes into fonts.css only inside its comment, also when the page puts */ in it", { skip: noBrowser }, async () => {
   const font = `<style>@font-face { font-family: "Body Sans"; src: url("/inter.woff2") format("woff2"); } h1, p { font-family: "Body Sans", sans-serif; }</style>`;
   const page = (title, body = "") => `<!doctype html><html><head><title>${title}</title>${font}</head><body><h1>${title}</h1><p>A page whose address carries a style sheet of its own.</p>${body}</body></html>`;

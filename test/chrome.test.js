@@ -546,7 +546,7 @@ test("a browser that quits as it starts is told apart from one that is slow, as 
   const { parent } = standIn(t);
   fs.writeFileSync(process.env.CHROME_PATH, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   setTimeLimit(3_000);
-  await assert.rejects(launch(SCREEN), { message: "chrome did not start. Try again, or point CHROME_PATH at another browser." });
+  await assert.rejects(launch(SCREEN), { message: `chrome did not start: CHROME_PATH is ${process.env.CHROME_PATH}, which ended before it answered: it printed nothing and exited with 1. Point CHROME_PATH at the program of a Chrome, Chromium, Edge or Brave that runs, or unset it and install one.` });
   assert.deepEqual(fs.readdirSync(path.join(parent, "temp")), []);
 });
 

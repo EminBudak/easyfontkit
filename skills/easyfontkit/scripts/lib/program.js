@@ -1,22 +1,21 @@
 "use strict";
 
-// The browser's program: where it is, as a shell would find it, and, when
-// it cannot be started, what is wrong with it, in words a person can act
-// on. The system says little: ENOENT for a script whose interpreter or a
-// program whose loader is not there, EACCES for a folder or a file on a
-// noexec mount, and a file it cannot run as a program it hands to /bin/sh,
-// which reads it as a script and fails with words of its own. A script that
-// runs the browser, as Chrome's own launcher on Linux does, says what it
-// could not start, and Chrome says why its sandbox could not start. So the
-// path is looked at before the browser is started, and the file again, more
-// closely, with what was said, when it did not start.
+// The browser's program: where it is, as a shell would find it, and what
+// is certain about one that cannot be started. Before it is started, its
+// path is looked at with the checks whose answer is certain: nothing there,
+// a folder, a link that leads to nothing or round a loop, a path through a
+// file or a folder this user may not enter, a file this user may not run,
+// as on a disk mounted noexec, and an empty file. What a browser that
+// passes them does is told by the system's own words when it could not be
+// started at all, or by what it printed and how it ended when it ended
+// before it answered: never guessed from what the file holds, nor from
+// which program the words of a script that starts it name.
 
 const fs = require("fs");
 const path = require("path");
 const { getSystemErrorMap } = require("util");
 
 const WINDOWS = process.platform === "win32";
-const OS = { linux: "Linux", darwin: "macOS", win32: "Windows" }[process.platform] || process.platform;
 
 const MAC = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -46,9 +45,13 @@ const FIX = {
   named: "Point CHROME_PATH at the program of a Chrome, Chromium, Edge or Brave that runs, or unset it and install one.",
   found: "Install Chrome, Chromium, Edge or Brave, or point CHROME_PATH at the program of one that runs.",
 };
-// What to do when Chrome's sandbox cannot start, which another browser does
-// not help with.
-const SANDBOX_FIX = "Run easyfontkit where Chrome's sandbox can start: on Linux, Google Chrome's own package sets the sandbox up, and a container has to let it start, as Docker does with --security-opt seccomp=unconfined.";
+// What lets Chrome's sandbox start, said when the browser said it could not
+// start one, in words that hold whichever way it could not: in a container
+// whose seccomp keeps a user who is not root from making namespaces, in a
+// build whose setuid helper is not set up, or in one that has no helper and
+// that the system keeps from making user namespaces, as AppArmor does on
+// Ubuntu 23.10 and later for a browser it has no rule for.
+const SANDBOX = "Its sandbox could not start here: a container has to allow it, as Docker does with --security-opt seccomp=unconfined, and a build copied or unpacked by hand can lack the setup that Google Chrome's own package gives it.";
 
 // A name with no folder in it, which is looked up on PATH.
 const bare = (value) => !(value.includes("/") || (WINDOWS && value.includes("\\")));
@@ -239,306 +242,6 @@ function look(file, depth = 0) {
   return { what: "", none: false };
 }
 
-// The processors of ELF programs, by their number in the file's header,
-// and this machine's, by Node's name for it.
-const MACHINES = { 3: "32-bit x86", 8: "MIPS", 20: "32-bit PowerPC", 21: "64-bit PowerPC", 22: "IBM Z (s390x)", 40: "32-bit ARM", 62: "x86-64", 183: "ARM64 (aarch64)", 243: "RISC-V", 258: "LoongArch" };
-const ARCH = { ia32: 3, mips: 8, mipsel: 8, ppc: 20, ppc64: 21, s390x: 22, arm: 40, x64: 62, arm64: 183, riscv64: 243, loong64: 258 };
-
-function readAt(fd, offset, length) {
-  const buffer = Buffer.alloc(Math.max(0, Math.min(length, 1 << 16)));
-  return buffer.subarray(0, fs.readSync(fd, buffer, 0, buffer.length, offset));
-}
-
-// An ELF program's processor and the loader it names, from its header and
-// its program headers.
-function elfOf(fd, head) {
-  const bits = head[4] === 2 ? 64 : 32;
-  const little = head[5] !== 2;
-  const u16 = (b, at) => (little ? b.readUInt16LE(at) : b.readUInt16BE(at));
-  const u32 = (b, at) => (little ? b.readUInt32LE(at) : b.readUInt32BE(at));
-  const word = (b, at) => (bits === 64 ? Number(little ? b.readBigUInt64LE(at) : b.readBigUInt64BE(at)) : u32(b, at));
-  const machine = u16(head, 18);
-  let loader = "";
-  try {
-    const table = word(head, bits === 64 ? 0x20 : 0x1c);
-    const size = u16(head, bits === 64 ? 0x36 : 0x2a);
-    const count = Math.min(u16(head, bits === 64 ? 0x38 : 0x2c), 128);
-    const headers = readAt(fd, table, size * count);
-    for (let i = 0; i < count; i++) {
-      // PT_INTERP: the loader that starts the program.
-      if (u32(headers, i * size) !== 3) continue;
-      const offset = word(headers, i * size + (bits === 64 ? 8 : 4));
-      const length = word(headers, i * size + (bits === 64 ? 32 : 16));
-      loader = readAt(fd, offset, Math.min(length, 4096)).toString("latin1").replace(/\0[\s\S]*$/, "");
-      break;
-    }
-  } catch {
-    // A header cut short: no loader known.
-  }
-  return { machine, loader };
-}
-
-// Whether bytes are text: UTF-8 with no control character but a tab, a
-// line break, a form feed or an escape. A letter cut in two at the end of
-// the bytes read is no sign of anything.
-function textual(bytes) {
-  let text;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream: true });
-  } catch {
-    return false;
-  }
-  return !/[\0-\x08\x0e-\x1a\x1c-\x1f\x7f]/.test(text);
-}
-
-// What a file holds, from its first bytes: { script: { interpreter, rest,
-// cr } } from its #! line, { elf: { machine, loader } }, { windows } for a
-// Windows program, { macos } for a macOS one, { text } for text with no #!
-// line, { binary } for anything else, { unreadable } for a file this user
-// may not read, and {} when it is empty or cannot be read otherwise.
-function kindOf(file) {
-  let fd;
-  try {
-    fd = fs.openSync(file, "r");
-  } catch (err) {
-    return err.code === "EACCES" || err.code === "EPERM" ? { unreadable: true } : {};
-  }
-  try {
-    const head = readAt(fd, 0, 4096);
-    if (!head.length) return {};
-    if (head[0] === 0x23 && head[1] === 0x21) {
-      // The system takes the interpreter up to a space, a tab or the end of
-      // the line, and the rest of the line as one word it is given, with a
-      // carriage return as part of either.
-      const end = head.indexOf(0x0a);
-      const line = head.subarray(2, end < 0 ? head.length : end).toString("latin1");
-      const [, name, rest] = /^[ \t]*([^ \t]*)[ \t]*(.*)$/s.exec(line);
-      const word = rest.replace(/[ \t]+$/, "");
-      return { script: { interpreter: name.replace(/\r$/, ""), rest: word.replace(/\r$/, ""), cr: name.endsWith("\r") || word.endsWith("\r") } };
-    }
-    if (head.length >= 52 && head.readUInt32BE(0) === 0x7f454c46) return { elf: elfOf(fd, head) };
-    if (head[0] === 0x4d && head[1] === 0x5a) return { windows: true };
-    const magic = head.length >= 8 ? head.readUInt32BE(0) : 0;
-    // Mach-O, 32 and 64 bits in either byte order, and a universal file of
-    // a few of them, which a Java class file, of the same magic, is not.
-    if ([0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe].includes(magic) || ((magic === 0xcafebabe || magic === 0xcafebabf) && head.readUInt32BE(4) < 20)) return { macos: true };
-    return textual(head) ? { text: true } : { binary: true };
-  } catch {
-    return {};
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-// What a file made for another system is, or "" for one of this one's.
-function foreign(kind) {
-  if (kind.elf) {
-    if (WINDOWS || process.platform === "darwin") return `a program for Linux or another Unix, not for ${OS}`;
-    const mine = ARCH[process.arch];
-    if (mine !== undefined && kind.elf.machine !== mine) return `a program for ${MACHINES[kind.elf.machine] || "another processor"}, which this ${MACHINES[mine]} machine cannot run`;
-    return "";
-  }
-  if (kind.windows && !WINDOWS) return `a Windows program, which does not run on ${OS}`;
-  if (kind.macos && process.platform !== "darwin") return `a macOS program, which does not run on ${OS}`;
-  return "";
-}
-
-// A script whose interpreter cannot be started: what its first line names
-// and what is wrong with that.
-function interpreterTrouble(script) {
-  if (script.cr) return "a script with Windows line breaks, so its first line names a program whose name ends in a carriage return, which is not there";
-  const name = script.interpreter;
-  if (!name) return "a script whose first line, #!, names no program";
-  let stat = null;
-  try {
-    stat = fs.statSync(name);
-  } catch {
-    // Not there, or not to be looked at.
-  }
-  if (!stat) return `a script whose first line names ${name}, which is not on this machine`;
-  if (stat.isDirectory()) return `a script whose first line names ${name}, a folder, not a program`;
-  if (!runnable(name)) return `a script whose first line names ${name}, a file this user may not run`;
-  return "";
-}
-
-// Whether /bin/sh read a file as a script and failed on it, which the
-// system has it do with a file it cannot run as a program: what the shell
-// says starts with the file's path, then the line it failed on, as dash
-// says, "line" and the line, as bash says, or the path again, as bash says
-// of a file that is no script. It is asked only of a file the system would
-// not run, as a script's own shell says the same of its lines.
-function readByShell(file, stderr) {
-  if (!stderr.startsWith(`${file}: `)) return false;
-  const rest = stderr.slice(file.length + 2);
-  return /^(line )?\d+: /.test(rest) || rest.startsWith(`${file}: `);
-}
-
-// What the system told a shell of a program it could not start, by the
-// words dash, bash and BusyBox say after its name.
-const SHELL_SAYS = {
-  "not found": "ENOENT",
-  "command not found": "ENOENT",
-  "No such file or directory": "ENOENT",
-  "cannot execute: required file not found": "ENOENT",
-  "cannot execute: No such file or directory": "ENOENT",
-  "Permission denied": "EACCES",
-  "cannot execute: Permission denied": "EACCES",
-  "Is a directory": "EACCES",
-  "cannot execute: Is a directory": "EACCES",
-  "Exec format error": "ENOEXEC",
-  "cannot execute binary file": "ENOEXEC",
-  "cannot execute binary file: Exec format error": "ENOEXEC",
-};
-// A script's shell on a program one of its lines could not start, after the
-// script's path: the line, as dash says it, or "line" and the line, as bash
-// says it, then exec when it was that, the program and what was wrong.
-const COULD_NOT = new RegExp(`^(?:line )?\\d+: (?:exec: )?(.+?): (${Object.keys(SHELL_SAYS).join("|")})$`);
-// env's words for a program it was told to start and could not, as GNU's,
-// BusyBox's and the BSDs' env say them, in their quotes or none.
-const ENV_COULD_NOT = /^(?:\S*\/)?env: (?:can't execute )?['"\u2018]?(.+?)['"\u2019]?: (No such file or directory|Permission denied)$/;
-
-// The program a script's #! line has env start, as in "#!/usr/bin/env
-// chrome", where the system gives env the rest of the line as one word, or
-// "#!/usr/bin/env -S chrome --flag", where env splits it and passes over
-// its own options and any NAME=value. "" for any other #! line.
-function envTarget(script) {
-  if (path.basename(script.interpreter) !== "env" || !script.rest) return "";
-  if (!script.rest.startsWith("-S")) return script.rest.startsWith("-") ? "" : script.rest;
-  return script.rest.slice(2).split(/[ \t]+/).find((word) => word && !word.startsWith("-") && !word.includes("=")) || "";
-}
-
-// What is wrong with a program a script ran and could not start, `named` as
-// the script names it, by a path or by a name on PATH, with `said` the
-// shell's or env's words for it: words that follow its name after a comma.
-function startedByScript(named, said) {
-  let file;
-  let at = "";
-  if (bare(named)) {
-    const found = lookOnPath(named);
-    if (!found.file && !found.other) return "which is not on your PATH";
-    file = found.file || found.other;
-    at = `found on your PATH at ${file}, `;
-  } else {
-    file = path.resolve(named);
-  }
-  const seen = look(file);
-  if (seen.what) return `${at}${seen.what.replace(/^and there is no file there/, "which is not there")}`;
-  // A file this user may run, which the system did not start: one whose
-  // loader or interpreter is missing, or one for another system.
-  const code = SHELL_SAYS[said] || "EACCES";
-  const kind = kindOf(file);
-  if (code === "ENOENT" && kind.script) {
-    const trouble = interpreterTrouble(kind.script);
-    if (trouble) return `${at}${trouble}`;
-  }
-  if (code === "ENOENT" && kind.elf && kind.elf.loader && !there(kind.elf.loader)) return `${at}a program that needs the loader ${kind.elf.loader}, which is not on this machine`;
-  if (code === "ENOEXEC") return `${at}${foreign(kind) || (kind.text ? "a text file with no #! line, not a program" : "not a program this system can run")}`;
-  return `${at}which it could not start (${said})`;
-}
-
-// What a script that ran says of a program it could not start, as it ended
-// with `code`: env, of the one its first line has env start, or the
-// script's shell, of one a line of it runs, as Chrome's own launcher on
-// Linux runs the browser with exec. They end with 126 or 127 then, and with
-// 2 when the shell could not read a file the system gave it. "" for anything
-// else, as a script whose browser started and quit.
-function scriptStopped(file, script, stderr, code) {
-  if (![2, 126, 127].includes(code)) return "";
-  const lines = stderr.split("\n");
-  const env = envTarget(script);
-  if (env && code !== 2) {
-    for (const line of lines) {
-      const m = ENV_COULD_NOT.exec(line);
-      if (!m || m[1] !== env) continue;
-      if (script.cr) return "a script with Windows line breaks, so its first line has env start a program whose name ends in a carriage return, which is not there";
-      return `a script whose first line has env start ${env}, ${startedByScript(env, m[2])}`;
-    }
-  }
-  for (const line of lines) {
-    if (code === 2 || !line.startsWith(`${file}: `)) continue;
-    // A builtin's words, as bash's "cd: <folder>: No such file or
-    // directory", name no program.
-    const m = COULD_NOT.exec(line.slice(file.length + 2));
-    if (m && !m[1].includes(": ")) return `a script that starts ${m[1]}, ${startedByScript(m[1], m[2])}`;
-  }
-  // A file the system would not run as a program, which the script started
-  // and the system gave /bin/sh, as a web page saved in the browser's place:
-  // the shell's words start with that file's path.
-  for (const line of lines) {
-    const m = /^(.+?): (?:(?:line )?\d+: |\1: )/.exec(line);
-    if (!m || m[1] === file || !path.isAbsolute(m[1])) continue;
-    const kind = kindOf(m[1]);
-    if (kind.text || kind.binary || foreign(kind)) return `a script that starts ${m[1]}, ${foreign(kind) || (kind.text ? "a text file with no #! line, not a program" : "not a program this system can run")}`;
-  }
-  return "";
-}
-
-// What is wrong with a browser at `file` that did not start, from the
-// error the system gave as it was started (`error`), or from how it ended
-// before it answered (`stderr`, what it printed, and `code`, its exit
-// status) and what the file is, as words that follow its path after a
-// comma. "" when nothing tells, as for a browser that started and quit.
-function explain(file, { error = null, stderr = "", code = null } = {}) {
-  const kind = kindOf(file);
-  if (error) {
-    if (kind.script && ["ENOENT", "EACCES", "EPERM", "ENOEXEC"].includes(error.code)) {
-      const trouble = interpreterTrouble(kind.script);
-      if (trouble) return trouble;
-    }
-    if (error.code === "ENOENT") {
-      if (kind.elf && kind.elf.loader && !there(kind.elf.loader)) return `a program that needs the loader ${kind.elf.loader}, which is not on this machine`;
-      return "a program that cannot start, as its interpreter or loader is missing";
-    }
-    if (error.code === "ENOEXEC" || error.code === "EFTYPE") return foreign(kind) || (kind.text ? "a text file with no #! line, not a program" : "not a program this system can run");
-    if (error.code === "EACCES" || error.code === "EPERM") return "a file this user may not run";
-    return `a program that cannot be started (${worded(error)})`;
-  }
-  // The loader's words for a library it did not find, or one too old. It
-  // names the program by the name it was started with: a script's
-  // interpreter, or a program a script starts, by its own, unless the
-  // script gives it the script's name, as Chrome's launcher on Linux does.
-  const by = (named, what) => {
-    if (!kind.script || named === file) return what;
-    return `${named === kind.script.interpreter ? "a script whose first line names" : "a script that starts"} ${named}, ${what}`;
-  };
-  const library = /^(.+?): error while loading shared libraries: ([^:\n]+): cannot open shared object file/m.exec(stderr);
-  if (library) return by(library[1], `a program that needs the shared library ${library[2].trim()}, which is not on this machine`);
-  const old = /^(.+?): ([^:\s]+): version `([^']+)' not found \(required by /m.exec(stderr);
-  if (old) return by(old[1], `a program made for a newer system: it needs ${old[3]} of ${path.basename(old[2])}, which this machine's is too old to have`);
-  // A script the system started, which says what it could not start, or
-  // nothing that tells.
-  if (kind.script) return scriptStopped(file, kind.script, stderr, code);
-  // A file this user may run and not read. The system starts a program so,
-  // but a script's interpreter has to read it, and says it may not, as
-  // dash's "cannot open <file>: Permission denied" does.
-  if (kind.unreadable) {
-    const denied = stderr.split("\n").some((line) => line.includes(file) && line.includes("Permission denied"));
-    return denied ? "a script without the permission to read it, which its interpreter needs and chmod +r gives" : "";
-  }
-  // A file the system would not run as a program and gave /bin/sh.
-  if (!(kind.text || kind.binary || foreign(kind)) || !readByShell(file, stderr)) return "";
-  if (kind.text) return "a text file with no #! line, not a program";
-  return foreign(kind) || "not a program this system can run";
-}
-
-// Chrome's words for a sandbox it could not start, which it needs unless it
-// runs as root, from what it printed as it quit: its setuid sandbox could
-// not make its namespaces, as in a container whose seccomp keeps a user who
-// is not root from making them; its setuid helper is not set up; or it has
-// none at all, as on a system whose AppArmor keeps a browser it has no rule
-// for from making user namespaces. "" when it says none of these.
-function sandboxTrouble(stderr) {
-  const said = stderr.split("\n").map((line) => line.replace(/^\[[^\]]*\]\s*/, "").trim());
-  for (const line of said) {
-    if (/No usable sandbox/i.test(line)) return "No usable sandbox";
-    if (/SUID sandbox helper binary was found, but is not configured correctly/i.test(line)) return "The SUID sandbox helper binary was found, but is not configured correctly";
-    const namespaces = /\((setuid sandbox: [^)]*)\)/.exec(line);
-    if (namespaces) return namespaces[1];
-  }
-  const moved = said.find((line) => /^Failed to move to new namespace/i.test(line));
-  return moved ? moved.replace(/: PID namespaces supported, Network namespace supported, but failed/i, "") : "";
-}
-
 // Where this run's browser is: { file, name, value, where, what, none }, or
 // null when there is none at all. `value` is what CHROME_PATH holds when it
 // is set, which names the browser by its path or, as a shell would take it,
@@ -591,18 +294,26 @@ function findChrome() {
 
 // The message for a browser that cannot be started, `what` being what is
 // wrong with it: the path CHROME_PATH or the search gave, what is wrong
-// with it, and how to get one that runs, or `fix`, what to do when another
-// browser would not help. It starts as the kit's messages did before: none
-// was found, or the one found did not start.
-function cannotStart(place, what = place.what, fix = "") {
+// with it, and how to get one that runs. It starts as the kit's messages
+// did before: none was found, or the one found did not start.
+function cannotStart(place, what = place.what) {
   const lead = place.none ? NONE : `${place.name} did not start`;
   if (place.value !== undefined) {
     const at = bare(place.value) && place.file ? `, found on your PATH at ${place.file}` : "";
-    return `${lead}: CHROME_PATH is ${place.value}${at}, ${what}. ${fix || FIX.named}`;
+    return `${lead}: CHROME_PATH is ${place.value}${at}, ${what}. ${FIX.named}`;
   }
   // A file that was found is there, unless it went since.
   const is = what.startsWith("and ") ? `gone: ${what.slice(4)}` : what;
-  return `${lead}: ${place.file}, the ${place.name} ${place.where}, is ${is}. ${fix || FIX.found}`;
+  return `${lead}: ${place.file}, the ${place.name} ${place.where}, is ${is}. ${FIX.found}`;
+}
+
+// The message for a browser that was there to start and did not start:
+// `what` says what happened to it, in words that follow "which" or its
+// path, as "ended before it answered: ...", and `more` comes before the
+// words that say how to get one that runs.
+function didNotStart(place, what, more = "") {
+  const at = place.value !== undefined ? `CHROME_PATH is ${place.value}${bare(place.value) && place.file ? `, found on your PATH at ${place.file}` : ""}, which ${what}` : `${place.file}, the ${place.name} ${place.where}, ${what}`;
+  return `${place.name} did not start: ${at}.${more ? ` ${more}` : ""} ${place.value !== undefined ? FIX.named : FIX.found}`;
 }
 
 // The errors that say the system is short of something to start a program
@@ -614,24 +325,94 @@ const SHORT = {
   ENOMEM: "the system has no memory left to start it. Run it again once more is free",
 };
 
-// The message for a browser the system did not start with `error`, or
-// that ended before it answered, having printed `stderr`, with `code`:
-// what is wrong with it, or what the system is short of. "" when nothing
-// tells.
-function notStarted(place, { error = null, stderr = "", code = null } = {}) {
-  if (error && SHORT[error.code]) return `${place.name} did not start: easyfontkit could not start ${place.file}, as ${SHORT[error.code]}.`;
-  // A path the system could not follow, or a file it would not run, looked
-  // at again: it can have changed since it was looked at first.
-  if (error && ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG", "EACCES", "EPERM"].includes(error.code)) {
-    const seen = look(place.file);
-    if (seen.what) return cannotStart({ ...place, ...seen });
-  }
-  // A browser that started and quit at once, as its sandbox could not
-  // start.
-  const sandbox = !error && sandboxTrouble(stderr);
-  if (sandbox) return cannotStart(place, `a browser that quit at once, as its sandbox cannot start here (${sandbox})`, SANDBOX_FIX);
-  const what = explain(place.file, { error, stderr, code });
-  return what ? cannotStart(place, what) : "";
+// A line a program printed, in quotes, as it printed it, with its control
+// characters written out, as \r or \x1b. A line longer than 200 characters
+// keeps its first 120 and its last 80, as its end often says why.
+function quoted(line) {
+  const chars = Array.from(String(line)).map((c) => {
+    if (c === "\t") return "\\t";
+    if (c === "\r") return "\\r";
+    if (!/[\p{Cc}\p{Cf}]/u.test(c)) return c;
+    const n = c.codePointAt(0);
+    return n < 0x100 ? `\\x${n.toString(16).padStart(2, "0")}` : `\\u${n.toString(16).padStart(4, "0")}`;
+  });
+  return `"${(chars.length > 200 ? [...chars.slice(0, 120), "...", ...chars.slice(-80)] : chars).join("")}"`;
 }
 
-module.exports = { NOTHING, chromePlace, findChrome, cannotStart, notStarted, runnable };
+// The head of a line of Chrome's own log: which process wrote it, when,
+// how grave it is and where in Chrome's code, in brackets. One whose
+// gravity is FATAL ended the browser.
+const LOG = /^\[[^\]]*?:(FATAL|ERROR|WARNING|INFO|VERBOSE\d*):[^\]]*\]\s*/;
+
+// The line of what a program printed to quote when it ended before it
+// answered: the first line of Chrome's log that ended it, else the first
+// line with anything in it that is not a line of Chrome's log that only
+// tells or warns, as Chrome 157 starts by saying which channel it is, else
+// the first line with anything in it, or "". The head of a line of Chrome's
+// log is left out, and the rest of the line is as it was printed.
+function causeLine(text) {
+  const lines = String(text || "")
+    .split("\n")
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.trim());
+  const grave = (line) => (LOG.exec(line) || [])[1];
+  const line = lines.find((one) => grave(one) === "FATAL") || lines.find((one) => !/^(INFO|WARNING|VERBOSE\d*)$/.test(grave(one) || "")) || lines[0] || "";
+  return line.replace(LOG, "").trim() || line.trim();
+}
+
+// Whether what a browser printed says that its sandbox could not start, in
+// Chrome's own words for each way it cannot.
+const sandboxSaid = (text) => /No usable sandbox|SUID sandbox helper binary was found, but is not configured correctly|setuid sandbox: failed to move to new namespaces|^Failed to move to new namespace/m.test(String(text || ""));
+
+// The first line of a file that starts with #!, as the system reads it to
+// find the program that runs the file, or null.
+function bangLine(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const bytes = Buffer.alloc(256);
+    const got = bytes.subarray(0, fs.readSync(fd, bytes, 0, bytes.length, 0));
+    if (got.indexOf("#!") !== 0) return null;
+    const end = got.indexOf(10);
+    return got.subarray(0, end < 0 ? got.length : end).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+// The message for a browser the system did not start, as it gave `err`
+// for it: what it is short of, or what is wrong with the path when it
+// changed since it was looked at, or the system's own reason. The system
+// gives ENOENT for a file that is there when an interpreter or a loader it
+// needs is not, so a script's first line, which names its interpreter, is
+// shown.
+function couldNotStart(place, err) {
+  if (SHORT[err.code]) return `${place.name} did not start: easyfontkit could not start ${place.file}, as ${SHORT[err.code]}.`;
+  const seen = look(place.file);
+  if (seen.what) return cannotStart({ ...place, ...seen });
+  const line = bangLine(place.file);
+  const first = line === null ? "" : `, and its first line is ${quoted(line)}`;
+  if (err.code === "ENOENT") return didNotStart(place, `could not be started: an interpreter or a loader it needs is not there${first}`);
+  if (["ENOEXEC", "EFTYPE", "EBADARCH"].includes(err.code)) return didNotStart(place, "could not be started: it is not a program this system can run");
+  return didNotStart(place, `could not be started: ${worded(err)}${first}`);
+}
+
+// The message for a browser that ended before it answered on its pipe,
+// having printed `stderr` and `stdout`, with the exit status `code` or the
+// signal that stopped it: the line of what it printed that causeLine picks,
+// quoted, and how it ended. When its words say that its sandbox could not
+// start, what lets a sandbox start comes too. `closed` says that it closed its pipe and
+// was still running, so the run stopped it.
+function endedEarly(place, { stderr = "", stdout = "", code = null, signal = null, closed = false } = {}) {
+  const line = causeLine(stderr) || causeLine(stdout);
+  const more = sandboxSaid(stderr) || sandboxSaid(stdout) ? SANDBOX : "";
+  if (closed) return didNotStart(place, `closed its pipe before it answered${line ? `, having printed ${quoted(line)}` : ""}`, more);
+  const exited = code !== null && code !== undefined;
+  const end = exited ? `exited with ${code}` : `was stopped by ${signal}`;
+  const how = line ? `it printed ${quoted(line)} and ${end}` : exited ? `it printed nothing and ${end}` : `it ${end}`;
+  return didNotStart(place, `ended before it answered: ${how}`, more);
+}
+
+module.exports = { NOTHING, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, quoted };

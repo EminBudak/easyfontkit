@@ -1027,12 +1027,18 @@ function errorPage(asked, { answer: { status, url }, first }) {
 // A redirect can also lead to a server that takes the connection and never
 // answers. In a redirect loop every address answers, and Chrome gives up at
 // whichever one it has reached, so the one to name is the one asked.
-function notOpened(asked, { failed: { url, error, noAnswer }, first }) {
+function notOpened(asked, { failed: { url, error, noAnswer }, first }, { sandboxed = false } = {}) {
   if (noAnswer) return `${where(asked, url, first)} did not answer in ${noAnswer} s, so no kit was made. The site may be down or slow; try again later, or give it more time with --timeout.`;
   if (error === "net::ERR_TOO_MANY_REDIRECTS") return `Could not open ${asked}: ${error}`;
   // A redirect to an address that is not a web address, as mailto:, which
-  // the browser hands to a program of the machine instead of a page.
-  if (handedOut(url)) return `${where(asked, url, first)} is not a web address, so no kit was made. Give the address of a page of the site itself.`;
+  // the browser hands to a program of the machine instead of a page: on
+  // Linux to the stand-ins, which start nothing, and elsewhere, or from a
+  // browser in a sandbox of its own, as one installed as a snap or a
+  // Flatpak, to the system, which can open it (see triedNotes).
+  if (handedOut(url)) {
+    const reached = !STAND_INS || sandboxed ? ", and the system may have opened it with a program of its own, such as the mail program" : "";
+    return `${where(asked, url, first)} is not a web address, so no kit was made${reached}. Give the address of a page of the site itself.`;
+  }
   return `${where(asked, url, first)} could not be opened${error ? ` (${error})` : ""}, so no kit was made. Check the page in a normal browser.`;
 }
 
@@ -1119,7 +1125,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     // Nothing waits from here to the end.
     if (scan.challenge) throw new Error(botCheck(url, scan));
     if (scan.answer.status >= 400) throw new Error(errorPage(url, scan));
-    if (scan.failed) throw new Error(notOpened(url, scan));
+    if (scan.failed) throw new Error(notOpened(url, scan, { sandboxed }));
     if (scan.left) throw new Error(wentBlank(url, scan));
     if (scan.stalled) throw new Error(stalledPage(url, scan));
     // A page none of whose text was read in the run's time is not one that

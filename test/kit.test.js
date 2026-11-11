@@ -13,7 +13,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { Worker } = require("node:worker_threads");
-const { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit } = require("../skills/easyfontkit/scripts/lib/kit");
+const { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit, triedNotes } = require("../skills/easyfontkit/scripts/lib/kit");
 const { findChrome, launch, openPage, navigate, triedSoFar } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easyfontkit/scripts/lib/time");
 const { fixture, interAs } = require("./helpers");
@@ -2827,6 +2827,23 @@ test("a frame of another site, which runs apart from the page, gets the guard to
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).notes, ["The page tried to open mailto:far@example.com, which is not a web address: it was not opened."]);
   assert.equal(started(), "", "no program of the machine was started");
+});
+
+test("an address a page tried in more than one way is noted by the way that went furthest: one the browser began to go to, as a frame's first address, over a move of the page's the guard cancelled, so a browser in a sandbox of its own may have opened it; three are named and the rest counted", () => {
+  const url = "mailto:same@example.com";
+  const notOpened = (address) => `The page tried to open ${address}, which is not a web address: it was not opened.`;
+  const mayHave = `The page tried to open ${url}, which is not a web address, in a way easyfontkit may not stop in a browser installed as a snap or a Flatpak, so the system may have opened it with a program of its own, such as the mail program.`;
+  const tries = [{ url, how: "asked" }, { url, how: "started" }, { url, how: "cancelled" }];
+  assert.deepEqual(triedNotes(tries, { sandboxed: true }), [mayHave]);
+  assert.deepEqual(triedNotes([...tries].reverse(), { sandboxed: true }), [mayHave]);
+  assert.deepEqual(triedNotes([{ url, how: "window" }, { url, how: "started" }], { sandboxed: true }), [mayHave]);
+  // A move the guard cancelled, and a window the browser does not open
+  // without a click, were not opened in any browser.
+  assert.deepEqual(triedNotes([{ url, how: "asked" }, { url, how: "cancelled" }], { sandboxed: true }), [notOpened(url)]);
+  assert.deepEqual(triedNotes([{ url, how: "cancelled" }, { url, how: "window" }], { sandboxed: true }), [notOpened(url)]);
+  const many = (n) => Array.from({ length: n }, (_, i) => ({ url: `mailto:${i}@example.com`, how: "cancelled" }));
+  assert.deepEqual(triedNotes(many(4)), [...many(3).map(({ url: address }) => notOpened(address)), "It tried 1 more address that is not a web address as well."]);
+  assert.deepEqual(triedNotes(many(5)).slice(3), ["It tried 2 more addresses that are not web addresses as well."]);
 });
 
 test("the browser listens on no port, so no other program on the machine can read or drive it, and is driven over its pipe", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async () => {

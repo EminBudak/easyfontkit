@@ -1044,9 +1044,12 @@ function notOpened(asked, { failed: { url, error, noAnswer }, first }) {
 // the browser runs in a sandbox of its own (sandboxed), as one installed as
 // a snap or a Flatpak, which may not take them; on macOS and Windows the
 // browser hands those to the system, which can open them with a program of
-// its own.
+// its own. An address tried in more than one way is noted by the way that
+// went furthest: one the browser began to go to (started), as a frame's
+// first address, reached it, also when the guard cancelled a move of the
+// page's to the same address.
 function triedNotes(tried = [], { sandboxed = false } = {}) {
-  const rank = { asked: 0, started: 1, window: 2, cancelled: 3 };
+  const rank = { asked: 0, cancelled: 1, window: 2, started: 3 };
   const byAddress = new Map();
   for (const one of tried) {
     const known = byAddress.get(one.url);
@@ -1166,4 +1169,4 @@ function stopRuns() {
   return stopped;
 }
 
-module.exports = { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit, stopRuns, slug };
+module.exports = { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit, stopRuns, slug, triedNotes };

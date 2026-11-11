@@ -372,9 +372,19 @@ function causeLine(text) {
   return line.replace(LOG, "").trim() || line.trim();
 }
 
-// Whether what a browser printed says that its sandbox could not start, in
-// Chrome's own words for each way it cannot.
-const sandboxSaid = (text) => /No usable sandbox|SUID sandbox helper binary was found, but is not configured correctly|setuid sandbox: failed to move to new namespaces|^Failed to move to new namespace/m.test(String(text || ""));
+// What a browser printed says of why its sandbox could not start, in
+// Chrome's own words for each way it cannot: "setup" for a build that lacks
+// what its sandbox needs, a setuid helper that is set up or user namespaces
+// the system lets it make, which another build can have; "namespaces" for a
+// system that keeps even its setuid helper from making namespaces, as a
+// container with Docker's default seccomp does, where every browser fails
+// the same way; "" when it does not say.
+function sandboxSaid(text) {
+  const said = String(text || "");
+  if (/No usable sandbox|SUID sandbox helper binary was found, but is not configured correctly/.test(said)) return "setup";
+  if (/setuid sandbox: failed to move to new namespaces|^Failed to move to new namespace/m.test(said)) return "namespaces";
+  return "";
+}
 
 // Chrome's own words, as the system gives them for errno, for what the
 // system or the browser was short of as it started, and what to do then, in
@@ -489,13 +499,15 @@ function couldNotStart(place, err) {
 function endedEarly(place, { stderr = "", stdout = "", code = null, signal = null, closed = false } = {}) {
   const line = causeLine(stderr) || causeLine(stdout);
   const said = `${stderr}\n${stdout}`;
+  const sandbox = sandboxSaid(said);
   const [, short = ""] = SHORT_SAID.find(([words]) => words.test(said)) || [];
-  const more = [sandboxSaid(said) ? SANDBOX : "", short ? "" : lowLimits()].filter(Boolean).join(" ");
-  if (closed) return didNotStart(place, `closed its pipe before it answered${line ? `, having printed ${quoted(line)}` : ""}`, more, short);
+  const more = [sandbox ? SANDBOX : "", short ? "" : lowLimits()].filter(Boolean).join(" ");
+  const fix = short || (sandbox === "namespaces" ? "Another browser does not help here." : "");
+  if (closed) return didNotStart(place, `closed its pipe before it answered${line ? `, having printed ${quoted(line)}` : ""}`, more, fix);
   const exited = code !== null && code !== undefined;
   const end = exited ? `exited with ${code}` : `was stopped by ${signal}`;
   const how = line ? `it printed ${quoted(line)} and ${end}` : exited && !/\S/.test(stderr + stdout) ? `it printed nothing and ${end}` : `it ${end}`;
-  return didNotStart(place, `ended before it answered: ${how}`, more, short);
+  return didNotStart(place, `ended before it answered: ${how}`, more, fix);
 }
 
 // Whether the browser at `file` runs in a sandbox of its own, with a PATH

@@ -403,6 +403,10 @@ test("a browser that quits at once as its sandbox cannot start, as in a containe
   const namespaces = standIn("namespaces", said.namespaces);
   const helper = standIn("helper", said.helper);
   const none = standIn("none", said.none);
+  // One that could not make namespaces and has no setuid helper to fall
+  // back on, as a build unpacked by hand on a system that keeps it from
+  // making user namespaces: another build, with the helper, can start.
+  const both = standIn("both", [said.namespaces[1], ...said.none]);
   const found = standIn("found", said.namespaces, "google-chrome");
   // The line that ended it, its FATAL line, without the head of Chrome's
   // log line, cut to its first 120 characters and its last 80 when it is
@@ -410,11 +414,16 @@ test("a browser that quits at once as its sandbox cannot start, as in a containe
   const cut = (line) => (line.length > 200 ? `${line.slice(0, 120)}...${line.slice(-80)}` : line);
   const line = (lines) => cut(lines.find((one) => one.includes(":FATAL:")).replace(/^\[[^\]]*\] /, ""));
   const { PATH } = process.env;
+  // Where the system keeps even the setuid helper from making namespaces,
+  // another browser fails the same way, and the message says so in place of
+  // pointing to one; a build that lacks its sandbox's setup is pointed past.
+  const notAnother = "Another browser does not help here.";
   refused(root, [
-    [{ PATH, CHROME_PATH: namespaces }, `chrome did not start: CHROME_PATH is ${namespaces}, which ended before it answered: it printed "${line(said.namespaces)}" and exited with 1. ${more} ${POINT}`],
+    [{ PATH, CHROME_PATH: namespaces }, `chrome did not start: CHROME_PATH is ${namespaces}, which ended before it answered: it printed "${line(said.namespaces)}" and exited with 1. ${more} ${notAnother}`],
     [{ PATH, CHROME_PATH: helper }, `chrome did not start: CHROME_PATH is ${helper}, which ended before it answered: it printed "${line(said.helper)}" and exited with 1. ${more} ${POINT}`],
     [{ PATH, CHROME_PATH: none }, `chrome did not start: CHROME_PATH is ${none}, which ended before it answered: it printed "${line(said.none)}" and exited with 1. ${more} ${POINT}`],
-    [{ PATH: `${path.dirname(found)}${path.delimiter}${PATH}` }, `google-chrome did not start: ${found}, the google-chrome on your PATH, ended before it answered: it printed "${line(said.namespaces)}" and exited with 1. ${more} ${INSTALL}`],
+    [{ PATH, CHROME_PATH: both }, `chrome did not start: CHROME_PATH is ${both}, which ended before it answered: it printed "${line(said.none)}" and exited with 1. ${more} ${POINT}`],
+    [{ PATH: `${path.dirname(found)}${path.delimiter}${PATH}` }, `google-chrome did not start: ${found}, the google-chrome on your PATH, ended before it answered: it printed "${line(said.namespaces)}" and exited with 1. ${more} ${notAnother}`],
   ]);
 });
 

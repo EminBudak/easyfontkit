@@ -72,8 +72,11 @@ const handedOut = (url) => /^[a-z][a-z0-9+.-]*:/i.test(String(url || "")) && !/^
 // apart from the page, gets it as it is attached to (guardFrames). The
 // page's own scripts cannot reach this world. A frame's first address, a
 // frame the page sends to such an address by its script and a redirect are
-// no move of a page's own, and reach the browser: on Linux its stand-ins
-// take those (see launch).
+// no move of a page's own, and reach the browser, and so does the move of a
+// frame with no origin of its own, as one at a data: address or a sandboxed
+// one, that moves itself: the browser fires no navigate event in such a
+// document, and no DevTools call cancels the move. On Linux the browser's
+// stand-ins take those (see launch).
 const GUARD_WORLD = "easyfontkit-guard";
 const GUARD = `(() => {
   if (typeof navigation === "undefined") return;

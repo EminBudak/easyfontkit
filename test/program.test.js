@@ -177,22 +177,28 @@ test("a CHROME_PATH that names no browser the system could start, as a path wher
 test("a file the system will not run as a program, as a web page saved in the browser's place or a program for macOS, Windows or another processor, which glibc hands to /bin/sh, is named with what came of it, never guessed from what the file holds", { skip: process.platform !== "linux" && "glibc hands such files to /bin/sh on Linux" }, () => {
   const root = path.join(dir, "foreign");
   const { PATH } = process.env;
+  const windows = Buffer.concat([Buffer.from("4d5a90000300000004000000ffff0000b8000000000000004000", "hex"), Buffer.alloc(4096)]);
+  windows.writeUInt32LE(0x80, 0x3c);
+  windows.write("PE\0\0", 0x80, "latin1");
   const files = [
-    put(root, "text", "<!DOCTYPE html>\n<html><head><title>404 Not Found</title></head>\n<body><h1>Not Found</h1></body></html>\n"),
-    put(root, "mac", Buffer.concat([Buffer.from("cffaedfe07000001030000000200000000", "hex"), Buffer.alloc(4096)])),
-    put(root, "windows", Buffer.concat([Buffer.from("4d5a90000300000004000000ffff0000b8000000000000004000", "hex"), Buffer.alloc(4096)])),
+    [put(root, "text", "<!DOCTYPE html>\n<html><head><title>404 Not Found</title></head>\n<body><h1>Not Found</h1></body></html>\n"), ""],
+    [put(root, "mac", Buffer.concat([Buffer.from("cffaedfe07000001030000000200000000", "hex"), Buffer.alloc(4096)])), "That file is a program for macOS."],
+    [put(root, "windows", windows), "That file is a program for Windows."],
   ];
   if (["x64", "arm64"].includes(process.arch)) {
-    const elf = Buffer.concat([Buffer.from("7f454c4602010100000000000000000002000000", "hex"), Buffer.alloc(4096)]);
+    // A copy of a program of this system's, for the other processor.
+    const elf = Buffer.from(fs.readFileSync(["/usr/bin/true", "/bin/true"].find((file) => fs.existsSync(file))));
     elf.writeUInt16LE(process.arch === "arm64" ? 0x3e : 0xb7, 0x12);
-    files.push(put(root, "elf", elf));
+    files.push([put(root, "elf", elf), process.arch === "arm64" ? "That file is a program for x86-64, and the Node.js that runs easyfontkit is one for 64-bit ARM." : "That file is a program for 64-bit ARM, and the Node.js that runs easyfontkit is one for x86-64."]);
   }
   // What the system said of it, or what /bin/sh, given it, printed first,
   // which names the file, and its exit status; or a program of the
   // system's own that took the file, as binfmt_misc gives some, printed.
+  // Then what a program for another kind of machine is for, which its first
+  // bytes say.
   refused(
     root,
-    files.map((file) => [{ PATH, CHROME_PATH: file }, new RegExp(`^chrome did not start: CHROME_PATH is ${esc(file)}, which (could not be started: it is not a program this system can run|ended before it answered: it (printed ".+" and exited with \\d+|printed nothing and exited with \\d+|was stopped by SIG[A-Z0-9]+))\\. ${esc(POINT)}$`)]),
+    files.map(([file, fact]) => [{ PATH, CHROME_PATH: file }, new RegExp(`^chrome did not start: CHROME_PATH is ${esc(file)}, which (could not be started: it is not a program this system can run|ended before it answered: it (printed ".+" and exited with \\d+|printed nothing and exited with \\d+|was stopped by SIG[A-Z0-9]+))\\.${fact ? ` ${esc(fact)}` : ""} ${esc(POINT)}$`)]),
   );
 });
 

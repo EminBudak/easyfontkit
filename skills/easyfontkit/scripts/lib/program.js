@@ -449,6 +449,41 @@ function threadsOfUser() {
   return count;
 }
 
+// What a program file is for, when its first bytes say it is one for
+// another kind of machine than the Node.js that runs easyfontkit, which
+// Linux hands to /bin/sh as a script with no #! line: an ELF program for
+// another processor, or a program for macOS or Windows. Said as a sentence,
+// "" when the bytes do not say so, or elsewhere than on Linux.
+const ELF_MACHINES = { 2: "SPARC", 3: "32-bit x86", 8: "MIPS", 20: "32-bit PowerPC", 21: "64-bit PowerPC", 22: "IBM Z", 40: "32-bit ARM", 43: "64-bit SPARC", 62: "x86-64", 183: "64-bit ARM", 243: "RISC-V", 258: "LoongArch" };
+const NODE_MACHINES = { ia32: 3, mips: 8, mipsel: 8, ppc: 20, ppc64: 21, s390x: 22, arm: 40, x64: 62, arm64: 183, riscv64: 243, loong64: 258 };
+function madeFor(file) {
+  if (process.platform !== "linux") return "";
+  let bytes = Buffer.alloc(0);
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const head = Buffer.alloc(64);
+    bytes = head.subarray(0, fs.readSync(fd, head, 0, 64, 0));
+    if (bytes.length >= 64 && bytes.toString("latin1", 0, 2) === "MZ") {
+      const at = bytes.readUInt32LE(0x3c);
+      const pe = Buffer.alloc(4);
+      if (at < 4096 && fs.readSync(fd, pe, 0, 4, at) === 4 && pe.toString("latin1") === "PE\0\0") return "That file is a program for Windows.";
+    }
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  if (bytes.length >= 20 && bytes.readUInt32BE(0) === 0x7f454c46) {
+    const machine = bytes[5] === 2 ? bytes.readUInt16BE(18) : bytes.readUInt16LE(18);
+    const own = NODE_MACHINES[process.arch];
+    if (!ELF_MACHINES[machine] || !ELF_MACHINES[own] || machine === own) return "";
+    return `That file is a program for ${ELF_MACHINES[machine]}, and the Node.js that runs easyfontkit is one for ${ELF_MACHINES[own]}.`;
+  }
+  if (bytes.length >= 4 && ["feedface", "feedfacf", "cefaedfe", "cffaedfe"].includes(bytes.toString("hex", 0, 4))) return "That file is a program for macOS.";
+  return "";
+}
+
 // The first line of a file that starts with #!, as the system reads it to
 // find the program that runs the file, or null.
 function bangLine(file) {
@@ -494,14 +529,15 @@ function couldNotStart(place, err) {
 // open files, processes or memory, and then what to do comes in place of
 // how to get a browser that runs, which another browser would not help
 // with either. A limit of this process's that leaves the browser few files
-// or processes is said too. `closed` says that it closed its pipe and was
-// still running, so the run stopped it.
+// or processes is said too, and so is what a program for another kind of
+// machine is for. `closed` says that it closed its pipe and was still
+// running, so the run stopped it.
 function endedEarly(place, { stderr = "", stdout = "", code = null, signal = null, closed = false } = {}) {
   const line = causeLine(stderr) || causeLine(stdout);
   const said = `${stderr}\n${stdout}`;
   const sandbox = sandboxSaid(said);
   const [, short = ""] = SHORT_SAID.find(([words]) => words.test(said)) || [];
-  const more = [sandbox ? SANDBOX : "", short ? "" : lowLimits()].filter(Boolean).join(" ");
+  const more = [madeFor(place.file), sandbox ? SANDBOX : "", short ? "" : lowLimits()].filter(Boolean).join(" ");
   const fix = short || (sandbox === "namespaces" ? "Another browser does not help here." : "");
   if (closed) return didNotStart(place, `closed its pipe before it answered${line ? `, having printed ${quoted(line)}` : ""}`, more, fix);
   const exited = code !== null && code !== undefined;

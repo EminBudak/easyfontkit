@@ -9,7 +9,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { spawn, spawnSync } = require("node:child_process");
-const { launch, killBrowsers, connect, openPage, navigate, HANDLERS, STAND_INS } = require("../skills/easyfontkit/scripts/lib/chrome");
+const { launch, killBrowsers, connect, openPage, navigate, HANDLERS } = require("../skills/easyfontkit/scripts/lib/chrome");
 const { makeFontKit } = require("../skills/easyfontkit/scripts/lib/kit");
 const { setTimeLimit, timeLeft } = require("../skills/easyfontkit/scripts/lib/time");
 const { devtools, pipeTo } = require("./devtools");
@@ -126,7 +126,7 @@ test("on Linux, the browser's download folder is in its profile: its config fold
   }
 });
 
-test("on Linux, the browser's PATH starts with a folder in its profile of stand-ins for xdg-open, xdg-email, xdg-settings and the browsers xdg-open goes on to, each of which starts nothing and exits with 0, also from a temp folder mounted noexec, and the rest of PATH is as it was", { skip: !STAND_INS && "Chrome hands such addresses to the system on macOS and Windows" }, async (t) => {
+test("on Linux, the browser's PATH starts with a folder in its profile of stand-ins for xdg-open, xdg-email, xdg-settings and the browsers xdg-open goes on to, each of which starts nothing and exits with 0, also from a temp folder mounted noexec, and the rest of PATH is as it was", { skip: ["darwin", "win32"].includes(process.platform) && "Chrome hands such addresses to the system on macOS and Windows" }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-handlers-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // A browser that writes down its PATH, where each stand-in leads, and what

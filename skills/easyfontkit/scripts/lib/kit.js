@@ -24,7 +24,7 @@ const { STATUS_CODES } = require("http");
 const path = require("path");
 const { launch, killBrowsers, openPage, stoppedAnswering, handedOut, STAND_INS } = require("./chrome");
 const { SHORT } = require("./program");
-const { scanPage } = require("./scan");
+const { scanPage, FONT_BYTES } = require("./scan");
 const { buildFamilies, parseStack } = require("./families");
 const { SOURCE_NAMES } = require("./license");
 const { indexed, styleWords, words } = require("./match");
@@ -1072,6 +1072,15 @@ function triedNotes(tried = [], { sandboxed = false } = {}) {
   return notes;
 }
 
+// The note on the font files a run did not read, as the page's had come to
+// more than a run keeps of them (FONT_BYTES): the first of them and how many
+// there were.
+function unreadNote(unread) {
+  const most = `${Math.round(FONT_BYTES / (1024 * 1024))} MB`;
+  const which = unread.length === 1 ? `The font file ${unread[0]} was` : `${unread.length} font files, the first of them ${unread[0]}, were`;
+  return `${which} not read, as the page's font files came to more than the ${most} easyfontkit reads of one page.`;
+}
+
 // A page that moved itself on to about:blank shows nothing, and the font
 // files it had loaded before it went are not the fonts of a page.
 function wentBlank(asked, { pageUrl, first, left }) {
@@ -1143,6 +1152,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       if (files) saveFiles(built.families, part, own);
       const notes = [...built.notes];
       for (const skipped of scan.skipped) notes.push(`${skipped.url} was not a usable font file: ${skipped.reason}.`);
+      if (scan.unread.length) notes.push(unreadNote(scan.unread));
       notes.push(...triedNotes(scan.tried, { sandboxed }));
       if (scan.cut.length) notes.push(`The run's time ran out before the ${list(scan.cut.map((role) => ROLE_WORDS[role]))} could be read: give it more time with --timeout.`);
       if (!files) notes.push("Run with --no-files: the font files were read but not saved.");
@@ -1175,4 +1185,4 @@ function stopRuns() {
   return stopped;
 }
 
-module.exports = { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit, stopRuns, slug, triedNotes };
+module.exports = { makeFontKit, normalizeUrl, prepareDir, earlierKit, saveKit, stopRuns, slug, triedNotes, unreadNote };

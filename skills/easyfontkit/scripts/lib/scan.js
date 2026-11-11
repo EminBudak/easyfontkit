@@ -30,10 +30,20 @@ const NODES_TRIED = 80;
 // A bot check served instead of the page (a CAPTCHA, "Just a moment…").
 const CHALLENGE_TITLE = /human verification|just a moment|attention required|access denied|verify you are human|are you a robot|security check|checking your browser|pardon our interruption|ddos-guard|one more step|request blocked|captcha/i;
 
+// The most a run keeps of the bodies of a page's font files, as much as the
+// browser keeps of all it loads for a page (Network.enable below): well
+// above any site's fonts, which come to a few megabytes, tens for Chinese,
+// Japanese or Korean. A page could serve font files of tens of megabytes
+// each, which the run would hold until it ends, on a server for every
+// user's job too.
+const FONT_BYTES = 200 * 1024 * 1024;
+
 // Every request's addresses, redirects included, and each font file's body
 // as soon as it has arrived: read later, a long page's pictures can push it
-// out of the browser's buffer.
-function record(cdp) {
+// out of the browser's buffer. Bodies are kept up to `most` bytes in all: a
+// file whose body would take them past it, with those still coming, is not
+// fetched, or is let go of as it comes, and is marked left.
+function record(cdp, most = FONT_BYTES) {
   const addresses = new Map();
   const fonts = new Map();
   const faces = [];
@@ -45,14 +55,33 @@ function record(cdp) {
     if (type !== "Font" || !response || String(response.url).startsWith("data:")) return;
     fonts.set(requestId, { urls: [...new Set([...(addresses.get(requestId) || []), response.url])], status: response.status, body: null });
   });
-  cdp.on("Network.loadingFinished", ({ requestId }) => {
+  // The bytes of the bodies kept, and of those fetched and not come yet, as
+  // what came over the network for each: about as much as its body, or less
+  // when it came packed. A file that takes them past `most` is not fetched.
+  let kept = 0;
+  let coming = 0;
+  cdp.on("Network.loadingFinished", ({ requestId, encodedDataLength = 0 }) => {
     const font = fonts.get(requestId);
     if (!font) return;
     font.finished = true;
+    if (kept + coming + encodedDataLength > most) {
+      font.left = true;
+      return;
+    }
+    coming += encodedDataLength;
     font.body = cdp
       .send("Network.getResponseBody", { requestId })
-      .then(({ body, base64Encoded }) => Buffer.from(body, base64Encoded ? "base64" : "utf8"))
-      .catch(() => null);
+      .then(({ body, base64Encoded }) => {
+        const bytes = Buffer.byteLength(body, base64Encoded ? "base64" : "utf8");
+        if (kept + bytes > most) {
+          font.left = true;
+          return null;
+        }
+        kept += bytes;
+        return Buffer.from(body, base64Encoded ? "base64" : "utf8");
+      })
+      .catch(() => null)
+      .finally(() => (coming -= encodedDataLength));
   });
   // The address of every font file the browser asked for, redirects
   // included, also of one whose answer has not come: one that is not among
@@ -443,11 +472,15 @@ function decodeDataUrl(url) {
 // read all the same from that address, as by a preload the page made
 // without crossorigin, which the browser does not hold to CORS, is in the
 // kit and not skipped, and the refusal goes with it (refusedRead): the
-// browser does not draw the page's text with it.
+// browser does not draw the page's text with it. The addresses of the
+// files whose bodies were not kept, as the page's font files came to more
+// than a run keeps (record), are given apart (unread). A body is let go of
+// once it is read, so one that is not a usable font file is not held.
 async function readFiles(fonts, rules, faces, refused = new Map(), statuses = new Map()) {
   const files = new Map();
   const skipped = [];
   const refusedRead = [];
+  const unread = [];
   const add = (buffer, urls) => {
     const sha = crypto.createHash("sha1").update(buffer).digest("hex");
     const known = files.get(sha);
@@ -460,7 +493,9 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
   };
   for (const font of fonts.values()) {
     const body = font.body ? await font.body : null;
-    if (body && body.length) add(body, font.urls);
+    font.body = null;
+    if (font.left) unread.push(font.urls[0] || "");
+    else if (body && body.length) add(body, font.urls);
     else if (font.status >= 400) skipped.push({ url: font.urls[0] || "", reason: `the server answered ${font.status}` });
     // A whole answer with no bytes in it, as another run gets too.
     else if (font.finished && body) skipped.push({ url: font.urls[0] || "", reason: "the server sent an empty file" });
@@ -480,23 +515,24 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
     const body = decodeDataUrl(url);
     if (body && body.length) add(body, [url]);
   }
-  return { files: [...files.values()], skipped, refusedRead };
+  return { files: [...files.values()], skipped, refusedRead, unread };
 }
 
 // Opens the page and reads it: the faces of each role, every font file it
 // loaded, the ones it could not use and why (skipped), the browser's
 // refusals of files it read all the same (refusedRead), the addresses of
-// every one the browser asked for (asked), its @font-face rules, the web
-// fonts Chrome reports as loaded, the families document.fonts holds, the
-// status and address the server answered the page with (answer), the
-// address the page was first asked from as Chrome wrote it (first), the
-// address a redirect or the page led on to that could not be opened or did
-// not answer (failed), about:blank or the like when the page moved itself
-// on to that (left), for a page that did not draw, so it could not be
-// scrolled, the style sheet it waited for, if one had not come (stalled),
-// the addresses that are not web addresses the page tried to open
-// (tried), and the roles the run's time ran out before any text of was
-// read (cut).
+// those it did not read, as the page's had come to more than a run keeps
+// (unread), the addresses of every one the browser asked for (asked), its
+// @font-face rules, the web fonts Chrome reports as loaded, the families
+// document.fonts holds, the status and address the server answered the
+// page with (answer), the address the page was first asked from as Chrome
+// wrote it (first), the address a redirect or the page led on to that could
+// not be opened or did not answer (failed), about:blank or the like when
+// the page moved itself on to that (left), for a page that did not draw, so
+// it could not be scrolled, the style sheet it waited for, if one had not
+// come (stalled), the addresses that are not web addresses the page tried
+// to open (tried), and the roles the run's time ran out before any text of
+// was read (cut).
 // pageUrl is the address of the page the roles were read from, or the last
 // web address the tab showed when it has moved on to about:blank or to a
 // blob: address, so it is always a web address.
@@ -507,7 +543,7 @@ async function scanPage(cdp, url, log = () => {}) {
   await cdp.send("CSS.enable");
   const { frameTree } = await cdp.send("Page.getFrameTree");
   recorded.page.frame = frameTree.frame.id;
-  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, cut: [], files: [], skipped: [], refusedRead: [], rules: [], faces: [], loaded: [], asked: [], tried: [], ...found });
+  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, cut: [], files: [], skipped: [], refusedRead: [], unread: [], rules: [], faces: [], loaded: [], asked: [], tried: [], ...found });
   log(`Opening ${url}`);
   let pageUrl;
   try {
@@ -563,13 +599,13 @@ async function scanPage(cdp, url, log = () => {}) {
     unicodeRange: face.unicodeRange && face.unicodeRange !== "U+0-10FFFF" ? face.unicodeRange : "",
     platformFamily: face.platformFontFamily || "",
   }));
-  const { files, skipped, refusedRead } = await readFiles(recorded.fonts, rules, faces, recorded.refused, recorded.statuses);
+  const { files, skipped, refusedRead, unread } = await readFiles(recorded.fonts, rules, faces, recorded.refused, recorded.statuses);
   const { failed } = recorded.page;
   // The browser's own error page is titled with the host it could not
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked], tried };
+  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, unread, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked], tried };
 }
 
-module.exports = { scanPage, fontFaceRules, decodeDataUrl };
+module.exports = { scanPage, fontFaceRules, decodeDataUrl, record, readFiles, FONT_BYTES };

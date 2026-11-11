@@ -415,4 +415,4 @@ function endedEarly(place, { stderr = "", stdout = "", code = null, signal = nul
   return didNotStart(place, `ended before it answered: ${how}`, more);
 }
 
-module.exports = { NOTHING, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, quoted };
+module.exports = { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded, quoted };

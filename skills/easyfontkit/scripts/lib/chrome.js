@@ -11,7 +11,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, sleep } = require("./time");
-const { NOTHING, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable } = require("./program");
+const { NOTHING, SHORT, chromePlace, findChrome, cannotStart, couldNotStart, endedEarly, runnable, worded } = require("./program");
 
 // The browsers this process has started and not closed yet, each with its
 // profile, from the moment it is spawned.
@@ -33,8 +33,10 @@ const STAND_INS = process.platform !== "darwin" && process.platform !== "win32";
 // mounted noexec runs them too. Where there is no true this user may run,
 // each is a link to itself, which the system cannot follow: the search for
 // that name ends there, and nothing starts. Gives the folder.
-function standIns(profile) {
+function standIns(profile, made) {
   const dir = path.resolve(profile, "stand-ins");
+  made[""].push("stand-ins");
+  made["stand-ins"] = HANDLERS;
   fs.mkdirSync(dir);
   const nothing = ["/usr/bin/true", "/bin/true"].find(runnable);
   for (const name of HANDLERS) {
@@ -126,14 +128,54 @@ function singletonOf(profile) {
 
 // A browser's profile and its socket folder, once the browser has ended,
 // each removal tried again a few times with the given delay.
-function removeProfile({ profile, singleton }, maxRetries, retryDelay) {
-  for (const folder of [profile, singleton]) {
+function removeProfile({ profile, singleton, made }, maxRetries, retryDelay) {
+  for (const [folder, names] of [
+    [profile, made],
+    [singleton, {}],
+  ]) {
     if (!folder) continue;
     try {
       fs.rmSync(folder, { recursive: true, force: true, maxRetries, retryDelay });
     } catch {
+      removeTree(folder, names);
+    }
+  }
+}
+
+// A folder removed with one file descriptor at a time: rmSync holds one for
+// each level of it, which a process short of them, as one that could not
+// start the browser for want of them, may not have, and a start that failed
+// for want of them can hold the last one for a moment. A folder that cannot
+// be listed at all loses by name what easyfontkit made there (`made`, the
+// names it made in each folder, by the folder's path in the profile). What
+// still cannot be removed is left for the system's temp clean-up.
+function removeTree(folder, made = {}, at = "") {
+  let names;
+  try {
+    names = fs.readdirSync(path.join(folder, at));
+  } catch (err) {
+    if (err.code === "ENOENT") return;
+    names = made[at] || [];
+  }
+  for (const name of names) {
+    const entry = path.join(at, name);
+    let stat;
+    try {
+      stat = fs.lstatSync(path.join(folder, entry));
+    } catch {
+      continue;
+    }
+    try {
+      if (stat.isDirectory()) removeTree(folder, made, entry);
+      else fs.unlinkSync(path.join(folder, entry));
+    } catch {
       // Left for the system's temp clean-up.
     }
+  }
+  try {
+    fs.rmdirSync(path.join(folder, at));
+  } catch {
+    // Not empty, or gone.
   }
 }
 
@@ -334,11 +376,14 @@ function tempOf(profile) {
 // of the user's own config folder, so the browser reads the user's font,
 // proxy and other settings as before. The links are removed with the
 // profile, and what they lead to stays. Gives what to add to the browser's
-// environment.
-function downloadsIn(profile) {
+// environment, and keeps the names it makes in `made`, by the folder's path
+// in the profile.
+function downloadsIn(profile, made) {
   if (process.platform === "darwin" || process.platform === "win32") return {};
   const config = path.resolve(profile, "config");
   const downloads = path.resolve(profile, "Downloads");
+  made[""].push("config", "Downloads");
+  made.config = ["user-dirs.dirs"];
   fs.mkdirSync(config);
   fs.mkdirSync(downloads);
   const given = process.env.XDG_CONFIG_HOME;
@@ -351,6 +396,7 @@ function downloadsIn(profile) {
   }
   for (const name of names) {
     if (name === "user-dirs.dirs") continue;
+    made.config.push(name);
     try {
       fs.symlinkSync(path.join(own, name), path.join(config, name));
     } catch {
@@ -392,8 +438,22 @@ async function launch({ width, height }) {
   if (!place) throw new Error(NOTHING);
   if (place.what) throw new Error(cannotStart(place));
   const { file: binary, name } = place;
-  const { profile, env = process.env, ...where } = tempOf(fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-")));
-  const started = { child: null, profile, singleton: "", crashHandler: null };
+  // A profile that cannot be made, as in a temp folder that is not there, may
+  // not be written in or is full, or for want of file descriptors, stops the
+  // run before the browser is started.
+  const unmade = (err) => {
+    const temp = process.platform === "win32" ? "TEMP" : "TMPDIR";
+    if (SHORT[err.code]) return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${os.tmpdir()}, as ${SHORT[err.code]}.`);
+    return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${os.tmpdir()} (${worded(err)}). Set ${temp} to a folder this user may write in, with room to spare.`);
+  };
+  let fresh;
+  try {
+    fresh = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-chrome-"));
+  } catch (err) {
+    throw unmade(err);
+  }
+  const { profile, env = process.env, ...where } = tempOf(fresh);
+  const started = { child: null, profile, singleton: "", crashHandler: null, made: { "": [] } };
   // A site can send the browser to mailto:, news: or snews:, which Chrome on
   // Linux hands to a program of the machine through PATH without asking: the
   // mail program, started as the user who runs the kit, with what the site
@@ -403,11 +463,11 @@ async function launch({ width, height }) {
   // the guard each page gets (openPage) is what holds there.
   let config;
   try {
-    config = downloadsIn(profile);
-    if (STAND_INS) config.PATH = [standIns(profile), process.env.PATH || "/usr/bin:/bin"].join(path.delimiter);
+    config = downloadsIn(profile, started.made);
+    if (STAND_INS) config.PATH = [standIns(profile, started.made), process.env.PATH || "/usr/bin:/bin"].join(path.delimiter);
   } catch (err) {
     removeProfile(started, 10, 100);
-    throw err;
+    throw unmade(err);
   }
   let child;
   try {

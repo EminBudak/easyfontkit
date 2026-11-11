@@ -404,15 +404,73 @@ test("a browser that quits at once as its sandbox cannot start, as in a containe
   ]);
 });
 
-test("a run with no file descriptor left to start the browser stops before any work and says what to do", { skip: process.platform === "win32" && "it takes sh to lower the limit" }, () => {
+test("a run with no file descriptor left to start the browser, or to read its out folder, stops before any work, says what to do and leaves nothing in its temp folder, also with one descriptor left, which the browser's profile is removed with", { skip: process.platform === "win32" && "it takes sh to lower the limit" }, () => {
   const root = path.join(dir, "no-descriptors");
   const browser = put(root, "bin", "#!/bin/sh\nexec google-chrome \"$@\"\n");
+  const short = "this process has as many files open as it may (too many open files). Raise that limit, as ulimit -n does, and run it again.";
   // Loaded before the kit: makes node's own signal pipe, then holds every
   // file descriptor it may but three: one for the kit's stderr, one for the
   // files it reads one at a time, and one more, where starting the browser
   // takes six for its pipes.
   const hold = path.join(root, "hold.js");
   fs.writeFileSync(hold, 'process.on("SIGWINCH", () => {});\nconst fs = require("node:fs");\nconst held = [];\ntry {\n  for (;;) held.push(fs.openSync(__filename, "r"));\n} catch {}\nfor (let i = 0; i < 3; i++) fs.closeSync(held.pop());\n');
-  const message = `chrome did not start: easyfontkit could not start ${browser}, as this process has as many files open as it may (too many open files). Raise that limit, as ulimit -n does, and run it again.`;
-  refused(root, [[{ PATH: process.env.PATH, CHROME_PATH: browser }, message]], { wrap: ["sh", "-c", 'ulimit -n 256 && exec "$@"', "sh"], node: ["-r", hold] });
+  refused(root, [[{ PATH: process.env.PATH, CHROME_PATH: browser }, `chrome did not start: easyfontkit could not start ${browser}, as ${short}`]], { wrap: ["sh", "-c", 'ulimit -n 256 && exec "$@"', "sh"], node: ["-r", hold] });
+  // The kit run in a process that holds every file descriptor it may but
+  // the ones given, once the kit is loaded: with none, the out folder
+  // cannot be read; with one, the browser cannot be started, and its
+  // profile, which needs one descriptor for each of its folders to be
+  // removed in one call, is removed one folder at a time.
+  const run = path.join(root, "run.js");
+  fs.writeFileSync(
+    run,
+    `const { makeFontKit } = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/kit"))});
+process.on("SIGWINCH", () => {});
+const fs = require("node:fs");
+const held = [];
+try {
+  for (;;) held.push(fs.openSync(__filename, "r"));
+} catch {}
+for (let i = 0; i < Number(process.argv[3]); i++) fs.closeSync(held.pop());
+makeFontKit(${JSON.stringify(URL)}, { dir: process.argv[2], timeLimit: 30000 }).then(
+  () => process.exit(0),
+  (err) => {
+    fs.writeSync(2, err.message);
+    process.exit(1);
+  },
+);
+`,
+  );
+  const { CHROME_PATH, TMPDIR, ...rest } = process.env;
+  for (const [free, message] of [
+    [0, (out) => `easyfontkit could not read ${out}, as ${short}`],
+    [1, () => `chrome did not start: easyfontkit could not start ${browser}, as ${short}`],
+  ]) {
+    const tmp = path.join(root, "tmp-run", String(free));
+    const out = path.join(root, "runs-in", String(free), "out");
+    fs.mkdirSync(tmp, { recursive: true });
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    const result = spawnSync("sh", ["-c", 'ulimit -n 256 && exec "$@"', "sh", process.execPath, run, out, String(free)], { encoding: "utf8", env: { ...rest, CHROME_PATH: browser, TMPDIR: tmp }, timeout: 60_000 });
+    assert.equal(result.status, 1, `${free}: ${result.stderr}`);
+    assert.equal(result.stderr, message(out), `${free} left`);
+    assert.deepEqual(fs.readdirSync(path.dirname(out)), [], `${free} left: no out folder`);
+    assert.deepEqual(fs.readdirSync(tmp), [], `${free} left: nothing in the temp folder`);
+  }
+});
+
+test("a temp folder the browser's profile cannot be made in, as one that is not there or a file, stops the run before any work with the system's own reason and what to do", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, () => {
+  const root = path.join(dir, "no-profile");
+  const browser = put(root, "bin", "#!/bin/sh\nexec google-chrome \"$@\"\n");
+  const file = put(root, "file", "not a folder\n", 0o644, "temp");
+  const { CHROME_PATH, TMPDIR, ...rest } = process.env;
+  for (const [tmp, reason] of [
+    [path.join(root, "not-there"), "no such file or directory"],
+    [file, "not a directory"],
+  ]) {
+    const out = path.join(root, "runs", path.basename(tmp), "out");
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    const run = spawnSync(process.execPath, [CLI, URL, "--out", out], { encoding: "utf8", env: { ...rest, CHROME_PATH: browser, TMPDIR: tmp }, timeout: 60_000 });
+    assert.equal(run.status, 1, run.stderr);
+    assert.equal(run.stderr, `easyfontkit: chrome did not start: easyfontkit could not make the browser's profile in ${tmp} (${reason}). Set TMPDIR to a folder this user may write in, with room to spare.\n`);
+    assert.deepEqual(fs.readdirSync(path.dirname(out)), [], "no out folder");
+  }
 });

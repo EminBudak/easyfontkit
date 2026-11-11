@@ -23,12 +23,17 @@ const fs = require("fs");
 const { STATUS_CODES } = require("http");
 const path = require("path");
 const { launch, killBrowsers, openPage, stoppedAnswering, handedOut, STAND_INS } = require("./chrome");
+const { SHORT } = require("./program");
 const { scanPage } = require("./scan");
 const { buildFamilies, parseStack } = require("./families");
 const { SOURCE_NAMES } = require("./license");
 const { indexed, styleWords, words } = require("./match");
 const { setTimeLimit, sleep } = require("./time");
 const version = require("./version");
+
+// The errors that say a process or the system has as many files open as it
+// may, which reading or writing a kit's folder can meet too.
+const outOfFiles = (err) => err && (err.code === "EMFILE" || err.code === "ENFILE");
 
 const SCREEN = { width: 1600, height: 900 };
 const ROLE_NAMES = { heading: "Headings", body: "Body text", button: "Buttons", code: "Code" };
@@ -100,11 +105,14 @@ const LOCK = ".easyfontkit-lock";
 // The lock and the marker a takeover makes both start with the lock's name.
 const isControl = (name) => PART.test(name) || name.startsWith(LOCK);
 
+// An earlier kit's fonts.json, or null when the file is not one. A process
+// short of file descriptors cannot tell, and says so.
 function readKit(file) {
   try {
     const kit = JSON.parse(fs.readFileSync(file, "utf8"));
     return kit && kit.version === 1 && String(kit.generator || "").startsWith("easyfontkit") ? kit : null;
-  } catch {
+  } catch (err) {
+    if (outOfFiles(err)) throw err;
     return null;
   }
 }
@@ -178,8 +186,19 @@ function earlierKit(dir) {
 
 // The kit's folder before the page is read, without writing anything:
 // refused when it holds someone else's files, or when this user cannot
-// make it or write in it. Gives what earlierKit gives.
+// make it or write in it. Gives what earlierKit gives. A process short of
+// file descriptors cannot read the folder, and says so, as the system gives
+// that answer for a folder that is not there as well.
 function checkFolder(dir) {
+  try {
+    return lookAtFolder(dir);
+  } catch (err) {
+    if (outOfFiles(err)) throw new Error(`easyfontkit could not read ${dir}, as ${SHORT[err.code]}.`);
+    throw err;
+  }
+}
+
+function lookAtFolder(dir) {
   const target = path.resolve(dir);
   const shownAt = (at) => (at === target ? dir : path.isAbsolute(dir) ? at : path.relative(process.cwd(), at) || ".");
   const thenAt = (at) => (at === target ? "" : `, so ${dir} cannot be made there`);
@@ -659,6 +678,9 @@ async function saveKit(dir, write) {
       const kept = had && !had.cut;
       throw new Error(`There is no room on the disk to write the new kit${kept ? " beside the earlier one" : ""} in ${dir}, so no kit was made.${kept ? " The earlier kit there is as it was." : ""}`);
     }
+    // A process short of file descriptors, or a system short of them, as
+    // it writes the kit.
+    if (outOfFiles(err) && !err.keepPart) throw new Error(`The new kit could not be written in ${dir}, as ${SHORT[err.code]}. ${earlier && !earlier.cut ? "The earlier kit there is as it was." : "Nothing was saved there."}`);
     throw err;
   }
   unlock();

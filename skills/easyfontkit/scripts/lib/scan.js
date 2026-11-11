@@ -137,8 +137,8 @@ function record(cdp) {
   // document gets cancels, one the browser began to go to (started), as the
   // first address of a frame or one a frame's page redirected to, and a
   // window the page asked for (window), which the browser does not open
-  // without a click. A frame of another site tells of its own on a session
-  // of its own (openPage).
+  // without a click. A frame of another site tells of its own, and of its
+  // frames' redirects, on a session of its own (openPage).
   const tried = [];
   const keep = (how) => ({ url }) => {
     if (handedOut(url) && tried.length < 50) tried.push({ url: String(url).slice(0, 300), how });
@@ -148,12 +148,12 @@ function record(cdp) {
     session.on("Page.frameRequestedNavigation", keep("asked"));
     session.on("Page.frameStartedNavigating", keep("started"));
     session.on("Page.windowOpen", keep("window"));
+    session.on("Network.requestWillBeSent", ({ type, request, redirectResponse }) => {
+      if (type === "Document" && redirectResponse && request) keep("started")(request);
+    });
   };
   listen(cdp);
   if (cdp.onFrame) cdp.onFrame(listen);
-  cdp.on("Network.requestWillBeSent", ({ type, request, redirectResponse }) => {
-    if (type === "Document" && redirectResponse && request) keep("started")(request);
-  });
   return { fonts, asked, refused, statuses, faces, sheets, page, due, tried };
 }
 

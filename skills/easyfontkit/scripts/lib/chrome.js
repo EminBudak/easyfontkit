@@ -137,9 +137,11 @@ async function triedSoFar(cdp) {
 // (waitForDebuggerOnStart) and lets it go once it has the guard, which its
 // own moves then meet as the page's do; its own frames of other sites are
 // held in the same way. The watchers are told of each with its session, on
-// which the browser tells what the frame does. Anything else held so, as a
-// worker, is let go of at once. A frame whose calls fail is let go of too,
-// as it would wait for good otherwise, and runs without the guard, as before.
+// which the browser tells what the frame does, its frames' requests too, as
+// a redirect of one of them, which only that session tells of; the bodies
+// of what it loads are not kept. Anything else held so, as a worker, is let
+// go of at once. A frame whose calls fail is let go of too, as it would wait
+// for good otherwise, and runs without the guard, as before.
 function guardFrames(pipe, session, frames, watchers) {
   session.on("Target.attachedToTarget", ({ sessionId, targetInfo = {}, waitingForDebugger }) => {
     let frame;
@@ -155,6 +157,7 @@ function guardFrames(pipe, session, frames, watchers) {
     guardFrames(pipe, frame, frames, watchers);
     Promise.allSettled([
       frame.send("Page.enable", {}, 5_000),
+      frame.send("Network.enable", { maxTotalBufferSize: 0, maxResourceBufferSize: 0 }, 5_000),
       frame.send("Page.addScriptToEvaluateOnNewDocument", { source: GUARD, worldName: GUARD_WORLD }, 5_000),
       frame.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, 5_000),
     ]).then(go);

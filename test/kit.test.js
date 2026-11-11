@@ -2829,6 +2829,28 @@ test("a frame of another site, which runs apart from the page, gets the guard to
   assert.equal(started(), "", "no program of the machine was started");
 });
 
+// A frame of another site tells what it does on a session of its own, and a
+// redirect of a frame in it, which the browser hands on as it would the
+// frame's first address, is told there alone.
+test("a frame in a frame of another site that is redirected to an address that is not a web address is noted as one that reached the browser, which on Linux starts nothing, where FONTS.md said nothing of it", { skip: noBrowser || (process.platform !== "linux" && "the browser hands such an address to the system on macOS and Windows"), timeout: 180_000 }, async (t) => {
+  const page = (body) => `<!doctype html><html><head><title>Mail</title></head><body><h1>Write to us</h1><p>A page that wants you to write.</p>${body}</body></html>`;
+  const routes = {
+    "/inner": { body: page('<iframe src="/to-mail" style="width:1px;height:1px;border:0"></iframe>') },
+    "/to-mail": { status: 302, headers: { location: "mailto:inner-redirect@example.com" } },
+  };
+  const { server, origin } = await serve(routes);
+  t.after(() => server.close());
+  // Another site: the same server by another name.
+  routes["/outer"] = { body: page(`<iframe src="${origin.replace("127.0.0.1", "localhost")}/inner" style="width:300px;height:100px;border:0"></iframe>`) };
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-farredirect-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const { env, started } = recordingHandlers(parent);
+  const result = await run([`${origin}/outer`, "--out", path.join(parent, "kit"), "--json"], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).notes, ["The page tried to open mailto:inner-redirect@example.com, which is not a web address: it was not opened."]);
+  assert.equal(started(), "", "no program of the machine was started");
+});
+
 test("an address a page tried in more than one way is noted by the way that went furthest: one the browser began to go to, as a frame's first address, over a move of the page's the guard cancelled, so a browser in a sandbox of its own may have opened it; three are named and the rest counted", () => {
   const url = "mailto:same@example.com";
   const notOpened = (address) => `The page tried to open ${address}, which is not a web address: it was not opened.`;

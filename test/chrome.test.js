@@ -262,6 +262,27 @@ test("on Linux, a temp folder whose path has a : in it, which parts the folders 
   assert.equal(fs.existsSync(out), false, "no out folder");
 });
 
+test("on Linux, a temp folder on a disk that takes no links, as a FAT or exFAT disk, stops the run before the browser starts and says the stand-ins need one that does, with nothing left there", { skip: ["darwin", "win32"].includes(process.platform) && "the stand-ins are for Linux" }, (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-nolinks-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const temp = path.join(parent, "tmp");
+  fs.mkdirSync(temp);
+  // Loaded before the kit: the disk refuses every link, as such a disk does,
+  // with the system's EPERM.
+  const preload = path.join(parent, "nolinks.js");
+  fs.writeFileSync(preload, 'const fs = require("node:fs");\nfs.symlinkSync = (target, at) => {\n  throw Object.assign(new Error(`EPERM: operation not permitted, symlink \'${target}\' -> \'${at}\'`), { code: "EPERM", errno: -1, syscall: "symlink" });\n};\n');
+  const started = path.join(parent, "started");
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, `#!/bin/sh\necho started >> ${JSON.stringify(started)}\n`, { mode: 0o755 });
+  const out = path.join(parent, "out");
+  const run = spawnSync(process.execPath, ["-r", preload, path.resolve(__dirname, "../skills/easyfontkit/scripts/easyfontkit.js"), "http://127.0.0.1:9/", "--out", out], { encoding: "utf8", env: { ...process.env, CHROME_PATH: chrome, TMPDIR: temp }, timeout: 60_000 });
+  assert.equal(run.status, 1, run.stderr);
+  assert.equal(run.stderr, `easyfontkit: chrome did not start: the stand-ins that keep a site from starting a program of this machine are links, and the disk of the temp folder ${temp} takes none (operation not permitted). Set TMPDIR to a folder on a disk that takes links.\n`);
+  assert.equal(fs.existsSync(started), false, "the browser was not started");
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing was left in the temp folder");
+  assert.equal(fs.existsSync(out), false, "no out folder");
+});
+
 test("Chrome's component updater is sent to a closed port, so it downloads nothing during a run", { skip: process.platform === "win32" && "the stand-in browser is a shell script" }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-args-"));
   const saved = process.env.CHROME_PATH;

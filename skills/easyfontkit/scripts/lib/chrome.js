@@ -37,7 +37,9 @@ const busPath = (file) => Array.from(Buffer.from(file, "utf8"), (byte) => (/[-0-
 // exits with 0. The system runs the file a link leads to, so a temp folder
 // mounted noexec runs them too. Where there is no true this user may run,
 // each is a link to itself, which the system cannot follow: the search for
-// that name ends there, and nothing starts. Gives the folder.
+// that name ends there, and nothing starts. Gives the folder. A link the
+// temp folder's disk does not take, as a FAT or exFAT disk does not, is
+// marked (noLinks).
 function standIns(profile, made) {
   const dir = path.resolve(profile, "stand-ins");
   made[""].push("stand-ins");
@@ -46,7 +48,12 @@ function standIns(profile, made) {
   const nothing = ["/usr/bin/true", "/bin/true"].find(runnable);
   for (const name of HANDLERS) {
     const at = path.join(dir, name);
-    fs.symlinkSync(nothing || at, at);
+    try {
+      fs.symlinkSync(nothing || at, at);
+    } catch (err) {
+      if (["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"].includes(err.code)) err.noLinks = true;
+      throw err;
+    }
   }
   return dir;
 }
@@ -497,10 +504,12 @@ async function launch({ width, height }) {
   }
   // A profile that cannot be made, as in a temp folder that is not there, may
   // not be written in or is full, or for want of file descriptors, stops the
-  // run before the browser is started.
+  // run before the browser is started, and so do stand-ins the temp folder's
+  // disk takes no links for.
   const unmade = (err) => {
     const temp = process.platform === "win32" ? "TEMP" : "TMPDIR";
     if (SHORT[err.code]) return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${os.tmpdir()}, as ${SHORT[err.code]}.`);
+    if (err.noLinks) return new Error(`${name} did not start: the stand-ins that keep a site from starting a program of this machine are links, and the disk of the temp folder ${os.tmpdir()} takes none (${worded(err)}). Set ${temp} to a folder on a disk that takes links.`);
     return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${os.tmpdir()} (${worded(err)}). Set ${temp} to a folder this user may write in, with room to spare.`);
   };
   let fresh;

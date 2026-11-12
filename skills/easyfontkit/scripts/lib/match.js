@@ -24,10 +24,12 @@ const EXTRA = new Set([
 ]);
 
 // A name in words. One written without spaces ("SFMono-Regular",
-// "InterVariable") is split where its capitals start a word.
+// "InterVariable") is split where its capitals start a word, each capital
+// looked at once, so a name of a long run of capitals, which a page can
+// give, costs a moment.
 function words(name) {
   let text = String(name || "").trim().replace(/^(['"])(.*)\1$/, "$2");
-  if (!/\s/.test(text)) text = text.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+  if (!/\s/.test(text)) text = text.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z])(?=[A-Z][a-z])/g, "$1 ");
   return text.split(/[\s_\-.,]+/).filter(Boolean);
 }
 

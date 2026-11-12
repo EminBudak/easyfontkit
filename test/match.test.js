@@ -18,6 +18,20 @@ test("names: Fontsource's spelling when it lists the family, else without the wo
   assert.equal(lookup("roboto").license, "OFL-1.1");
 });
 
+test("a name of a long run of capitals, as a page can give its font stack, is cleaned in a moment, where it took seconds for tens of thousands of them, and names keep their words", () => {
+  const { words } = require("../skills/easyfontkit/scripts/lib/match");
+  assert.deepEqual(words("HTMLParser"), ["HTML", "Parser"]);
+  assert.deepEqual(words("GTAmericaMonoLC"), ["GT", "America", "Mono", "LC"]);
+  assert.deepEqual(words("ABcDEf"), ["A", "Bc", "D", "Ef"]);
+  assert.deepEqual(words("IBMPlexSans-Bold"), ["IBM", "Plex", "Sans", "Bold"]);
+  for (const name of ["A".repeat(80_000), `${"A".repeat(80_000)}b`]) {
+    const started = Date.now();
+    cleanName(name);
+    const took = Date.now() - started;
+    assert.ok(took < 1_000, `${name.length} characters: ${took} ms`);
+  }
+});
+
 test("well-known paid fonts get their hand-picked free matches, by any of their names", () => {
   assert.deepEqual(families(freeMatches({ names: ["Helvetica Neue"] })), ["Inter", "Arimo"]);
   assert.deepEqual(families(freeMatches({ names: ["SFMono-Regular"], category: "mono" })), ["JetBrains Mono", "IBM Plex Mono"]);

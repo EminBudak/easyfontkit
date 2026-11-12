@@ -607,23 +607,33 @@ test("a run stopped while it waits for another run's lock leaves the folder as i
   let holder;
   try {
     earlierKitIn(dir);
-    // Another process holds the folder's lock while the run waits for it.
+    // Another process holds the folder's lock for as long as the test goes
+    // on, as it ends only when it is killed or its stdin closes. One that let
+    // go after a set time, as 30 s, left a lock whose process had ended to a
+    // run slow to read the page, as on a busy machine, which took it over at
+    // once and saved its kit.
     const lockFile = path.join(dir, ".easyfontkit-lock");
-    holder = spawn(process.execPath, ["-e", `const fs = require("fs"); fs.writeFileSync(${JSON.stringify(lockFile)}, String(process.pid), { flag: "wx" }); console.log("held"); setTimeout(() => {}, 30_000);`], { stdio: ["ignore", "pipe", "inherit"] });
+    holder = spawn(process.execPath, ["-e", `const fs = require("fs"); fs.writeFileSync(${JSON.stringify(lockFile)}, String(process.pid), { flag: "wx" }); console.log("held"); process.stdin.resume();`], { stdio: ["pipe", "pipe", "inherit"] });
     await new Promise((resolve) => holder.stdout.once("data", resolve));
     const before = snapshot(dir);
     // In a process group of its own, as makersmcp runs a kit. The run reads
-    // the page, then waits for the lock; the stop reaches it during the wait.
+    // the page, says it reads the font files and goes on to the lock with no
+    // pause in between, so a stop sent once that line has come is handled
+    // while it waits, which it does for 10 s: the stop is sent at once.
     child = spawn(process.execPath, [CLI, origin, "--out", dir], { detached: true, stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
-    const ended = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+    const ended = new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
     const waiting = new Promise((resolve) => child.stderr.on("data", (chunk) => /Reading the font files/.test((stderr += chunk)) && resolve()));
     await Promise.race([waiting, ended]);
     assert.match(stderr, /Reading the font files/, stderr);
-    await sleep(200);
-    process.kill(-child.pid, "SIGTERM");
-    const { signal } = await ended;
-    assert.equal(signal, "SIGTERM");
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch (err) {
+      // Nothing of its group is left: how the run ended is said below.
+      if (err.code !== "ESRCH") throw err;
+    }
+    const { code, signal } = await ended;
+    assert.equal(signal, "SIGTERM", `the run ended ${signal ? `by ${signal}` : `with ${code}`} before the stop reached it: ${stderr}`);
     assert.ok(stderr.endsWith(`\neasyfontkit: stopped by SIGTERM, so no kit was made. The earlier kit in ${dir} is as it was.\n`), stderr);
     assert.deepEqual(snapshot(dir), before);
   } finally {

@@ -272,6 +272,15 @@ async function ownWorld(cdp, frameId) {
   return executionContextId;
 }
 
+// What an expression gives in easyfontkit's own world in the page of the
+// tab's own frame, or nothing when it has none: a page can give its
+// document a getter of its own, or replace a built-in such as
+// Array.prototype.map, only in its own world.
+async function ownEvaluate(cdp, frameId, expression) {
+  const world = await ownWorld(cdp, frameId);
+  return world ? evaluate(cdp, expression, 10_000, world) : undefined;
+}
+
 const fontsReady = (cdp) => evaluate(cdp, "Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 5000))]).then(() => true)");
 
 async function metrics(cdp) {
@@ -736,7 +745,9 @@ async function scanPage(cdp, url, log = () => {}) {
   }
   await fontsReady(cdp);
   await sleep(500);
-  const title = String((await evaluate(cdp, "document.title")) || "").trim();
+  // The title and the faces document.fonts holds are read in easyfontkit's
+  // own world, where what the page changed in its own does not reach.
+  const title = String((await ownEvaluate(cdp, recorded.page.frame, "document.title")) || "").trim();
   const { roles, cut } = await readRoles(cdp, recorded.page.frame);
   // With what the guard cancelled in the page the roles were read from.
   const tried = [...recorded.tried, ...(await triedSoFar(cdp))];
@@ -752,7 +763,7 @@ async function scanPage(cdp, url, log = () => {}) {
   if (/^https?:/i.test(now)) pageUrl = now;
   else if (recorded.page.shown) pageUrl = recorded.page.shown;
   const left = /^about:/i.test(now) ? now : "";
-  const loaded = (await evaluate(cdp, "[...document.fonts].filter((f) => f.status === 'loaded').map((f) => ({ family: f.family, weight: f.weight, style: f.style }))")) || [];
+  const loaded = (await ownEvaluate(cdp, recorded.page.frame, "[...document.fonts].filter((f) => f.status === 'loaded').map((f) => ({ family: f.family, weight: f.weight, style: f.style }))")) || [];
   const rules = await readRules(cdp, recorded.sheets, pageUrl, recorded.inline, recorded.page.frame);
   const faces = recorded.faces.map((face) => ({
     family: unquote(face.fontFamily),

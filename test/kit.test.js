@@ -2157,6 +2157,36 @@ test("a page that replaces String.prototype.replace and slice, Object.values and
   }
 });
 
+test("a page that gives its document a title by a getter of its own, or replaces Array.prototype.map, in its own world cannot change the title and the faces document.fonts holds as the run reads them, nor make them come back as large as it likes, as they are read in a world of easyfontkit's own", { skip: noBrowser }, async () => {
+  const { scanPage } = require("../skills/easyfontkit/scripts/lib/scan");
+  // A title of 4 MB in place of the document's own, and 100000 faces in
+  // place of those document.fonts holds, for a short array.
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Plain</title><style>@font-face { font-family: Inter; src: url("/inter.woff2") format("woff2") } p { font-family: Inter, serif }</style></head><body><h1>A heading</h1><p>Body text in Inter.</p><script>
+        const big = "Tampered " + "x".repeat(4000000);
+        Object.defineProperty(document, "title", { get: () => big });
+        const map = Array.prototype.map;
+        Array.prototype.map = function (f) { return this.length < 50 ? Array.from({ length: 100000 }, () => ({ family: "Fake", weight: "400", style: "normal" })) : map.call(this, f); };
+      </script></body></html>`,
+    },
+    "/inter.woff2": { type: "font/woff2", body: fixture("inter-latin-400.woff2") },
+  });
+  setTimeLimit(60_000);
+  const chrome = await launch({ width: 1600, height: 900 });
+  let cdp;
+  try {
+    cdp = await openPage(chrome, { width: 1600, height: 900 });
+    const scan = await scanPage(cdp, `${origin}/`);
+    assert.ok(scan.title === "Plain", `a title of ${scan.title.length} characters came back`);
+    assert.ok(scan.loaded.length === 1 && scan.loaded[0].family === "Inter", `${scan.loaded.length} faces came back, the first ${JSON.stringify(scan.loaded[0])}`);
+  } finally {
+    if (cdp) cdp.close();
+    await chrome.close();
+    server.close();
+  }
+});
+
 test("a page whose process crashes while it is read, as the system ends one when the machine or a job held to a memory limit runs out of memory, ends the run at once with that, and the earlier kit stays, where the run waited for the page and then said it stopped answering", { skip: noBrowser || (process.platform !== "linux" && "a browser's processes are told on Linux only") }, async () => {
   // The renderers of the browser this process started: they descend from
   // it, and Chrome names their kind on their command line.

@@ -2024,6 +2024,56 @@ test("a font the page gives as a data: address is read from the browser's reques
   }
 });
 
+test("a style sheet a script built and gave new text once the browser had told its length is read from the CSS object model alone, never by its text, and a font given there as a data: address is still tied to the browser's request for it", { skip: noBrowser }, async () => {
+  const { scanPage, dataKey } = require("../skills/easyfontkit/scripts/lib/scan");
+  const inter = fixture("inter-latin-400.woff2");
+  const junk = `data:font/ttf;base64,${Buffer.alloc(3000, 7).toString("base64")}`;
+  // The sheet starts with one short rule, and is given 2 MB more once the
+  // page has loaded.
+  const text = `/* ${"x".repeat(2 << 20)} */ @font-face { font-family: Built; src: url("data:font/woff2;base64,${inter.toString("base64")}") format("woff2") } @font-face { font-family: Junk; src: url(${junk}) format("truetype") } p { font-family: Built, serif } h1 { font-family: Junk, sans-serif }`;
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Built</title></head><body><h1>A heading</h1><p>Body text in a font of a sheet a script built.</p><script>
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync("h1 { color: red }");
+        document.adoptedStyleSheets = [sheet];
+        addEventListener("load", () => setTimeout(() => sheet.replaceSync(${JSON.stringify(text)}), 100));
+      </script></body></html>`,
+    },
+  });
+  setTimeLimit(60_000);
+  const chrome = await launch({ width: 1600, height: 900 });
+  let cdp;
+  try {
+    cdp = await openPage(chrome, { width: 1600, height: 900 });
+    const built = new Set();
+    const read = [];
+    cdp.on("CSS.styleSheetAdded", ({ header }) => header && header.isConstructed && built.add(header.styleSheetId));
+    const send = cdp.send.bind(cdp);
+    cdp.send = (method, params, wait) => {
+      if (method === "CSS.getStyleSheetText") read.push(params.styleSheetId);
+      return send(method, params, wait);
+    };
+    const scan = await scanPage(cdp, `${origin}/`);
+    assert.equal(built.size, 1, "the browser told of the sheet the script built");
+    assert.deepEqual(
+      read.filter((id) => built.has(id)),
+      [],
+      "its text was never asked for",
+    );
+    assert.deepEqual(
+      scan.rules.filter((rule) => rule.family === "Junk").map((rule) => rule.urls),
+      [[dataKey(junk)]],
+    );
+    assert.equal(scan.rules.filter((rule) => rule.family === "Built").length, 1);
+    assert.deepEqual(scan.skipped.map((skip) => skip.reason), ["not a font file"]);
+  } finally {
+    if (cdp) cdp.close();
+    await chrome.close();
+    server.close();
+  }
+});
+
 test("a page whose process crashes while it is read, as the system ends one when the machine or a job held to a memory limit runs out of memory, ends the run at once with that, and the earlier kit stays, where the run waited for the page and then said it stopped answering", { skip: noBrowser || (process.platform !== "linux" && "a browser's processes are told on Linux only") }, async () => {
   // The renderers of the browser this process started: they descend from
   // it, and Chrome names their kind on their command line.

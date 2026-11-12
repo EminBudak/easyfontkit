@@ -340,3 +340,39 @@ test("a font the page gives as a data: address in a style sheet whose text is pa
   assert.deepEqual(rules[2], { family: "Junk", weight: "400", style: "normal", unicodeRange: "", urls: [dataKey(junk)] });
   assert.ok(!rules[3].urls[0].includes("base64") && rules[3].urls[0] !== dataKey(never), "a font the browser never asked for is tied to nothing");
 });
+
+test("the text of a page's style sheets is read up to what a run reads of them, 64 MB, as their lengths tell, and the text of a sheet a script built is never read, as the page can give it new text of any length once the browser has told its length: their rules come from the CSS object model", async () => {
+  const { record, readRules } = require("../skills/easyfontkit/scripts/lib/scan");
+  const { CSS_BYTES } = require("../skills/easyfontkit/scripts/lib/limits");
+  assert.equal(CSS_BYTES, 64 * 1024 * 1024);
+  const face = (family) => `@font-face { font-family: ${family}; src: url(/${family.toLowerCase()}.woff2) format("woff2") }`;
+  // Four sheets as the browser tells of them: one of 40 MB, one of 30 MB,
+  // which would take the text read past 64 MB, one a script built, told of
+  // with 19 characters, and one of 10 MB. The text of each is a rule.
+  const MB = 1024 * 1024;
+  const texts = { first: face("First"), past: face("Past"), built: face("Built"), last: face("Last") };
+  const cdp = sheetsTab((CSSFontFaceRule) => ({
+    styleSheets: [],
+    // The sheet the script built, as the CSS object model has it.
+    adoptedStyleSheets: [{ href: null, cssRules: [Object.assign(Object.create(CSSFontFaceRule.prototype), { style: { getPropertyValue: (name) => ({ "font-family": "Built", src: 'url("https://acme.example/built.woff2") format("woff2")' })[name] || "" } })] }],
+  }), texts);
+  const recorded = record(cdp);
+  const added = (styleSheetId, length, isConstructed = false) => cdp.tell("CSS.styleSheetAdded", { header: { styleSheetId, origin: "regular", length, isConstructed, sourceURL: "https://acme.example/site.css" } });
+  added("first", 40 * MB);
+  added("past", 30 * MB);
+  added("built", 19, true);
+  added("last", 10 * MB);
+  const rules = await readRules(cdp, recorded.sheets, "https://acme.example/");
+  assert.deepEqual(
+    cdp.asked.filter(([method]) => method === "CSS.getStyleSheetText").map(([, id]) => id),
+    ["first", "last"],
+  );
+  assert.deepEqual(
+    rules.map((rule) => [rule.family, rule.urls]),
+    [
+      ["First", ["https://acme.example/first.woff2"]],
+      ["Last", ["https://acme.example/last.woff2"]],
+      ["Built", ["https://acme.example/built.woff2"]],
+    ],
+  );
+});

@@ -528,15 +528,20 @@ function cssomRules(most, print) {
 const keyed = (rule, byPrint = new Map()) => ({ ...rule, urls: rule.urls.map((url) => byPrint.get(url) || (url.startsWith("data:") ? dataKey(url) : url)) });
 
 // The text of each style sheet is read while the text read so far stays
-// within CSS_BYTES, as its length tells before it is read. A sheet or a
-// rule that cannot be read is passed over. A data: address the CSS object
-// model gives by its print is the font the browser asked for with that
-// print, by its key (inline, from record).
+// within CSS_BYTES, as its length tells before it is read. A sheet a script
+// built (new CSSStyleSheet) is not: the page can give it new text, of any
+// length, once the browser has told its length, and the browser then gives
+// that text. Its rules are read from the CSS object model, as those of a
+// sheet past CSS_BYTES are. A sheet or a rule that cannot be read is passed
+// over. A data: address the CSS object model gives by its print is the
+// font the browser asked for with that print, by its key (inline, from
+// record).
 async function readRules(cdp, sheets, pageUrl, inline = new Map()) {
   const rules = [];
   let read = 0;
   for (const [styleSheetId, header] of sheets) {
     if (timeLeft() < 15_000) break;
+    if (header.isConstructed) continue;
     const length = Number(header.length) || 0;
     if (read + length > CSS_BYTES) continue;
     read += length;

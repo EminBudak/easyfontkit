@@ -82,11 +82,13 @@ function summary({ dir, kit, unread = 0 }) {
 // Ctrl-C, Ctrl-\ (Ctrl-Break on Windows), a kill or a closed terminal while
 // the page is read: the browser is killed and the process ends by the same
 // signal, before the run has written anything, so the kit's folder is left
-// as it was. Once the kit is in place, the run has ended well, and a stop
-// that comes then ends the process with 0, as it would have ended. The
-// listeners stay until the process ends, so a second copy of the signal, as
-// npm and makersmcp's supervisor pass one on, changes nothing. An error that
-// ends the process kills the browser too.
+// as it was. A run whose page has crashed says that instead, as it failed
+// for it: where a job is held to a memory limit, the system can stop the
+// whole job right after it ends the page. Once the kit is in place, the run
+// has ended well, and a stop that comes then ends the process with 0, as it
+// would have ended. The listeners stay until the process ends, so a second
+// copy of the signal, as npm and makersmcp's supervisor pass one on,
+// changes nothing. An error that ends the process kills the browser too.
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "win32" ? ["SIGBREAK"] : ["SIGQUIT"])];
 let stopping = false;
 
@@ -109,7 +111,7 @@ function stopOnSignals() {
       stopping = true;
       const stopped = stopRuns();
       if (!stopped.length) return void process.stdout.write("", () => process.exit(0));
-      for (const run of stopped) say(2, `easyfontkit: stopped by ${signal}, so no kit was made.${run.earlier ? ` The earlier kit in ${run.dir} is as it was.` : ""}\n`);
+      for (const run of stopped) say(2, `easyfontkit: ${run.crashed || `stopped by ${signal}, so no kit was made.${run.earlier ? ` The earlier kit in ${run.dir} is as it was.` : ""}`}\n`);
       for (const name of SIGNALS) process.removeAllListeners(name);
       const code = 128 + os.constants.signals[signal];
       try {

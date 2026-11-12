@@ -2206,7 +2206,7 @@ test("a page whose process crashes while it is read, as the system ends one when
   try {
     const started = Date.now();
     await assert.rejects(makeFontKit(url, { dir, timeLimit: 120_000 }), {
-      message: `The browser's page crashed while ${url} was read, so no kit was made. A page crashes this way when the machine, or a job held to a memory limit, has no memory left for it, as with a page that loads very large files.`,
+      message: `The browser's page crashed while ${url} was read, so no kit was made. A page crashes when it runs out of memory: one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page.`,
     });
     assert.ok(killed > 0, "a renderer was killed");
     assert.ok(Date.now() - started < 30_000, `the run took ${Date.now() - started} ms`);
@@ -2214,6 +2214,50 @@ test("a page whose process crashes while it is read, as the system ends one when
   } finally {
     server.closeAllConnections();
     server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a page that crashes is said at once, before its browser is closed, and a stop that comes once it has crashed says it crashed, where the run said it was stopped by the signal when the stop came while the browser was closed, as a job held to a memory limit can be stopped right after its page is ended", { skip: noSignals }, async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-crashstop-"));
+  try {
+    // Loaded before the CLI: a stand-in for the browser whose close takes
+    // three seconds, and whose page crashes 100 ms after it is opened. Its
+    // calls fail then, or, held, wait for good, as when a run is between
+    // two calls, the process kept going as the browser's pipe keeps it.
+    const stub = path.join(parent, "stub.js");
+    fs.writeFileSync(
+      stub,
+      `const chrome = require(${JSON.stringify(path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/chrome.js"))});
+chrome.launch = async () => ({ name: "chrome", sandboxed: false, close: () => new Promise((resolve) => setTimeout(resolve, 3000)) });
+chrome.openPage = async () => {
+  const crashing = new Promise((resolve) => setTimeout(() => resolve(Object.assign(new Error("The browser's page crashed."), { crashed: true })), 100));
+  return { crashing, crashed: null, lost: null, on() {}, onFrame() {}, close() {}, send: () => (process.env.HELD ? new Promise(() => setInterval(() => {}, 1000)) : crashing.then((err) => Promise.reject(err))) };
+};
+`,
+    );
+    const said = "easyfontkit: The browser's page crashed while http://127.0.0.1:9/ was read, so no kit was made. A page crashes when it runs out of memory: one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page.\n";
+    // Stopped by SIGTERM a second after it started.
+    const stopped = (env) =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, ["-r", stub, CLI, "http://127.0.0.1:9/", "--out", path.join(parent, "kit")], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "pipe"] });
+        let stderr = "";
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        const timer = setTimeout(() => child.kill("SIGTERM"), 1_000);
+        child.on("close", (status, signal) => {
+          clearTimeout(timer);
+          resolve({ status, signal, stderr });
+        });
+      });
+    // The crash is said before the browser is closed, and the run ends
+    // with 1 before the stop comes.
+    const first = await stopped({});
+    assert.deepEqual(first, { status: 1, signal: null, stderr: said });
+    // A stop that comes while the run waits, once the page has crashed.
+    const held = await stopped({ HELD: "1" });
+    assert.deepEqual(held, { status: null, signal: "SIGTERM", stderr: said });
+    assert.equal(fs.existsSync(path.join(parent, "kit")), false);
+  } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });

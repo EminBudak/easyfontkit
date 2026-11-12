@@ -1114,13 +1114,14 @@ function stalledPage(asked, { pageUrl, first, stalled: { sheet } }) {
   return `${where(asked, pageUrl, first)} ${what}, so no kit was made. Try again later, or check the page in a normal browser.`;
 }
 
-// A page whose process crashed while it was read, as the system ends one
-// when the machine, or a job held to a memory limit, runs out of memory,
-// which a page that loads very large files can bring about. Another try
-// helps only once more memory is free, which the run cannot tell, so the
-// message does not offer one.
+// A page whose process crashed while it was read, as one does that runs
+// out of memory: one that loads very large files on a machine or in a job
+// held to a memory limit, or one whose own scripts use more than the
+// browser gives a page. Another try gives the same when the page itself is
+// the cause, and may help once more memory is free otherwise, which the
+// run cannot tell, so the message offers none.
 function crashedPage(asked) {
-  return `The browser's page crashed while ${asked} was read, so no kit was made. A page crashes this way when the machine, or a job held to a memory limit, has no memory left for it, as with a page that loads very large files.`;
+  return `The browser's page crashed while ${asked} was read, so no kit was made. A page crashes when it runs out of memory: one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page.`;
 }
 
 // The runs going on in this process, for a stop signal, and whether one has
@@ -1157,8 +1158,14 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     const chrome = await launch(SCREEN);
     const sandboxed = Boolean(chrome.sandboxed);
     let cdp;
+    let crashed = false;
     try {
       cdp = await openPage(chrome, SCREEN);
+      // A stop signal that comes once the page has crashed says that (see
+      // stopRuns), as the run fails for it whatever comes after: where a
+      // job is held to a memory limit, the system can stop the whole job
+      // right after it ends the page.
+      if (cdp.crashing) cdp.crashing.then(() => (run.crashed = crashedPage(url)));
       scan = await scanPage(cdp, url, log);
       // A browser that stopped answering, or quit, while the page was read
       // ends the run whatever the reading made of it: the server or the page
@@ -1168,10 +1175,15 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       if (cdp.crashed) throw cdp.crashed;
     } catch (err) {
       const why = (cdp && (cdp.lost || cdp.crashed)) || err;
+      crashed = Boolean(why.crashed);
       throw why.crashed ? new Error(crashedPage(url)) : stoppedAnswering(chrome.name, why);
     } finally {
       if (cdp) cdp.close();
-      await chrome.close();
+      // A page that crashed is said at once, and its browser is closed
+      // after, which takes a few seconds, in which such a stop can come. A
+      // process that ends first kills it (stopRuns).
+      if (crashed) chrome.close().catch(() => {});
+      else await chrome.close();
     }
     // Nothing waits from here to the end.
     if (scan.challenge) throw new Error(botCheck(url, scan));
@@ -1220,7 +1232,9 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
 }
 
 // For a process that is being stopped: the runs going on, none of which
-// has written anything yet, and their browsers, which are killed at once.
+// has written anything yet, each with the message on its page when that
+// has crashed (crashed), and their browsers, which are killed at once,
+// those of runs that have ended too.
 function stopRuns() {
   stopping = true;
   const stopped = [...runs];

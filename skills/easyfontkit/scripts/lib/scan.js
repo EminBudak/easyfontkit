@@ -11,6 +11,7 @@ const crypto = require("crypto");
 const { navigate, currentAddress, triedSoFar, handedOut } = require("./chrome");
 const { describeFont } = require("./sfnt");
 const { timeLeft, sleep } = require("./time");
+const { FONT_BYTES, FILE_BYTES, UNREAD } = require("./limits");
 
 // The second selector of a role is tried only when the first finds no text:
 // a page built from divs has no p, and a heading can be a styled div.
@@ -30,20 +31,13 @@ const NODES_TRIED = 80;
 // A bot check served instead of the page (a CAPTCHA, "Just a moment…").
 const CHALLENGE_TITLE = /human verification|just a moment|attention required|access denied|verify you are human|are you a robot|security check|checking your browser|pardon our interruption|ddos-guard|one more step|request blocked|captcha/i;
 
-// The most a run keeps of the bodies of a page's font files, as much as the
-// browser keeps of all it loads for a page (Network.enable below): well
-// above any site's fonts, which come to a few megabytes, tens for Chinese,
-// Japanese or Korean. A page could serve font files of tens of megabytes
-// each, which the run would hold until it ends, on a server for every
-// user's job too.
-const FONT_BYTES = 200 * 1024 * 1024;
-
 // Every request's addresses, redirects included, and each font file's body
 // as soon as it has arrived: read later, a long page's pictures can push it
 // out of the browser's buffer. Bodies are kept up to `most` bytes in all: a
 // file whose body would take them past it, with those still coming, is not
-// fetched, or is let go of as it comes, and is marked left.
-function record(cdp, most = FONT_BYTES) {
+// fetched, or is let go of as it comes, and is marked left, and one larger
+// than `one` is not fetched and is marked big.
+function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
   const addresses = new Map();
   const fonts = new Map();
   const faces = [];
@@ -53,35 +47,46 @@ function record(cdp, most = FONT_BYTES) {
   });
   cdp.on("Network.responseReceived", ({ requestId, type, response }) => {
     if (type !== "Font" || !response || String(response.url).startsWith("data:")) return;
-    fonts.set(requestId, { urls: [...new Set([...(addresses.get(requestId) || []), response.url])], status: response.status, body: null });
+    fonts.set(requestId, { urls: [...new Set([...(addresses.get(requestId) || []), response.url])], status: response.status, body: null, size: 0 });
+  });
+  // How large each font file's body is as it comes, unpacked.
+  cdp.on("Network.dataReceived", ({ requestId, dataLength = 0 }) => {
+    const font = fonts.get(requestId);
+    if (font) font.size += dataLength;
   });
   // The bytes of the bodies kept, and of those fetched and not come yet, as
-  // what came over the network for each: about as much as its body, or less
-  // when it came packed. A file that takes them past `most` is not fetched.
+  // large as each has come, or as what came over the network for it when
+  // the browser told less. A file that takes them past `most` is not
+  // fetched.
   let kept = 0;
   let coming = 0;
   cdp.on("Network.loadingFinished", ({ requestId, encodedDataLength = 0 }) => {
     const font = fonts.get(requestId);
     if (!font) return;
     font.finished = true;
-    if (kept + coming + encodedDataLength > most) {
-      font.left = true;
+    const size = Math.max(font.size, encodedDataLength);
+    if (size > one) {
+      font.left = "big";
       return;
     }
-    coming += encodedDataLength;
+    if (kept + coming + size > most) {
+      font.left = "budget";
+      return;
+    }
+    coming += size;
     font.body = cdp
       .send("Network.getResponseBody", { requestId })
       .then(({ body, base64Encoded }) => {
         const bytes = Buffer.byteLength(body, base64Encoded ? "base64" : "utf8");
         if (kept + bytes > most) {
-          font.left = true;
+          font.left = "budget";
           return null;
         }
         kept += bytes;
         return Buffer.from(body, base64Encoded ? "base64" : "utf8");
       })
       .catch(() => null)
-      .finally(() => (coming -= encodedDataLength));
+      .finally(() => (coming -= size));
   });
   // The address of every font file the browser asked for, redirects
   // included, also of one whose answer has not come: one that is not among
@@ -476,10 +481,11 @@ function decodeDataUrl(url) {
 // read all the same from that address, as by a preload the page made
 // without crossorigin, which the browser does not hold to CORS, is in the
 // kit and not skipped, and the refusal goes with it (refusedRead): the
-// browser does not draw the page's text with it. The addresses of the
-// files whose bodies were not kept, as the page's font files came to more
-// than a run keeps (record), are given apart (unread). A body is let go of
-// once it is read, so one that is not a usable font file is not held.
+// browser does not draw the page's text with it. The files whose bodies
+// were not kept, as the page's font files came to more than a run keeps or
+// the file to more than it reads of one (record), are given apart (unread),
+// each with why (UNREAD). A body is let go of once it is read, so one that
+// is not a usable font file is not held.
 async function readFiles(fonts, rules, faces, refused = new Map(), statuses = new Map()) {
   const files = new Map();
   const skipped = [];
@@ -495,10 +501,11 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
       skipped.push({ url: urls[0] || "", reason: err.message });
     }
   };
+  const left = (url, label, why) => unread.push({ url, label, why, reason: UNREAD[why][0] });
   for (const font of fonts.values()) {
     const body = font.body ? await font.body : null;
     font.body = null;
-    if (font.left) unread.push(font.urls[0] || "");
+    if (font.left) left(font.urls[0] || "", font.urls[0] || "", font.left);
     else if (body && body.length) add(body, font.urls);
     else if (font.status >= 400) skipped.push({ url: font.urls[0] || "", reason: `the server answered ${font.status}` });
     // A whole answer with no bytes in it, as another run gets too.
@@ -524,9 +531,10 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
 
 // Opens the page and reads it: the faces of each role, every font file it
 // loaded, the ones it could not use and why (skipped), the browser's
-// refusals of files it read all the same (refusedRead), the addresses of
-// those it did not read, as the page's had come to more than a run keeps
-// (unread), the addresses of every one the browser asked for (asked), its
+// refusals of files it read all the same (refusedRead), those it did not
+// read, as the page's had come to more than a run keeps or the file to more
+// than it reads of one, each with its address, its label and why (unread),
+// the addresses of every one the browser asked for (asked), its
 // @font-face rules, the web fonts Chrome reports as loaded, the families
 // document.fonts holds, the status and address the server answered the
 // page with (answer), the address the page was first asked from as Chrome
@@ -542,7 +550,10 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
 // blob: address, so it is always a web address.
 async function scanPage(cdp, url, log = () => {}) {
   const recorded = record(cdp);
-  await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: 50_000_000 });
+  // The browser keeps what it loads for DevTools as base64, a third larger
+  // than the file, so it is told to keep half as much again as a run reads
+  // of one font file.
+  await cdp.send("Network.enable", { maxTotalBufferSize: 200_000_000, maxResourceBufferSize: (FILE_BYTES * 3) / 2 });
   await cdp.send("DOM.enable");
   await cdp.send("CSS.enable");
   const { frameTree } = await cdp.send("Page.getFrameTree");
@@ -612,4 +623,4 @@ async function scanPage(cdp, url, log = () => {}) {
   return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, unread, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked], tried };
 }
 
-module.exports = { scanPage, fontFaceRules, decodeDataUrl, record, readFiles, FONT_BYTES };
+module.exports = { scanPage, fontFaceRules, decodeDataUrl, record, readFiles };

@@ -8,14 +8,14 @@
 // never to more than MOST.
 
 const zlib = require("zlib");
+const { FILE_BYTES, inMB } = require("./limits");
 
-// The most the tables of one font file may unpack to: well above any web
-// font's, as the largest, for Chinese, Japanese or Korean, unpack to a few
-// tens of megabytes. A page could serve a file of a few hundred bytes whose
-// tables unpack to gigabytes, so one whose directory says more is not
-// unpacked.
-const MOST = 64 * 1024 * 1024;
-const inMB = (bytes) => `${Math.round(bytes / (1024 * 1024))} MB`;
+// The most the tables of one font file may unpack to, the most easyfontkit
+// reads of one font file: well above any web font's, as the largest, for
+// Chinese, Japanese or Korean, unpack to a few tens of megabytes. A page
+// could serve a file of a few hundred bytes whose tables unpack to
+// gigabytes, so one whose directory says more is not unpacked.
+const MOST = FILE_BYTES;
 
 // A file's tables said not to fit in MOST, before anything is unpacked.
 function tooLarge(bytes) {

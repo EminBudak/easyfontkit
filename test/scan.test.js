@@ -69,8 +69,9 @@ function tab(bodies) {
 }
 
 test("the bodies of a page's font files are kept up to what a run keeps of one page, 200 MB: a file that what came over the network for it, with the bodies kept and those still coming, takes past that is not fetched, one whose body takes them past it is let go of as it comes, and their addresses are given apart, while a body that is no font file is let go of once read", async () => {
-  const { record, readFiles, FONT_BYTES } = require("../skills/easyfontkit/scripts/lib/scan");
-  const { unreadNote } = require("../skills/easyfontkit/scripts/lib/kit");
+  const { record, readFiles } = require("../skills/easyfontkit/scripts/lib/scan");
+  const { FONT_BYTES } = require("../skills/easyfontkit/scripts/lib/limits");
+  const { unreadNotes } = require("../skills/easyfontkit/scripts/lib/kit");
   const { fixture } = require("./helpers");
   const inter = fixture("inter-latin-400.woff2");
   // File 1 is Inter and files 2 to 6 are 400 bytes that are no font file,
@@ -104,9 +105,60 @@ test("the bodies of a page's font files are kept up to what a run keeps of one p
     { url: url(2), reason: "not a font file" },
     { url: url(3), reason: "not a font file" },
   ]);
-  assert.deepEqual(read.unread, [url(4), url(5), url(6)]);
+  assert.deepEqual(
+    read.unread.map(({ url, why }) => [url, why]),
+    [
+      [url(4), "budget"],
+      [url(5), "budget"],
+      [url(6), "budget"],
+    ],
+  );
   assert.ok([...recorded.fonts.values()].every((font) => font.body === null), "no body is held once read");
   assert.equal(FONT_BYTES, 200 * 1024 * 1024);
-  assert.equal(unreadNote(read.unread), `3 font files, the first of them ${url(4)}, were not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`);
-  assert.equal(unreadNote([url(4)]), `The font file ${url(4)} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`);
+  assert.deepEqual(unreadNotes(read.unread), [`3 font files, the first of them ${url(4)}, were not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`]);
+  assert.deepEqual(unreadNotes(read.unread.slice(0, 1)), [`The font file ${url(4)} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`]);
+});
+
+test("a font file larger than a run reads of one, 64 MB, by its size as it comes unpacked, is not fetched and is given apart with why, as are those past what a run keeps of one page", async () => {
+  const { record, readFiles } = require("../skills/easyfontkit/scripts/lib/scan");
+  const { FILE_BYTES } = require("../skills/easyfontkit/scripts/lib/limits");
+  const { unreadNotes } = require("../skills/easyfontkit/scripts/lib/kit");
+  const { fixture } = require("./helpers");
+  const inter = fixture("inter-latin-400.woff2");
+  assert.equal(FILE_BYTES, 64 * 1024 * 1024);
+  // A run that reads 1000 bytes more than Inter of one file and keeps 1500
+  // more than Inter in all. Files 1 and 2 come over the network packed to
+  // 900 bytes, 1000 bytes more than a run reads of one as they come
+  // unpacked, and are not fetched; file 3 is Inter, and file 4, Inter again
+  // with bytes of its own after it, would take the run past what it keeps.
+  const one = inter.length + 1000;
+  const cdp = tab({ 1: Buffer.alloc(one + 1000), 2: Buffer.alloc(one + 1000), 3: inter, 4: Buffer.concat([inter, Buffer.alloc(900, 4)]) });
+  const recorded = record(cdp, inter.length + 1500, one);
+  const url = (id) => `https://acme.example/${id}.ttf`;
+  for (const [id, size] of [["1", one + 1000], ["2", one + 1000], ["3", inter.length], ["4", inter.length + 900]]) {
+    cdp.tell("Network.requestWillBeSent", { requestId: id, type: "Font", request: { url: url(id) } });
+    cdp.tell("Network.responseReceived", { requestId: id, type: "Font", response: { url: url(id), status: 200 } });
+    cdp.tell("Network.dataReceived", { requestId: id, dataLength: size, encodedDataLength: 900 });
+    cdp.tell("Network.loadingFinished", { requestId: id, encodedDataLength: 900 });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(cdp.fetched, ["3"], "files 1 and 2 are larger than a run reads of one, and file 4 takes it past what it keeps");
+  const read = await readFiles(recorded.fonts, [], []);
+  assert.deepEqual(
+    read.files.map((file) => file.urls),
+    [[url(3)]],
+  );
+  assert.deepEqual(
+    read.unread.map(({ url: address, label, why }) => [address, label, why]),
+    [
+      [url(1), url(1), "big"],
+      [url(2), url(2), "big"],
+      [url(4), url(4), "budget"],
+    ],
+  );
+  assert.deepEqual(unreadNotes(read.unread), [
+    `The font file ${url(4)} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`,
+    `2 font files, the first of them ${url(1)}, were not read, as each is larger than the 64 MB easyfontkit reads of one font file.`,
+  ]);
+  assert.deepEqual(unreadNotes(read.unread.slice(0, 1)), [`The font file ${url(1)} was not read, as it is larger than the 64 MB easyfontkit reads of one font file.`]);
 });

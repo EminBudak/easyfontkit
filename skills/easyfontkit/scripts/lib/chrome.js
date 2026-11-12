@@ -505,10 +505,18 @@ async function launch({ width, height }) {
   if (!place) throw new Error(NOTHING);
   if (place.what) throw new Error(cannotStart(place));
   const { file: binary, name } = place;
+  const variable = process.platform === "win32" ? "TEMP" : "TMPDIR";
   // The temp folder by its whole path: a relative TMPDIR names a folder in
   // the one easyfontkit was started in, and the stand-ins' folder in it goes
-  // on the browser's PATH by its whole path (see below).
-  const temp = path.resolve(os.tmpdir());
+  // on the browser's PATH by its whole path (see below). One in a folder
+  // that was removed before the run started, as from another shell, names
+  // none.
+  let temp;
+  try {
+    temp = path.resolve(os.tmpdir());
+  } catch {
+    throw new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${os.tmpdir()}, as the folder the run was started in is gone. Set ${variable} to the full path of a folder this user may write in, with room to spare.`);
+  }
   // The folders of PATH are parted by its delimiter, so the folder of
   // stand-ins in a temp folder whose path has one in it could not come first
   // on the browser's PATH, and the browser would find the real programs.
@@ -521,7 +529,6 @@ async function launch({ width, height }) {
   // run before the browser is started, and so do stand-ins the temp folder's
   // disk takes no links for.
   const unmade = (err) => {
-    const variable = process.platform === "win32" ? "TEMP" : "TMPDIR";
     if (SHORT[err.code]) return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${temp}, as ${SHORT[err.code]}.`);
     if (err.noLinks) return new Error(`${name} did not start: the stand-ins that keep a site from starting a program of this machine are links, and the disk of the temp folder ${temp} takes none (${worded(err)}). Set ${variable} to a folder on a disk that takes links.`);
     return new Error(`${name} did not start: easyfontkit could not make the browser's profile in ${temp} (${worded(err)}). Set ${variable} to a folder this user may write in, with room to spare.`);

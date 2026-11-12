@@ -244,7 +244,7 @@ exit 3
   assert.deepEqual(fs.readdirSync(parent), [], "the profile went");
 });
 
-test("on Linux, a temp folder whose path has a : in it, which parts the folders of PATH, stops the run before the browser starts, with nothing made there and no out folder, as the stand-ins could not come first on the browser's PATH: also a relative TMPDIR, by the whole path it names from a folder whose path has one, and a stand-ins' folder that has one however it came to", { skip: ["darwin", "win32"].includes(process.platform) && "the stand-ins are for Linux" }, (t) => {
+test("on Linux, a temp folder whose path has a : in it, which parts the folders of PATH, stops the run before the browser starts, with nothing made there and no out folder, as the stand-ins could not come first on the browser's PATH: also a relative TMPDIR, by the whole path it names from a folder whose path has one, and a stand-ins' folder that has one however it came to; a relative TMPDIR in a folder removed before the run started is said to name none", { skip: ["darwin", "win32"].includes(process.platform) && "the stand-ins are for Linux" }, (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-colon-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // A browser that writes down that it was started.
@@ -284,6 +284,17 @@ test("on Linux, a temp folder whose path has a : in it, which parts the folders 
   assert.ok(folder, said);
   assert.match(folder[1], new RegExp(`^${plain.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/easyfontkit-chrome-\\w+:x/stand-ins$`));
   assert.equal(said, parts("the path of the stand-ins' folder", folder[1]));
+  // A relative TMPDIR in a folder that was removed before the run started,
+  // as by another shell, names no folder: the run says so, where it ended
+  // with Node's own words.
+  const gone = path.join(parent, "gone");
+  fs.mkdirSync(gone);
+  const out = path.join(parent, "out");
+  const run = spawnSync("/bin/sh", ["-c", 'cd "$1" && rmdir "$1" && shift && exec "$@"', "sh", gone, process.execPath, path.resolve(__dirname, "../skills/easyfontkit/scripts/easyfontkit.js"), "http://127.0.0.1:9/", "--out", out], { encoding: "utf8", env: { ...process.env, CHROME_PATH: chrome, TMPDIR: "tmp" }, timeout: 60_000 });
+  assert.equal(run.status, 1, run.stderr);
+  assert.equal(run.stderr, "easyfontkit: chrome did not start: easyfontkit could not make the browser's profile in tmp, as the folder the run was started in is gone. Set TMPDIR to the full path of a folder this user may write in, with room to spare.\n");
+  assert.equal(fs.existsSync(started), false, "the browser was not started");
+  assert.equal(fs.existsSync(out), false, "no out folder");
 });
 
 test("on Linux, a temp folder on a disk that takes no links, as a FAT or exFAT disk, stops the run before the browser starts and says the stand-ins need one that does, with nothing left there", { skip: ["darwin", "win32"].includes(process.platform) && "the stand-ins are for Linux" }, (t) => {

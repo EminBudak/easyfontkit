@@ -1968,6 +1968,38 @@ test("a font file whose server sends no bytes, or one cut short, in its director
   }
 });
 
+test("a font the page gives as a data: address is read from the browser's request for it, and one that is no font file is named by its media type and size, never by its address, while a data: source the browser never asked for, as a fallback after a font it took or a rule no text uses, is neither read nor noted", { skip: noBrowser }, async () => {
+  const inter = fixture("inter-latin-400.woff2");
+  const woff = fixture("inter-latin-400.woff");
+  const odd = interAs({ names: { 1: "Odd Sans", 4: "Odd Sans", 6: "OddSans-Regular" } });
+  const svg = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg">${"<g/>".repeat(4000)}</svg>`)}#icons`;
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Inline</title><style>
+        @font-face { font-family: "Inline Sans"; src: url("data:font/woff2;base64,${inter.toString("base64")}") format("woff2"), url("${svg}") format("svg"); }
+        @font-face { font-family: "Inline Odd"; src: url("data:application/vnd.ms-fontobject;base64,${Buffer.alloc(3000, 7).toString("base64")}"), url("/odd.ttf") format("truetype"); }
+        @font-face { font-family: "Inline Unused"; src: url(data:font/woff;base64,${woff.toString("base64")}) format("woff"); }
+        h1 { font-family: "Inline Sans", serif; } p { font-family: "Inline Odd", sans-serif; }
+      </style></head><body><h1>A heading in a font the page gives inline</h1><p>Body text in a font whose first source is no font.</p></body></html>`,
+    },
+    "/odd.ttf": { type: "font/ttf", body: odd },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-inline-"));
+  const dir = path.join(parent, "kit");
+  try {
+    const { kit } = await makeFontKit(origin, { dir, timeLimit: 60_000 });
+    const files = kit.families.flatMap((family) => family.files.map((file) => [family.name, file.url, file.format]));
+    assert.deepEqual(files.sort(), [["Inter", "data URL", "woff2"], ["Odd Sans", `${origin}/odd.ttf`, "ttf"]].sort());
+    assert.deepEqual(kit.notes, ["A font the page gave as a data: address (application/vnd.ms-fontobject, 3 KB) was not a usable font file: not a font file."]);
+    const markdown = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+    assert.doesNotMatch(markdown, /base64|%3Csvg/);
+    assert.ok(markdown.length < 10_000, `FONTS.md is ${markdown.length} characters`);
+  } finally {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its process group, leaves the earlier kit as it was, ends its browser with its crash handler, leaves no crash report and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

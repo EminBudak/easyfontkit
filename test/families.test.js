@@ -376,6 +376,25 @@ test("a web font whose file easyfontkit did not read, as the page's font files c
   assert.deepEqual(both.notes, [`Some of the body text was drawn with Liberation Serif, a fallback, because B10's file ${slow} did not load while the page was read, and its file ${big} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page. That text is counted as B10, the font the site asks for. The kit has no file of it, so its license is unknown: try again later.`]);
 });
 
+test("a web font given as a data: address that the browser asked for and could not use is named as the CSS names it, not taken for a font of the visitor's own, and the notes name its file by its label", () => {
+  const key = "data:sha1,0123456789abcdef0123456789abcdef01234567";
+  const label = "a font the page gave as a data: address (font/ttf, 3 MB)";
+  const { roles, families, notes } = buildFamilies({
+    pageUrl: PAGE,
+    roles: { body: [face("Liberation Serif", 300, "I10, serif", { custom: false })] },
+    files: [],
+    rules: [rule("I10", key)],
+    faces: [],
+    loaded: [],
+    asked: [key],
+    labels: new Map([[key, label]]),
+    skipped: [{ url: key, label, reason: "not a font file" }],
+  });
+  assert.equal(roles.body.family, "I10");
+  assert.deepEqual(families.map((f) => [f.name, f.system, f.notLoaded, f.source]), [["I10", false, [label], "inline"]]);
+  assert.deepEqual(notes, [`Some of the body text was drawn with Liberation Serif, a fallback, because I10's file, ${label}, did not load while the page was read. That text is counted as I10, the font the site asks for. The kit has no file of it, so its license is unknown.`]);
+});
+
 test("a font on the visitor's computer keeps the name the CSS asks for it by", () => {
   const { roles, families } = buildFamilies({
     pageUrl: PAGE,

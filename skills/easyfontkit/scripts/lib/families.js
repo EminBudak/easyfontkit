@@ -257,7 +257,10 @@ function regular(files) {
 const unloaded = (family) => Boolean(((family.notLoaded && family.notLoaded.size) || (family.notRead && family.notRead.size)) && !family.files.length && !family.missing);
 
 function buildFamilies(scan) {
-  const { pageUrl, roles: rawRoles, files, rules, faces, loaded, asked = [], skipped = [], refusedRead = [], unread = [] } = scan;
+  const { pageUrl, roles: rawRoles, files, rules, faces, loaded, asked = [], skipped = [], refusedRead = [], unread = [], labels = new Map() } = scan;
+  // A file as the notes name it: by its address, or a font given as a data:
+  // address, known by its key, by its label (scan.labels).
+  const labelled = (url) => labels.get(url) || url;
   declareFiles(files, rules, faces);
   const loadedNames = new Set(loaded.map((face) => lower(face.family)));
   const families = new Map();
@@ -434,8 +437,13 @@ function buildFamilies(scan) {
   // kit, and the browser does not draw with it on any visit.
   const answered = new Set(skipped.map((skip) => bare(skip.url)));
   const refusals = new Map(refusedRead.map((refusal) => [bare(refusal.url), refusal.why]));
-  // "file <a>", "files <a> and <b>".
-  const fileList = (items) => `${items.length === 1 ? "file" : "files"} ${listOf(items)}`;
+  // "file <a>", "files <a> and <b>", or with a label among them, which
+  // reads as a phrase of its own, "file, a font the page gave as a data:
+  // address (font/woff2, 3 MB),".
+  const fileList = (items) => {
+    const word = items.length === 1 ? "file" : "files";
+    return items.some((item) => item.startsWith("a font ")) ? `${word}, ${listOf(items)},` : `${word} ${listOf(items)}`;
+  };
   // Why the kit has none of a family's files for text a fallback drew, by
   // the files that kept it out: "because Inter's file <a> did not load while
   // the page was read" for those the browser did not get, and "in place of
@@ -452,7 +460,7 @@ function buildFamilies(scan) {
     const notRead = listOf([...groups].map(([why, labels]) => `${fileList(labels)} ${labels.length === 1 ? "was" : "were"} not read, as ${UNREAD[why][labels.length === 1 ? 0 : 1]}`));
     const waiting = late.some((url) => !answered.has(url));
     if (!late.length) return { why: `in place of ${name}, whose ${notRead}.`, waiting };
-    const because = `because ${name}'s ${fileList(late)} did not load while the page was read`;
+    const because = `because ${name}'s ${fileList(late.map(labelled))} did not load while the page was read`;
     return { why: notRead ? `${because}, and its ${notRead}.` : `${because}.`, waiting };
   };
   const notes = [...fallbacks.values()].map((fallback) => {
@@ -481,7 +489,7 @@ function buildFamilies(scan) {
     }
     return `${drawn}, because ${family.name} loaded too late for ${many ? "them" : "it"}. ${counted}`;
   });
-  const list = [...families.values()].map((family) => describeFamily(family, pageUrl, unreadOf));
+  const list = [...families.values()].map((family) => describeFamily(family, pageUrl, unreadOf, labelled));
   const order = (family) => {
     const at = ROLE_ORDER.findIndex((role) => family.roles.includes(role));
     return at === -1 ? ROLE_ORDER.length : at;
@@ -490,7 +498,7 @@ function buildFamilies(scan) {
   return { roles, families: list, notes };
 }
 
-function describeFamily(family, pageUrl, unreadOf = new Map()) {
+function describeFamily(family, pageUrl, unreadOf = new Map(), labelled = (url) => url) {
   const cssNames = [...family.cssNames];
   const weightsUsed = [...family.weightsUsed].sort((a, b) => a - b);
   if (family.system) {
@@ -548,7 +556,7 @@ function describeFamily(family, pageUrl, unreadOf = new Map()) {
     name: family.name,
     system: false,
     missing: Boolean(family.missing),
-    ...(notLoaded.length ? { notLoaded } : {}),
+    ...(notLoaded.length ? { notLoaded: notLoaded.map(labelled) } : {}),
     ...(notRead.length ? { notRead: notRead.map((url) => unreadOf.get(url).label) } : {}),
     cssNames,
     roles: family.roles,

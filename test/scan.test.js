@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { fontFaceRules, decodeDataUrl } = require("../skills/easyfontkit/scripts/lib/scan");
+const { fontFaceRules, decodeDataUrl, dataKey } = require("../skills/easyfontkit/scripts/lib/scan");
 
 test("@font-face rules: family, weight, style, range and absolute addresses", () => {
   const css = `
@@ -96,14 +96,14 @@ test("the bodies of a page's font files are kept up to what a run keeps of one p
   await new Promise((resolve) => setImmediate(resolve));
   finished("6");
   assert.deepEqual(cdp.fetched, ["1", "2", "3", "5"], "files 4 and 6 are not fetched");
-  const read = await readFiles(recorded.fonts, [], []);
+  const read = await readFiles(recorded.fonts, recorded.inline);
   assert.deepEqual(
     read.files.map((file) => file.urls),
     [[url(1)]],
   );
   assert.deepEqual(read.skipped, [
-    { url: url(2), reason: "not a font file" },
-    { url: url(3), reason: "not a font file" },
+    { url: url(2), label: url(2), reason: "not a font file" },
+    { url: url(3), label: url(3), reason: "not a font file" },
   ]);
   assert.deepEqual(
     read.unread.map(({ url, why }) => [url, why]),
@@ -143,7 +143,7 @@ test("a font file larger than a run reads of one, 64 MB, by its size as it comes
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.deepEqual(cdp.fetched, ["3"], "files 1 and 2 are larger than a run reads of one, and file 4 takes it past what it keeps");
-  const read = await readFiles(recorded.fonts, [], []);
+  const read = await readFiles(recorded.fonts, recorded.inline);
   assert.deepEqual(
     read.files.map((file) => file.urls),
     [[url(3)]],
@@ -161,4 +161,76 @@ test("a font file larger than a run reads of one, 64 MB, by its size as it comes
     `2 font files, the first of them ${url(1)}, were not read, as each is larger than the 64 MB easyfontkit reads of one font file.`,
   ]);
   assert.deepEqual(unreadNotes(read.unread.slice(0, 1)), [`The font file ${url(1)} was not read, as it is larger than the 64 MB easyfontkit reads of one font file.`]);
+});
+
+test("a font the page gives as a data: address is read from the browser's request for it, once, within what a run keeps of one page and of one file, and known by a key: one past either is not read and is named by its media type and size, as is one that is no font file, and one the browser never asked for is not read", async () => {
+  const { record, readFiles } = require("../skills/easyfontkit/scripts/lib/scan");
+  const { unreadNotes } = require("../skills/easyfontkit/scripts/lib/kit");
+  const { fixture } = require("./helpers");
+  const inter = fixture("inter-latin-400.woff2");
+  const woff = fixture("inter-latin-400.woff");
+  const data = (type, buffer) => `data:${type};base64,${buffer.toString("base64")}`;
+  // A run that keeps Inter's WOFF2 and 4000 bytes more, and reads 1000
+  // bytes more than its WOFF of one file. Inter's WOFF2 as a data: address,
+  // asked for twice and told of as a face; a font of 3000 bytes that is no
+  // font file; its WOFF, which takes the run past what it keeps; a file 1000
+  // bytes larger than a run reads of one; and a font in the page's CSS the
+  // browser never asks for.
+  const one = woff.length + 1000;
+  const good = data("font/woff2", inter);
+  const junk = data("application/vnd.ms-fontobject", Buffer.alloc(3000, 1));
+  const over = data("font/woff", woff);
+  const big = data("font/ttf", Buffer.alloc(one + 1000, 2));
+  const never = data("image/svg+xml", Buffer.alloc(100, 3));
+  const cdp = tab({});
+  const recorded = record(cdp, inter.length + 4000, one);
+  [good, good, junk, over, big].forEach((address, i) => cdp.tell("Network.requestWillBeSent", { requestId: `d${i}`, type: "Font", request: { url: address } }));
+  cdp.tell("CSS.fontsUpdated", { font: { fontFamily: "Inl", src: good } });
+  assert.deepEqual(cdp.fetched, [], "nothing is fetched");
+  assert.equal(recorded.faces[0].src, dataKey(good), "the face is known by the key");
+  assert.ok(!JSON.stringify(recorded.faces).includes("base64"), "no data: address is kept");
+  const read = await readFiles(recorded.fonts, recorded.inline);
+  assert.deepEqual(
+    read.files.map((file) => file.urls),
+    [[dataKey(good)]],
+  );
+  assert.ok(!read.files.some((file) => file.urls.includes(dataKey(never))));
+  assert.deepEqual(read.skipped, [{ url: dataKey(junk), label: "a font the page gave as a data: address (application/vnd.ms-fontobject, 3 KB)", reason: "not a font file" }]);
+  assert.deepEqual(
+    read.unread.map(({ url, label, why }) => [url, label, why]),
+    [
+      [dataKey(over), "a font the page gave as a data: address (font/woff, 30 KB)", "budget"],
+      [dataKey(big), "a font the page gave as a data: address (font/ttf, 32 KB)", "big"],
+    ],
+  );
+  assert.ok([...recorded.inline.values()].every((font) => font.body === null), "no body is held once read");
+  assert.deepEqual(unreadNotes(read.unread), [
+    "A font the page gave as a data: address (font/woff, 30 KB) was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.",
+    "A font the page gave as a data: address (font/ttf, 32 KB) was not read, as it is larger than the 64 MB easyfontkit reads of one font file.",
+  ]);
+});
+
+test("the @font-face rules the page's CSS object model gives stand a data: address in as an empty one and stop at the most characters given, so a page cannot make the run take its fonts' addresses whole", () => {
+  const { cssomRules } = require("../skills/easyfontkit/scripts/lib/scan");
+  const big = `data:font/woff2;base64,${"QUJD".repeat(1 << 18)}`;
+  const rule = (family, src) => Object.assign(Object.create(CSSFontFaceRule.prototype), { style: { getPropertyValue: (name) => ({ "font-family": family, src, "font-weight": "400", "font-style": "normal", "unicode-range": "" })[name] || "" } });
+  class CSSFontFaceRule {}
+  class CSSImportRule {}
+  const sheet = { href: "https://acme.example/site.css", cssRules: [rule("Inl", `url("${big}") format("woff2"), url("https://acme.example/inl.woff2") format("woff2")`), rule("Plain", 'url("https://acme.example/plain.woff2")'), rule("Late", 'url("https://acme.example/late.woff2")')] };
+  const run = (most) => new Function("CSSFontFaceRule", "CSSImportRule", "document", "location", `return (${cssomRules})(${most});`)(CSSFontFaceRule, CSSImportRule, { styleSheets: [sheet] }, { href: "https://acme.example/" });
+  const all = run(1e6);
+  assert.deepEqual(
+    all.map((one) => [one.family, one.src]),
+    [
+      ["Inl", 'url("data:") format("woff2"), url("https://acme.example/inl.woff2") format("woff2")'],
+      ["Plain", 'url("https://acme.example/plain.woff2")'],
+      ["Late", 'url("https://acme.example/late.woff2")'],
+    ],
+  );
+  // Given what the first two come to, the third is left out.
+  const size = (one) => Object.values(one).reduce((sum, value) => sum + String(value).length, 0);
+  assert.deepEqual(
+    run(size(all[0]) + size(all[1])).map((one) => one.family),
+    ["Inl", "Plain"],
+  );
 });

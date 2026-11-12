@@ -3,8 +3,9 @@
 // The most easyfontkit reads of a page, and how the notes say why a font
 // file was not read.
 
-// The most easyfontkit keeps of the bodies of a page's font files, all
-// told, as much as the browser keeps of all it loads for a page (see
+// The most easyfontkit keeps of the bodies of a page's font files, those
+// the page loads over the network and those it gives as data: addresses,
+// all told, as much as the browser keeps of all it loads for a page (see
 // scan.js): well above any site's fonts, which come to a few megabytes,
 // tens for Chinese, Japanese or Korean. A page could serve font files of
 // tens of megabytes each, which the run would hold until it ends, on a
@@ -18,6 +19,11 @@ const FONT_BYTES = 200 * 1024 * 1024;
 // Korean, unpack to a few tens of megabytes.
 const FILE_BYTES = 64 * 1024 * 1024;
 
+// The most a run reads of the text of a page's style sheets, all told, and
+// of the @font-face rules its CSS object model gives: no site's CSS comes
+// near.
+const CSS_BYTES = 64 * 1024 * 1024;
+
 const inMB = (bytes) => `${Math.round(bytes / (1024 * 1024))} MB`;
 
 // Why a font file was not read, as a note says it of one file and of
@@ -27,4 +33,4 @@ const UNREAD = {
   big: [`it is larger than the ${inMB(FILE_BYTES)} easyfontkit reads of one font file`, `each is larger than the ${inMB(FILE_BYTES)} easyfontkit reads of one font file`],
 };
 
-module.exports = { FONT_BYTES, FILE_BYTES, UNREAD, inMB };
+module.exports = { FONT_BYTES, FILE_BYTES, CSS_BYTES, UNREAD, inMB };

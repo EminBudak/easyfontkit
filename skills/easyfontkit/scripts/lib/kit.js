@@ -1077,6 +1077,11 @@ function triedNotes(tried = [], { sandboxed = false } = {}) {
   return notes;
 }
 
+// How a note opens on a font file: by its address, or a font given as a
+// data: address by its label, "A font the page gave as a data: address
+// (font/woff2, 3 KB)".
+const opening = (label) => String(label).replace(/^a font /, "A font ");
+
 // The notes on the font files a run did not read (scan.unread), as the
 // page's had come to more than a run keeps of them or a file to more than it
 // reads of one: for each of those, the first of them and how many there
@@ -1088,7 +1093,7 @@ function unreadNotes(unread = []) {
     if (!these.length) continue;
     const [first] = these;
     if (these.length > 1) notes.push(`${these.length} font files, the first of them ${first.label}, were not read, as ${UNREAD[why][1]}.`);
-    else notes.push(`The font file ${first.label} was not read, as ${UNREAD[why][0]}.`);
+    else notes.push(`${first.url.startsWith("data:") ? opening(first.label) : `The font file ${first.label}`} was not read, as ${UNREAD[why][0]}.`);
   }
   return notes;
 }
@@ -1163,7 +1168,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
     await saveKit(target, (part, own) => {
       if (files) saveFiles(built.families, part, own);
       const notes = [...built.notes];
-      for (const skipped of scan.skipped) notes.push(`${skipped.url} was not a usable font file: ${skipped.reason}.`);
+      for (const skipped of scan.skipped) notes.push(`${opening(skipped.label || skipped.url)} was not a usable font file: ${skipped.reason}.`);
       notes.push(...unreadNotes(scan.unread));
       notes.push(...triedNotes(scan.tried, { sandboxed }));
       if (scan.cut.length) notes.push(`The run's time ran out before the ${list(scan.cut.map((role) => ROLE_WORDS[role]))} could be read: give it more time with --timeout.`);

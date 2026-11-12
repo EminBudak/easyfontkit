@@ -11,7 +11,7 @@ const crypto = require("crypto");
 const { navigate, currentAddress, triedSoFar, handedOut } = require("./chrome");
 const { describeFont } = require("./sfnt");
 const { timeLeft, sleep } = require("./time");
-const { FONT_BYTES, FILE_BYTES, UNREAD } = require("./limits");
+const { FONT_BYTES, FILE_BYTES, CSS_BYTES, UNREAD, inMB } = require("./limits");
 
 // The second selector of a role is tried only when the first finds no text:
 // a page built from divs has no p, and a heading can be a styled div.
@@ -31,12 +31,34 @@ const NODES_TRIED = 80;
 // A bot check served instead of the page (a CAPTCHA, "Just a moment…").
 const CHALLENGE_TITLE = /human verification|just a moment|attention required|access denied|verify you are human|are you a robot|security check|checking your browser|pardon our interruption|ddos-guard|one more step|request blocked|captcha/i;
 
+const sizeText = (bytes) => (bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : inMB(bytes));
+
+// A font the page gives as a data: address is known by a key, a digest of
+// the whole address, wherever it comes up: in the browser's request for it,
+// in its report of the faces it loaded and in a style sheet's text. The
+// address itself, which can be megabytes long, is not kept. The notes name
+// such a font by its media type and its size (dataLabel).
+const dataKey = (url) => `data:sha1,${crypto.createHash("sha1").update(String(url)).digest("hex")}`;
+function dataLabel(url, bytes) {
+  const type = (/^data:([^,;]{0,80})/i.exec(url) || [])[1] || "";
+  return `a font the page gave as a data: address (${/^[\w.+-]+\/[\w.+-]+$/.test(type) ? `${type.toLowerCase()}, ` : ""}${sizeText(bytes)})`;
+}
+// How many bytes a data: address decodes to, at most, before it is decoded.
+function dataBytes(url) {
+  const comma = url.indexOf(",");
+  if (comma === -1) return 0;
+  const length = url.length - comma - 1;
+  return /;base64$/i.test(url.slice(0, comma)) ? Math.ceil((length * 3) / 4) : length;
+}
+
 // Every request's addresses, redirects included, and each font file's body
 // as soon as it has arrived: read later, a long page's pictures can push it
 // out of the browser's buffer. Bodies are kept up to `most` bytes in all: a
 // file whose body would take them past it, with those still coming, is not
 // fetched, or is let go of as it comes, and is marked left, and one larger
-// than `one` is not fetched and is marked big.
+// than `one` is not fetched and is marked big. A font the page gives as a
+// data: address is decoded once, as the browser asks for it, within the
+// same `most` and `one` (inline).
 function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
   const addresses = new Map();
   const fonts = new Map();
@@ -88,6 +110,31 @@ function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
       .catch(() => null)
       .finally(() => (coming -= size));
   });
+  // The fonts the page gives as data: addresses that the browser asked for,
+  // by their keys: { label, body } each, or what kept it from being read
+  // (left). One the browser never asked for, as a fallback after a font it
+  // took, is not among them, as a file it never asked for is not.
+  const inline = new Map();
+  const inlineFont = (url) => {
+    const key = dataKey(url);
+    if (inline.has(key)) return key;
+    const bytes = dataBytes(url);
+    const font = { label: dataLabel(url, bytes), body: null, left: "" };
+    inline.set(key, font);
+    if (bytes > one) font.left = "big";
+    else if (kept + coming + bytes > most) font.left = "budget";
+    else {
+      font.body = decodeDataUrl(url);
+      if (font.body) {
+        kept += font.body.length;
+        font.label = dataLabel(url, font.body.length);
+      }
+    }
+    return key;
+  };
+  cdp.on("Network.requestWillBeSent", ({ type, request }) => {
+    if (type === "Font" && request && String(request.url).startsWith("data:")) inlineFont(request.url);
+  });
   // The address of every font file the browser asked for, redirects
   // included, also of one whose answer has not come: one that is not among
   // the files read did not load while the page was read.
@@ -116,7 +163,8 @@ function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
   cdp.on("Network.responseReceivedExtraInfo", ({ requestId, statusCode }) => {
     if (statusCode) statuses.set(requestId, statusCode);
   });
-  cdp.on("CSS.fontsUpdated", ({ font }) => font && faces.push(font));
+  // The faces the browser loaded, one given as a data: address by its key.
+  cdp.on("CSS.fontsUpdated", ({ font }) => font && faces.push(String(font.src || "").startsWith("data:") ? { ...font, src: inlineFont(font.src) } : font));
   cdp.on("CSS.styleSheetAdded", ({ header }) => header && header.origin === "regular" && sheets.set(header.styleSheetId, header));
   // The tab's own page as the server answered it: the last response its
   // main frame got, after any redirects, so a script that moves the page on
@@ -188,7 +236,7 @@ function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
   };
   listen(cdp);
   if (cdp.onFrame) cdp.onFrame(listen);
-  return { fonts, asked, refused, statuses, faces, sheets, page, due, tried };
+  return { fonts, inline, asked, refused, statuses, faces, sheets, page, due, tried };
 }
 
 async function evaluate(cdp, expression, timeoutMs = 10_000) {
@@ -423,39 +471,70 @@ function fontFaceRules(text, base) {
 
 // The same rules as the page's own CSS object model has them: style sheets
 // a script builds rule by rule (CSS-in-JS) have no text to read, and other
-// sites' sheets have a text but no readable rules, so both are read.
-const CSSOM_RULES = `(() => {
+// sites' sheets have a text but no readable rules, so both are read. Run in
+// the page, with the most characters it gives back, past which it stops. A
+// data: address in a src stands there as an empty one: the browser's
+// request for such a font, and its report of the face it loaded, tell of it
+// (record), and the address itself can be megabytes long.
+function cssomRules(most) {
   const out = [];
+  let size = 0;
+  const lean = (src) => src.replace(/url\(\s*(?:"data:[^"\\]*(?:\\.[^"\\]*)*"|'data:[^'\\]*(?:\\.[^'\\]*)*'|data:[^)\s]*)\s*\)/gi, 'url("data:")');
   const visit = (rules, base, depth) => {
     if (depth > 8) return;
     for (const rule of rules) {
+      if (size > most) return;
       if (rule instanceof CSSFontFaceRule) {
         const get = (name) => rule.style.getPropertyValue(name);
-        out.push({ family: get("font-family"), src: get("src"), weight: get("font-weight"), style: get("font-style"), unicodeRange: get("unicode-range"), base });
+        const one = { family: get("font-family"), src: lean(get("src")), weight: get("font-weight"), style: get("font-style"), unicodeRange: get("unicode-range"), base };
+        size += Object.values(one).reduce((sum, value) => sum + String(value).length, 0);
+        if (size <= most) out.push(one);
       } else if (rule instanceof CSSImportRule) {
-        try { if (rule.styleSheet) visit(rule.styleSheet.cssRules, rule.styleSheet.href || base, depth + 1); } catch {}
+        try {
+          if (rule.styleSheet) visit(rule.styleSheet.cssRules, rule.styleSheet.href || base, depth + 1);
+        } catch {}
       } else if (rule.cssRules) {
         visit(rule.cssRules, base, depth + 1);
       }
     }
   };
   for (const sheet of [...document.styleSheets, ...(document.adoptedStyleSheets || [])]) {
-    try { visit(sheet.cssRules, sheet.href || location.href, 0); } catch {}
+    try {
+      visit(sheet.cssRules, sheet.href || location.href, 0);
+    } catch {}
   }
   return out;
-})()`;
+}
 
+// A rule's data: addresses by their keys.
+const keyed = (rule) => ({ ...rule, urls: rule.urls.map((url) => (url.startsWith("data:") ? dataKey(url) : url)) });
+
+// The text of each style sheet is read while the text read so far stays
+// within CSS_BYTES, as its length tells before it is read. A sheet or a
+// rule that cannot be read is passed over.
 async function readRules(cdp, sheets, pageUrl) {
   const rules = [];
+  let read = 0;
   for (const [styleSheetId, header] of sheets) {
     if (timeLeft() < 15_000) break;
+    const length = Number(header.length) || 0;
+    if (read + length > CSS_BYTES) continue;
+    read += length;
     const { text = "" } = await cdp.send("CSS.getStyleSheetText", { styleSheetId }).catch(() => ({}));
-    if (/@font-face/i.test(text)) rules.push(...fontFaceRules(text, header.sourceURL || pageUrl));
+    try {
+      if (/@font-face/i.test(text)) rules.push(...fontFaceRules(text, header.sourceURL || pageUrl).map(keyed));
+    } catch {
+      // Passed over.
+    }
   }
-  for (const rule of (await evaluate(cdp, CSSOM_RULES)) || []) {
-    const family = unquote(rule.family);
-    const urls = srcUrls(rule.src, rule.base);
-    if (family && urls.length) rules.push({ family, weight: rule.weight || "400", style: rule.style || "normal", unicodeRange: rule.unicodeRange || "", urls });
+  for (const rule of (await evaluate(cdp, `(${cssomRules})(${CSS_BYTES})`)) || []) {
+    try {
+      const family = unquote(rule.family);
+      const urls = srcUrls(rule.src, rule.base);
+      if (family && urls.length) rules.push(keyed({ family, weight: rule.weight || "400", style: rule.style || "normal", unicodeRange: rule.unicodeRange || "", urls }));
+    } catch {
+      // Passed over.
+    }
   }
   const seen = new Set();
   return rules.filter((rule) => {
@@ -475,41 +554,48 @@ function decodeDataUrl(url) {
 }
 
 // The font files, each once: the same file can be asked for twice, under
-// two addresses or as a data URL. A file the browser refused is skipped
-// with why, as one its server answered with an error or with no bytes at
-// all is, and with that error when its server answered it with one. One
-// read all the same from that address, as by a preload the page made
-// without crossorigin, which the browser does not hold to CORS, is in the
-// kit and not skipped, and the refusal goes with it (refusedRead): the
+// two addresses or as a data: address. A file the browser refused is
+// skipped with why, as one its server answered with an error or with no
+// bytes at all is, and with that error when its server answered it with
+// one. One read all the same from that address, as by a preload the page
+// made without crossorigin, which the browser does not hold to CORS, is in
+// the kit and not skipped, and the refusal goes with it (refusedRead): the
 // browser does not draw the page's text with it. The files whose bodies
 // were not kept, as the page's font files came to more than a run keeps or
 // the file to more than it reads of one (record), are given apart (unread),
-// each with why (UNREAD). A body is let go of once it is read, so one that
-// is not a usable font file is not held.
-async function readFiles(fonts, rules, faces, refused = new Map(), statuses = new Map()) {
+// each with why (UNREAD). A font given as a data: address is known by its
+// key, and its label names it in the notes. A body is let go of once it is
+// read, so one that is not a usable font file is not held.
+async function readFiles(fonts, inline = new Map(), refused = new Map(), statuses = new Map()) {
   const files = new Map();
   const skipped = [];
   const refusedRead = [];
   const unread = [];
-  const add = (buffer, urls) => {
+  const add = (buffer, urls, label = urls[0] || "") => {
     const sha = crypto.createHash("sha1").update(buffer).digest("hex");
     const known = files.get(sha);
     if (known) return void known.urls.push(...urls.filter((url) => !known.urls.includes(url)));
     try {
       files.set(sha, { sha, urls: [...urls], buffer, font: describeFont(buffer) });
     } catch (err) {
-      skipped.push({ url: urls[0] || "", reason: err.message });
+      skipped.push({ url: urls[0] || "", label, reason: err.message });
     }
   };
   const left = (url, label, why) => unread.push({ url, label, why, reason: UNREAD[why][0] });
   for (const font of fonts.values()) {
     const body = font.body ? await font.body : null;
     font.body = null;
-    if (font.left) left(font.urls[0] || "", font.urls[0] || "", font.left);
+    const [url = ""] = font.urls;
+    if (font.left) left(url, url, font.left);
     else if (body && body.length) add(body, font.urls);
-    else if (font.status >= 400) skipped.push({ url: font.urls[0] || "", reason: `the server answered ${font.status}` });
+    else if (font.status >= 400) skipped.push({ url, label: url, reason: `the server answered ${font.status}` });
     // A whole answer with no bytes in it, as another run gets too.
-    else if (font.finished && body) skipped.push({ url: font.urls[0] || "", reason: "the server sent an empty file" });
+    else if (font.finished && body) skipped.push({ url, label: url, reason: "the server sent an empty file" });
+  }
+  for (const [key, font] of inline) {
+    if (font.left) left(key, font.label, font.left);
+    else if (font.body && font.body.length) add(font.body, [key], font.label);
+    font.body = null;
   }
   const read = (url) => [...files.values()].some((file) => file.urls.includes(url));
   for (const [requestId, refusal] of refused) {
@@ -519,12 +605,7 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
     }
     if (skipped.some((skip) => skip.url === refusal.url)) continue;
     const status = statuses.get(requestId) || 0;
-    skipped.push(status >= 400 ? { url: refusal.url, reason: `the server answered ${status}` } : { url: refusal.url, reason: refusal.reason });
-  }
-  const inline = [...rules.flatMap((rule) => rule.urls), ...faces.map((face) => String(face.src || ""))].filter((url) => url.startsWith("data:"));
-  for (const url of new Set(inline)) {
-    const body = decodeDataUrl(url);
-    if (body && body.length) add(body, [url]);
+    skipped.push({ url: refusal.url, label: refusal.url, reason: status >= 400 ? `the server answered ${status}` : refusal.reason });
   }
   return { files: [...files.values()], skipped, refusedRead, unread };
 }
@@ -533,18 +614,19 @@ async function readFiles(fonts, rules, faces, refused = new Map(), statuses = ne
 // loaded, the ones it could not use and why (skipped), the browser's
 // refusals of files it read all the same (refusedRead), those it did not
 // read, as the page's had come to more than a run keeps or the file to more
-// than it reads of one, each with its address, its label and why (unread),
-// the addresses of every one the browser asked for (asked), its
-// @font-face rules, the web fonts Chrome reports as loaded, the families
-// document.fonts holds, the status and address the server answered the
-// page with (answer), the address the page was first asked from as Chrome
-// wrote it (first), the address a redirect or the page led on to that could
-// not be opened or did not answer (failed), about:blank or the like when
-// the page moved itself on to that (left), for a page that did not draw, so
-// it could not be scrolled, the style sheet it waited for, if one had not
-// come (stalled), the addresses that are not web addresses the page tried
-// to open (tried), and the roles the run's time ran out before any text of
-// was read (cut).
+// than it reads of one, each with its address or key, its label and why
+// (unread), the addresses of every one the browser asked for and the keys
+// of the fonts given as data: addresses it asked for (asked), with their
+// labels (labels), its @font-face rules, the web fonts Chrome reports as
+// loaded, the families document.fonts holds, the status and address the
+// server answered the page with (answer), the address the page was first
+// asked from as Chrome wrote it (first), the address a redirect or the page
+// led on to that could not be opened or did not answer (failed),
+// about:blank or the like when the page moved itself on to that (left), for
+// a page that did not draw, so it could not be scrolled, the style sheet it
+// waited for, if one had not come (stalled), the addresses that are not web
+// addresses the page tried to open (tried), and the roles the run's time
+// ran out before any text of was read (cut).
 // pageUrl is the address of the page the roles were read from, or the last
 // web address the tab showed when it has moved on to about:blank or to a
 // blob: address, so it is always a web address.
@@ -558,7 +640,7 @@ async function scanPage(cdp, url, log = () => {}) {
   await cdp.send("CSS.enable");
   const { frameTree } = await cdp.send("Page.getFrameTree");
   recorded.page.frame = frameTree.frame.id;
-  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, cut: [], files: [], skipped: [], refusedRead: [], unread: [], rules: [], faces: [], loaded: [], asked: [], tried: [], ...found });
+  const nothing = (pageUrl, found) => ({ pageUrl, first: recorded.page.first, answer: { status: recorded.page.status, url: recorded.page.url }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: {}, cut: [], files: [], skipped: [], refusedRead: [], unread: [], rules: [], faces: [], loaded: [], asked: [], labels: new Map(), tried: [], ...found });
   log(`Opening ${url}`);
   let pageUrl;
   try {
@@ -614,13 +696,13 @@ async function scanPage(cdp, url, log = () => {}) {
     unicodeRange: face.unicodeRange && face.unicodeRange !== "U+0-10FFFF" ? face.unicodeRange : "",
     platformFamily: face.platformFontFamily || "",
   }));
-  const { files, skipped, refusedRead, unread } = await readFiles(recorded.fonts, rules, faces, recorded.refused, recorded.statuses);
+  const { files, skipped, refusedRead, unread } = await readFiles(recorded.fonts, recorded.inline, recorded.refused, recorded.statuses);
   const { failed } = recorded.page;
   // The browser's own error page is titled with the host it could not
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, unread, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked], tried };
+  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, unread, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked, ...recorded.inline.keys()], labels: new Map([...recorded.inline].map(([key, font]) => [key, font.label])), tried };
 }
 
-module.exports = { scanPage, fontFaceRules, decodeDataUrl, record, readFiles };
+module.exports = { scanPage, fontFaceRules, cssomRules, decodeDataUrl, dataKey, record, readFiles };

@@ -65,18 +65,22 @@ function standIns(profile, made) {
 const handedOut = (url) => /^[a-z][a-z0-9+.-]*:/i.test(String(url || "")) && !/^(https?|about|data|blob|javascript|file|filesystem|chrome|chrome-error|chrome-extension|devtools|view-source):/i.test(String(url));
 
 // The world each document of the tab gets before its own scripts run, and
-// the guard it runs there: a move of the page, or of a frame of it, to an
-// address that is not a web address, by a script, a refresh, a form or a
-// link, is cancelled before the browser acts on it, on every system, and the
-// address is kept for the kit's notes. A frame of another site, which runs
-// apart from the page, gets it as it is attached to (guardFrames). The
-// page's own scripts cannot reach this world. A frame's first address, a
-// frame the page sends to such an address by its script and a redirect are
-// no move of a page's own, and reach the browser, and so does the move of a
-// frame with no origin of its own, as one at a data: address or a sandboxed
-// one, that moves itself: the browser fires no navigate event in such a
-// document, and no DevTools call cancels the move. On Linux the browser's
-// stand-ins take those (see launch).
+// the guard it runs there: a move to an address that is not a web address,
+// by a script, a refresh, a form or a link, that a document the browser
+// loaded makes of itself, the page or a frame of it, or that the page makes
+// of a frame of its own site that shows such a document, is cancelled before
+// the browser acts on it, on every system, and the address is kept for the
+// kit's notes. A frame of another site, which runs apart from the page, gets
+// it as it is attached to (guardFrames). The page's own scripts cannot reach
+// this world. The guard never sees a frame's first address, a frame the page
+// makes, or a frame of another site, that the page sends to such an address
+// by its script, a frame at about:blank, or made with no address, that the
+// page puts a script in, as its first document never gets the guard, the
+// move of a frame with no origin of its own, as one at a data: address or a
+// sandboxed one, that moves itself, as the browser fires no navigate event
+// in such a document, or a redirect: those reach the browser, and no
+// DevTools call cancels them. On Linux the browser's stand-ins take those
+// (see launch).
 const GUARD_WORLD = "easyfontkit-guard";
 const GUARD = `(() => {
   if (typeof navigation === "undefined") return;

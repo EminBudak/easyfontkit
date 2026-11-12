@@ -1083,9 +1083,9 @@ function triedNotes(tried = [], { sandboxed = false } = {}) {
 const opening = (label) => String(label).replace(/^a font /, "A font ");
 
 // The notes on the font files a run did not read (scan.unread), as the
-// page's had come to more than a run keeps of them or a file to more than it
-// reads of one: for each of those, the first of them and how many there
-// were.
+// page's had come to more than a run keeps of them, a file to more than it
+// reads of one, or the browser no longer held them: for each of those, the
+// first of them and how many there were.
 function unreadNotes(unread = []) {
   const notes = [];
   for (const why of Object.keys(UNREAD)) {

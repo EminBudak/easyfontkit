@@ -53,7 +53,8 @@ test("data URLs decode to their bytes", () => {
 // A page's tab as record() listens to it: what the browser tells is given
 // to it by tell(), and each font file's body is fetched from `bodies`, by
 // its request's id, in the order the fetches were asked, as the browser
-// answers on its pipe. fetched lists the ids asked for.
+// answers on its pipe; an Error there is the browser's answer that it has
+// no such body. fetched lists the ids asked for.
 function tab(bodies) {
   const listeners = new Map();
   const fetched = [];
@@ -63,6 +64,7 @@ function tab(bodies) {
     tell: (method, params) => (listeners.get(method) || []).forEach((listener) => listener(params)),
     send: async (method, { requestId }) => {
       fetched.push(requestId);
+      if (bodies[requestId] instanceof Error) throw bodies[requestId];
       return { body: bodies[requestId].toString("base64"), base64Encoded: true };
     },
   };
@@ -117,6 +119,52 @@ test("the bodies of a page's font files are kept up to what a run keeps of one p
   assert.equal(FONT_BYTES, 200 * 1024 * 1024);
   assert.deepEqual(unreadNotes(read.unread), [`3 font files, the first of them ${url(4)}, were not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`]);
   assert.deepEqual(unreadNotes(read.unread.slice(0, 1)), [`The font file ${url(4)} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`]);
+});
+
+test("a font file whose body the browser no longer holds when it is asked for, as the browser lets go of the oldest it keeps once font files that come at the same moment pass its buffer, is given apart with that and noted apart from those past what a run keeps, where it was left out with no word", async () => {
+  const { record, readFiles } = require("../skills/easyfontkit/scripts/lib/scan");
+  const { unreadNotes } = require("../skills/easyfontkit/scripts/lib/kit");
+  const { fixture } = require("./helpers");
+  const inter = fixture("inter-latin-400.woff2");
+  // Files 1 and 2 come at once with Inter, file 3, and with file 5, which
+  // the server answered with 404, and the browser has let go of their
+  // bodies by the time they are asked for, as Chrome answers then. File 4,
+  // told of once they have come, would take the run past what it keeps.
+  const evicted = new Error("Request content was evicted from inspector cache");
+  const cdp = tab({ 1: evicted, 2: evicted, 3: inter, 4: Buffer.alloc(1200, 4), 5: evicted });
+  const recorded = record(cdp, inter.length + 1000);
+  const url = (id) => `https://acme.example/fonts/${id}.ttf`;
+  const finished = (id, size, status = 200) => {
+    cdp.tell("Network.requestWillBeSent", { requestId: id, type: "Font", request: { url: url(id) } });
+    cdp.tell("Network.responseReceived", { requestId: id, type: "Font", response: { url: url(id), status } });
+    cdp.tell("Network.loadingFinished", { requestId: id, encodedDataLength: size });
+  };
+  finished("1", 400);
+  finished("2", 400);
+  finished("3", inter.length);
+  finished("5", 100, 404);
+  await new Promise((resolve) => setImmediate(resolve));
+  finished("4", 1200);
+  assert.deepEqual(cdp.fetched, ["1", "2", "3", "5"]);
+  const read = await readFiles(recorded.fonts, recorded.inline);
+  assert.deepEqual(
+    read.files.map((file) => file.urls),
+    [[url(3)]],
+  );
+  assert.deepEqual(read.skipped, [{ url: url(5), label: url(5), reason: "the server answered 404" }]);
+  assert.deepEqual(
+    read.unread.map(({ url: address, why }) => [address, why]),
+    [
+      [url(1), "dropped"],
+      [url(2), "dropped"],
+      [url(4), "budget"],
+    ],
+  );
+  assert.deepEqual(unreadNotes(read.unread), [
+    `The font file ${url(4)} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`,
+    `2 font files, the first of them ${url(1)}, were not read, as the browser no longer held them when easyfontkit asked for them, which can happen when a page's font files come at the same moment.`,
+  ]);
+  assert.deepEqual(unreadNotes(read.unread.slice(0, 1)), [`The font file ${url(1)} was not read, as the browser no longer held it when easyfontkit asked for it, which can happen when a page's font files come at the same moment.`]);
 });
 
 test("a font file larger than a run reads of one, 64 MB, by its size as it comes unpacked, is not fetched and is given apart with why, as are those past what a run keeps of one page", async () => {

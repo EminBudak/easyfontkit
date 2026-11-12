@@ -27,10 +27,17 @@ const CSS_BYTES = 64 * 1024 * 1024;
 const inMB = (bytes) => `${Math.round(bytes / (1024 * 1024))} MB`;
 
 // Why a font file was not read, as a note says it of one file and of
-// several.
+// several: past what a run keeps of a page's (budget), larger than it reads
+// of one (big), or no longer held by the browser when it was asked for
+// (dropped), as the browser keeps what a page loads up to a buffer of its
+// own and lets go of the oldest past that.
 const UNREAD = {
   budget: [`the page's font files came to more than the ${inMB(FONT_BYTES)} easyfontkit reads of one page`, `the page's font files came to more than the ${inMB(FONT_BYTES)} easyfontkit reads of one page`],
   big: [`it is larger than the ${inMB(FILE_BYTES)} easyfontkit reads of one font file`, `each is larger than the ${inMB(FILE_BYTES)} easyfontkit reads of one font file`],
+  dropped: [
+    "the browser no longer held it when easyfontkit asked for it, which can happen when a page's font files come at the same moment",
+    "the browser no longer held them when easyfontkit asked for them, which can happen when a page's font files come at the same moment",
+  ],
 };
 
 module.exports = { FONT_BYTES, FILE_BYTES, CSS_BYTES, UNREAD, inMB };

@@ -56,9 +56,12 @@ function dataBytes(url) {
 // out of the browser's buffer. Bodies are kept up to `most` bytes in all: a
 // file whose body would take them past it, with those still coming, is not
 // fetched, or is let go of as it comes, and is marked left, and one larger
-// than `one` is not fetched and is marked big. A font the page gives as a
-// data: address is decoded once, as the browser asks for it, within the
-// same `most` and `one` (inline).
+// than `one` is not fetched and is marked big. A body the browser no longer
+// holds when it is asked for is marked dropped: the browser lets go of the
+// oldest it keeps once what a page loaded passes its buffer, which font
+// files that come at the same moment can do before they are asked for. A
+// font the page gives as a data: address is decoded once, as the browser
+// asks for it, within the same `most` and `one` (inline).
 function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
   const addresses = new Map();
   const fonts = new Map();
@@ -107,7 +110,13 @@ function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
         kept += bytes;
         return Buffer.from(body, base64Encoded ? "base64" : "utf8");
       })
-      .catch(() => null)
+      .catch((err) => {
+        // The browser's answer, not a call that got none or a tab that has
+        // gone, which end the run. A file the server answered with an error
+        // is noted with that error (readFiles).
+        if (!err.timedOut && !err.closed && !err.crashed && font.status < 400) font.left = "dropped";
+        return null;
+      })
       .finally(() => (coming -= size));
   });
   // The fonts the page gives as data: addresses that the browser asked for,
@@ -562,10 +571,11 @@ function decodeDataUrl(url) {
 // the kit and not skipped, and the refusal goes with it (refusedRead): the
 // browser does not draw the page's text with it. The files whose bodies
 // were not kept, as the page's font files came to more than a run keeps or
-// the file to more than it reads of one (record), are given apart (unread),
-// each with why (UNREAD). A font given as a data: address is known by its
-// key, and its label names it in the notes. A body is let go of once it is
-// read, so one that is not a usable font file is not held.
+// the file to more than it reads of one, or the browser no longer held them
+// (record), are given apart (unread), each with why (UNREAD). A font given
+// as a data: address is known by its key, and its label names it in the
+// notes. A body is let go of once it is read, so one that is not a usable
+// font file is not held.
 async function readFiles(fonts, inline = new Map(), refused = new Map(), statuses = new Map()) {
   const files = new Map();
   const skipped = [];
@@ -613,20 +623,21 @@ async function readFiles(fonts, inline = new Map(), refused = new Map(), statuse
 // Opens the page and reads it: the faces of each role, every font file it
 // loaded, the ones it could not use and why (skipped), the browser's
 // refusals of files it read all the same (refusedRead), those it did not
-// read, as the page's had come to more than a run keeps or the file to more
-// than it reads of one, each with its address or key, its label and why
-// (unread), the addresses of every one the browser asked for and the keys
-// of the fonts given as data: addresses it asked for (asked), with their
-// labels (labels), its @font-face rules, the web fonts Chrome reports as
-// loaded, the families document.fonts holds, the status and address the
-// server answered the page with (answer), the address the page was first
-// asked from as Chrome wrote it (first), the address a redirect or the page
-// led on to that could not be opened or did not answer (failed),
-// about:blank or the like when the page moved itself on to that (left), for
-// a page that did not draw, so it could not be scrolled, the style sheet it
-// waited for, if one had not come (stalled), the addresses that are not web
-// addresses the page tried to open (tried), and the roles the run's time
-// ran out before any text of was read (cut).
+// read, as the page's had come to more than a run keeps, the file to more
+// than it reads of one or the browser no longer held it, each with its
+// address or key, its label and why (unread), the addresses of every one
+// the browser asked for and the keys of the fonts given as data: addresses
+// it asked for (asked), with their labels (labels), its @font-face rules,
+// the web fonts Chrome reports as loaded, the families document.fonts
+// holds, the status and address the server answered the page with
+// (answer), the address the page was first asked from as Chrome wrote it
+// (first), the address a redirect or the page led on to that could not be
+// opened or did not answer (failed), about:blank or the like when the page
+// moved itself on to that (left), for a page that did not draw, so it could
+// not be scrolled, the style sheet it waited for, if one had not come
+// (stalled), the addresses that are not web addresses the page tried to
+// open (tried), and the roles the run's time ran out before any text of
+// was read (cut).
 // pageUrl is the address of the page the roles were read from, or the last
 // web address the tab showed when it has moved on to about:blank or to a
 // blob: address, so it is always a web address.

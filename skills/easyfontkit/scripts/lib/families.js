@@ -306,10 +306,11 @@ function buildFamilies(scan) {
   // while other text that asks for the web font first made the browser ask
   // for that font's file.
   // The font files easyfontkit did not read (scan.unread), as the page's
-  // came to more than a run keeps or the file to more than it reads of one,
-  // by address, or by key for a font given as a data: address: the browser
-  // asked for each, and may have drawn with it, but nothing in it could be
-  // read. They are not files that did not load.
+  // came to more than a run keeps, the file to more than it reads of one or
+  // the browser no longer held it, by address, or by key for a font given
+  // as a data: address: the browser asked for each, and may have drawn with
+  // it, but nothing in it could be read. They are not files that did not
+  // load.
   const unreadOf = new Map(unread.map((one) => [bare(one.url), one]));
   const askedFor = new Set([...asked.map(bare), ...unreadOf.keys()]);
   // A family named as the CSS names it, for one of its files that was not

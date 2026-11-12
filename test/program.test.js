@@ -278,19 +278,33 @@ test("a browser the system's loader cannot start, as its loader is missing, gets
 });
 
 test("a script in the browser's place that could not start what it runs, as a launcher whose browser is missing, a wrapper that runs a saved web page, one whose #!/usr/bin/env line or env line names a program not on PATH, one with Windows line breaks, a launcher that asks for the chromium snap, or one that crashed, stopped or closed its pipe, is named with the first line it printed, quoted, and how it ended, never with a program guessed from its words", { skip: process.platform !== "linux" && "the stand-ins are Linux scripts and programs" }, (t) => {
-  // A folder with a short path, whatever TMPDIR is: a shell writes the paths
-  // of the script and of what it ran in one line, and the message keeps the
-  // first 120 and the last 80 characters of a line longer than 200, which
-  // the patterns below would not find whole. Under /tmp where this user may
-  // make one, else in the temp folder.
-  const short = ["/tmp", os.tmpdir()].reduce((made, base) => {
-    if (made) return made;
-    try {
-      return fs.mkdtempSync(path.join(base, "efk-"));
-    } catch {
+  // A folder with a short path where a script may run, whatever TMPDIR is:
+  // a shell writes the paths of the script and of what it ran in one line,
+  // and the message keeps the first 120 and the last 80 characters of a
+  // line longer than 200, which the patterns below would not find whole. In
+  // the temp folder when its path is 30 characters or fewer, else under
+  // /tmp, where a script made there runs, as it does not on a mount that is
+  // noexec, which /tmp often is on a hardened machine.
+  const runs = (folder) => {
+    const probe = path.join(folder, "probe");
+    fs.writeFileSync(probe, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    return spawnSync(probe).status === 0;
+  };
+  const short = [os.tmpdir(), "/tmp"]
+    .filter((base, i) => i > 0 || base.length <= 30)
+    .reduce((made, base) => {
+      if (made) return made;
+      let folder = "";
+      try {
+        folder = fs.mkdtempSync(path.join(base, "efk-"));
+        if (runs(folder)) return folder;
+      } catch {
+        // Not here.
+      }
+      if (folder) fs.rmSync(folder, { recursive: true, force: true });
       return "";
-    }
-  }, "");
+    }, "");
+  if (!short) return void t.skip("no folder with a short path where a script may run");
   t.after(() => fs.rmSync(short, { recursive: true, force: true }));
   const root = path.join(short, "scripts");
   const at = (...names) => path.join(root, ...names);

@@ -1352,6 +1352,36 @@ test("the skill folder carries its own version, the same as the package's", () =
   assert.equal(require("../skills/easyfontkit/scripts/lib/version"), require("../package.json").version);
 });
 
+test("a run started in a folder that was removed before it started, with the default --out or another that is not a full path, stops before anything else and says that folder is gone and what to give as full paths, where it ended with Node's own words, ENOENT: no such file or directory, uv_cwd", { skip: noSignals }, () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-gone-"));
+  try {
+    // A browser that writes down that it was started.
+    const started = path.join(parent, "started");
+    const chrome = path.join(parent, "chrome");
+    fs.writeFileSync(chrome, `#!/bin/sh\necho started >> ${JSON.stringify(started)}\n`, { mode: 0o755 });
+    const temp = path.join(parent, "tmp");
+    fs.mkdirSync(temp);
+    const full = "or give --out as a full path.";
+    for (const [args, tmp, end] of [
+      [[], temp, full],
+      [["--out", "fonts/acme"], temp, full],
+      [[], "tmp", "or give --out and TMPDIR as full paths."],
+    ]) {
+      // Started in a folder that another command removes first.
+      const gone = path.join(parent, "gone");
+      fs.mkdirSync(gone);
+      const run = spawnSync("/bin/sh", ["-c", 'cd "$1" && rmdir "$1" && shift && exec "$@"', "sh", gone, process.execPath, CLI, "http://127.0.0.1:9/", ...args], { encoding: "utf8", env: { ...process.env, CHROME_PATH: chrome, TMPDIR: tmp }, timeout: 60_000 });
+      assert.equal(run.status, 1, run.stderr);
+      assert.equal(run.stderr, `easyfontkit: The folder the run was started in is gone, so no kit was made. Run it from a folder that is there, ${end}\n`);
+      assert.equal(fs.existsSync(started), false, "the browser was not started");
+      assert.equal(fs.existsSync(gone), false);
+    }
+    assert.deepEqual(fs.readdirSync(temp), [], "nothing was made in the temp folder");
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("the CLI explains itself and refuses a missing address", () => {
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);

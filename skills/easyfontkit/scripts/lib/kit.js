@@ -21,6 +21,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const { STATUS_CODES } = require("http");
+const os = require("os");
 const path = require("path");
 const { launch, killBrowsers, openPage, stoppedAnswering, handedOut, STAND_INS } = require("./chrome");
 const { SHORT } = require("./program");
@@ -1133,6 +1134,19 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
   const url = normalizeUrl(rawUrl);
   const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
   const target = dir || `easyfontkit-${host}`;
+  // A relative --out, as the default is, names a folder in the one the run
+  // was started in. When that folder was removed before the run started,
+  // as from another shell, the run stops before anything else and says to
+  // give full paths, which do not need it: --out, and TMPDIR when that is
+  // relative too (see launch).
+  if (!path.isAbsolute(target)) {
+    try {
+      process.cwd();
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      throw new Error(`The folder the run was started in is gone, so no kit was made. Run it from a folder that is there, or give ${path.isAbsolute(os.tmpdir()) ? "--out as a full path" : "--out and TMPDIR as full paths"}.`);
+    }
+  }
   // Refused before the page is read: a folder of someone else's, or one
   // this user cannot write in.
   const earlier = checkFolder(target);

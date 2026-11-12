@@ -2683,7 +2683,7 @@ function attachment(onAsked) {
 }
 const startsDownload = (script) => `<!doctype html><html><head><title>Download</title></head><body><h1>Download</h1><p>A page that gets a file.</p><a id="file" href="/file.bin">The file</a><script>${script}</script></body></html>`;
 
-test("a page cannot make the browser save a file and is read where it stays, and an address that is a file gets no kit and saves nothing", { skip: noDownloads }, async () => {
+test("a page cannot make the browser save a file and is read where it stays, and an address that is a file gets no kit and saves nothing, in the home the browser runs with or in its download folder in the temp folder", { skip: noDownloads }, async () => {
   let asked = 0;
   const { server, origin } = await serve({
     "/script": { body: startsDownload(`setTimeout(() => (location.href = "/file.bin"), 300)`) },
@@ -2694,9 +2694,22 @@ test("a page cannot make the browser save a file and is read where it stays, and
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-download-"));
   const home = path.join(parent, "home");
   fs.mkdirSync(home);
-  const env = { ...process.env, HOME: home };
+  const tmp = path.join(parent, "tmp");
+  fs.mkdirSync(tmp);
+  const env = { ...process.env, HOME: home, TMPDIR: tmp };
   delete env.XDG_CONFIG_HOME;
   delete env.XDG_DOWNLOAD_DIR;
+  // A file saved in the temp folder while a run goes on, as in the
+  // browser's download folder in its profile, which goes with the profile
+  // once the run ends.
+  const seen = new Set();
+  const look = setInterval(() => {
+    try {
+      for (const name of savedIn(tmp)) seen.add(name);
+    } catch {
+      // A folder that went while it was read.
+    }
+  }, 25);
   try {
     for (const route of ["/script", "/click"]) {
       const was = asked;
@@ -2720,7 +2733,9 @@ test("a page cannot make the browser save a file and is read where it stays, and
       assert.equal(fs.existsSync(dir), false, "nothing written");
       assert.deepEqual(savedIn(home), [], route);
     }
+    assert.deepEqual([...seen], [], "no file was saved in the temp folder");
   } finally {
+    clearInterval(look);
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   }

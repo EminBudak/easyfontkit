@@ -445,6 +445,49 @@ test("a web font whose file came and was not a usable font file, as a page a ser
   assert.deepEqual(both.notes, [`Some of the headings were drawn with Liberation Serif, a fallback, because Net Junk's file ${slow} did not load while the page was read, and its file ${junk} was not a usable font file. That text is counted as Net Junk, the font the site asks for. The kit has no file of it, so its license is unknown: try again later.`]);
 });
 
+test("a long stack of families costs a moment, also when it names the same families over and over or in other cases, where each name looked through every @font-face rule of the page and every font file read: 3000 names the rules declare and whose files the browser never asked for, among 100000 rules, took 11 s", () => {
+  const names = Array.from({ length: 3000 }, (_, i) => `F${i}`);
+  const declared = (families, count) => Array.from({ length: count }, (_, i) => ({ ...rule(families[i % families.length], `https://www.acme.com/f${i}.woff2`), unicodeRange: "U+E000" }));
+  // Body text drawn with a font of the visitor's own, and headings with a
+  // web font no file read is named after.
+  const read = (stack, rules, files = []) =>
+    buildFamilies({
+      pageUrl: PAGE,
+      roles: { body: [face("DejaVu Serif", 100, `${stack.join(", ")}, serif`, { custom: false })], heading: [face("Mystery", 100, `${stack.join(", ")}, serif`)] },
+      files,
+      rules,
+      faces: [],
+      loaded: [],
+      asked: [],
+    });
+  // One family in 16384 spellings.
+  const spellings = Array.from({ length: 1 << 14 }, (_, i) => [..."abcdefghijklmn"].map((letter, at) => (i & (1 << at) ? letter.toUpperCase() : letter)).join(""));
+  // 2000 font files read, each under a family of its own the stack does not
+  // name.
+  const buffer = interAs();
+  const font = describeFont(buffer);
+  const files = Array.from({ length: 2000 }, (_, i) => ({ sha: `s${i}`, urls: [`https://www.acme.com/w${i}.woff2`], buffer, font }));
+  for (const [what, stack, rules, read2000] of [
+    ["3000 names", names, declared(names, 100_000)],
+    ["10 names over and over", Array.from({ length: 100_000 }, (_, i) => names[i % 10]), declared(names.slice(0, 10), 60_000)],
+    ["one name in 16384 spellings", spellings, declared(["abcdefghijklmn"], 60_000)],
+    ["50000 names and 2000 files", Array.from({ length: 50_000 }, (_, i) => `N${i}`), files.map((file, i) => rule(`W${i}`, file.urls[0])), files],
+  ]) {
+    const started = Date.now();
+    const { roles, families } = read(stack, rules, read2000);
+    const took = Date.now() - started;
+    // The body text was drawn with a font of the visitor's own, as the
+    // browser went past every family it never asked for a file of, and the
+    // headings with a web font whose file was not caught.
+    assert.deepEqual(
+      [roles.body.family, roles.heading.family, families.filter((family) => family.system).length, families.filter((family) => family.missing).length],
+      [stack[0], "Mystery", 1, 1],
+      what,
+    );
+    assert.ok(took < 3_000, `${what}: ${took} ms`);
+  }
+});
+
 test("a font on the visitor's computer keeps the name the CSS asks for it by", () => {
   const { roles, families } = buildFamilies({
     pageUrl: PAGE,

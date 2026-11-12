@@ -192,12 +192,28 @@ function fileFamily(file) {
   return /[a-z]{3}/i.test(base) ? cleanName(base) : "";
 }
 
+// Items by the CSS families they are declared under, without case, each
+// family's in the order given and each item once under a family: the names
+// of a stack, which can be long and name a family any number of times, find
+// what the page declares under them at once.
+function byFamily(items, familiesOf) {
+  const out = new Map();
+  for (const item of items) {
+    for (const name of new Set(familiesOf(item).map(lower))) {
+      const known = out.get(name);
+      if (known) known.push(item);
+      else out.set(name, [item]);
+    }
+  }
+  return out;
+}
+
 // The files a face Chrome drew with comes from: by the PostScript or
 // family name Chrome reports, found among every name each file carries;
 // by Chrome's own report of the web fonts it loaded; else by the first
-// family of the CSS stack that has files. Several matches are narrowed to
-// the ones the stack asks for.
-function filesOfFace(face, stack, files, faces) {
+// family of the CSS stack that has files (filesOf, the files by family).
+// Several matches are narrowed to the ones the stack asks for.
+function filesOfFace(face, stack, files, faces, filesOf) {
   const named = (name) => (name ? files.filter((file) => file.font.names.includes(name)) : []);
   let found = named(face.postScriptName);
   if (!found.length) found = named(face.familyName);
@@ -210,8 +226,8 @@ function filesOfFace(face, stack, files, faces) {
   if (found.length > 1 && found.some(inStack)) found = found.filter(inStack);
   if (!found.length) {
     for (const name of stack) {
-      const declared = files.filter((file) => file.cssFamilies.some((css) => lower(css) === lower(name)));
-      if (declared.length) return declared;
+      const declared = filesOf.get(lower(name));
+      if (declared) return declared;
     }
   }
   return found;
@@ -263,6 +279,10 @@ function buildFamilies(scan) {
   // address, known by its key, by its label (scan.labels).
   const labelled = (url) => labels.get(url) || url;
   declareFiles(files, rules, faces);
+  // The files read, and the page's @font-face rules, by the CSS families
+  // they are declared under (byFamily).
+  const filesOf = byFamily(files, (file) => file.cssFamilies);
+  const rulesOf = byFamily(rules, (rule) => [rule.family]);
   const loadedNames = new Set(loaded.map((face) => lower(face.family)));
   const families = new Map();
   const familyOf = (name, extra) => {
@@ -288,7 +308,7 @@ function buildFamilies(scan) {
   const webFamilyIn = (stack) => {
     for (const name of stack) {
       if (SYSTEM_KEYWORD.test(name)) return null;
-      const declared = files.find((file) => file.cssFamilies.some((css) => lower(css) === lower(name)));
+      const [declared] = filesOf.get(lower(name)) || [];
       if (declared) return familyOfFile.get(declared.sha);
       if (loadedNames.has(lower(name))) return notReadIn(name) || missingFamily(name);
     }
@@ -355,9 +375,14 @@ function buildFamilies(scan) {
       .map((rule) => ({ covers: inRange(unicodeRange(rule.unicodeRange)), urls: rule.urls.map(bare).filter((url) => askedFor.has(url)) }))
       .filter((rule) => rule.urls.length);
   };
+  // A name the stack gives again, in whatever case, gives what it gave the
+  // first time, so it is looked at once.
   const unloadedIn = (stack) => {
+    const seen = new Set();
     for (const name of stack) {
-      const declared = rules.filter((rule) => lower(rule.family) === lower(name));
+      if (seen.has(lower(name))) continue;
+      seen.add(lower(name));
+      const declared = rulesOf.get(lower(name)) || [];
       if (SYSTEM_KEYWORD.test(name) || !declared.length) return null;
       const urls = declared.flatMap((rule) => rule.urls.map(bare)).filter((url) => askedFor.has(url));
       if (!urls.length) continue;
@@ -382,7 +407,7 @@ function buildFamilies(scan) {
       const stack = parseStack(stackText);
       let family;
       if (face.custom) {
-        const found = filesOfFace(face, stack, files, faces);
+        const found = filesOfFace(face, stack, files, faces, filesOf);
         const counts = new Map();
         for (const file of found) counts.set(familyOfFile.get(file.sha), (counts.get(familyOfFile.get(file.sha)) || 0) + 1);
         family = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([f]) => f)[0];

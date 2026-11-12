@@ -927,8 +927,12 @@ function writeMarkdown(kit, families, dir) {
       lines.push(`- Files: ${saved.join("; ")}`);
     } else if (family.missing) {
       lines.push("- Files: Chrome drew with it, but its file was not caught");
+    } else if (family.notLoaded && family.notRead) {
+      lines.push(`- Files: none read, as ${list(family.notLoaded)} did not load while the page was read, and ${list(family.notRead)} ${family.notRead.length === 1 ? "was" : "were"} not read`);
     } else if (family.notLoaded) {
       lines.push(`- Files: none read, as ${list(family.notLoaded)} did not load while the page was read`);
+    } else if (family.notRead) {
+      lines.push(`- Files: not read: ${list(family.notRead)}`);
     }
     if (family.listed && family.license.status === "open") lines.push(`- Also on ${family.listed.from}: ${family.listed.from === "Google Fonts" ? `https://fonts.google.com/specimen/${family.listed.family.replace(/ /g, "+")}` : `https://fontsource.org/fonts/${family.listed.id}`}`);
     if (family.free.length) {

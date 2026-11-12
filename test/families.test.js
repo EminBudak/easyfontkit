@@ -293,6 +293,89 @@ test("text whose stack asks for a font of the visitor's own before a web font wh
   assert.equal(past.notes.length, 1);
 });
 
+test("a web font whose file easyfontkit did not read, as the page's font files came to more than a run keeps or the file to more than it reads of one, is named as the CSS names it, with an unknown license that says why and a note that does not say the file did not load or offer another try, also when Chrome drew with it, a font given as a data: address by its label, and a file of a split family for those characters", () => {
+  const { UNREAD } = require("../skills/easyfontkit/scripts/lib/limits");
+  const big = "https://www.acme.com/big/10.ttf";
+  const unread = (url, why, label = url) => ({ url, label, why, reason: UNREAD[why][0] });
+  // The browser loaded the file, and drew the text with a fallback, as for a
+  // file that is no usable font.
+  const fallback = buildFamilies({
+    pageUrl: PAGE,
+    roles: { body: [face("Liberation Serif", 300, "B10, serif", { custom: false })] },
+    files: [],
+    rules: [rule("B10", big)],
+    faces: [],
+    loaded: [],
+    asked: [big],
+    unread: [unread(big, "budget")],
+  });
+  assert.equal(fallback.roles.body.family, "B10");
+  const [b10] = fallback.families;
+  assert.deepEqual([b10.system, b10.missing, "notLoaded" in b10, b10.notRead], [false, false, false, [big]]);
+  assert.deepEqual([b10.license.status, b10.license.basis], ["unknown", "its file was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page"]);
+  assert.deepEqual(fallback.notes, [`Some of the body text was drawn with Liberation Serif, a fallback, in place of B10, whose file ${big} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page. That text is counted as B10, the font the site asks for. The kit has no file of it, so its license is unknown.`]);
+  // Chrome drew with it, a file larger than a run reads of one.
+  const drawn = buildFamilies({
+    pageUrl: PAGE,
+    roles: { heading: [face("B10", 120, "B10, serif")] },
+    files: [],
+    rules: [rule("B10", big)],
+    faces: [{ family: "B10", src: big, platformFamily: "B10" }],
+    loaded: [{ family: "B10" }],
+    asked: [big],
+    unread: [unread(big, "big")],
+  });
+  assert.deepEqual(drawn.families.map((f) => [f.name, f.missing, f.notRead, f.license.basis]), [["B10", false, [big], "its file was not read, as it is larger than the 64 MB easyfontkit reads of one font file"]]);
+  assert.deepEqual(drawn.notes, []);
+  // A font given as a data: address, known by its key, which Chrome drew
+  // with under another name, as the CSS object model gives no address.
+  const key = "data:sha1,0123456789abcdef0123456789abcdef01234567";
+  const label = "a font the page gave as a data: address (font/woff2, 3 MB)";
+  const inline = buildFamilies({
+    pageUrl: PAGE,
+    roles: { heading: [face("Inl Display", 100, "Inl, sans-serif")] },
+    files: [],
+    rules: [rule("Inl", "data:sha1,ffffffffffffffffffffffffffffffffffffffff")],
+    faces: [{ family: "Inl", src: key, platformFamily: "Inl Display" }],
+    loaded: [],
+    asked: [],
+    unread: [unread(key, "budget", label)],
+  });
+  assert.deepEqual(inline.families.map((f) => [f.name, f.notRead, f.source]), [["Inl", [label], "inline"]]);
+  // A file of a split family, for the characters the fallback drew.
+  const latin = file("https://www.acme.com/fonts/latin.ttf", { 1: "Acme Latin", 13: "This Font Software is licensed under the SIL Open Font License, Version 1.1." });
+  const ext = "https://www.acme.com/fonts/latin-ext.ttf";
+  const stack = '"Acme Latin", sans-serif';
+  const split = buildFamilies({
+    pageUrl: PAGE,
+    roles: { heading: [face("Liberation Sans", 9, stack, { custom: false, nodes: [["Zażółć gęślą jaźń", 9]] }), face("Acme Latin", 8, stack)] },
+    files: [latin],
+    rules: [
+      { ...rule("Acme Latin", latin.urls[0]), unicodeRange: "U+0000-00FF" },
+      { ...rule("Acme Latin", ext), unicodeRange: "U+0100-024F" },
+    ],
+    faces: [],
+    loaded: [{ family: "Acme Latin" }],
+    asked: [latin.urls[0], ext],
+    unread: [unread(ext, "budget")],
+  });
+  assert.deepEqual(split.notes, [`Some of the headings were drawn with Liberation Sans, a fallback, in place of Acme Latin, whose file ${ext} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page. That text is counted as Acme Latin, the font the site asks for. The kit has no file of it for those characters.`]);
+  // One file that did not load and one that was not read.
+  const slow = "https://www.acme.com/fonts/b10-italic.ttf";
+  const both = buildFamilies({
+    pageUrl: PAGE,
+    roles: { body: [face("Liberation Serif", 300, "B10, serif", { custom: false })] },
+    files: [],
+    rules: [rule("B10", big), rule("B10", slow)],
+    faces: [],
+    loaded: [],
+    asked: [big, slow],
+    unread: [unread(big, "budget")],
+  });
+  assert.deepEqual([both.families[0].notLoaded, both.families[0].notRead, both.families[0].license.basis], [[slow], [big], "its file did not load while the page was read, so nothing in it could be read"]);
+  assert.deepEqual(both.notes, [`Some of the body text was drawn with Liberation Serif, a fallback, because B10's file ${slow} did not load while the page was read, and its file ${big} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page. That text is counted as B10, the font the site asks for. The kit has no file of it, so its license is unknown: try again later.`]);
+});
+
 test("a font on the visitor's computer keeps the name the CSS asks for it by", () => {
   const { roles, families } = buildFamilies({
     pageUrl: PAGE,

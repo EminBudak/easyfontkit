@@ -30,6 +30,20 @@ test("@font-face rules: family, weight, style, range and absolute addresses", ()
   assert.equal(rules[2].urls[0], "data:font/woff2;base64,d09GMgABAAAA");
 });
 
+test("a quoted address of megabytes in a src, as a font given as a data: address and as the CSS object model writes every address, is read, where the pattern ran the regular expression engine out of stack from about 8 MB", () => {
+  for (const mb of [8, 16]) {
+    const font = `data:font/woff2;base64,${"QUJD".repeat((mb << 20) / 4)}`;
+    for (const quote of ['"', "'"]) {
+      // A quote in an address is written after a backslash.
+      const rules = fontFaceRules(`@font-face { font-family: Big; src: url(${quote}${font}${quote}) format("woff2"), url(${quote}/fonts/a\\${quote}b.woff${quote}) }`, "https://acme.example/");
+      assert.equal(rules.length, 1);
+      assert.equal(rules[0].urls.length, 2);
+      assert.equal(rules[0].urls[0].length, font.length);
+      assert.equal(rules[0].urls[1], `https://acme.example/fonts/a/${quote === '"' ? "%22" : "'"}b.woff`);
+    }
+  }
+});
+
 test("data URLs decode to their bytes", () => {
   assert.equal(decodeDataUrl("data:font/woff2;base64,d09GMg==").toString("latin1"), "wOF2");
   assert.equal(decodeDataUrl("data:text/plain,a%20b").toString("latin1"), "a b");

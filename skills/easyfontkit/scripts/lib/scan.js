@@ -390,9 +390,13 @@ function resolve(url, base) {
   }
 }
 
-// The src addresses of a @font-face declaration, absolute.
+// The src addresses of a @font-face declaration, absolute. A quoted address
+// is matched with no choice inside the repeat, so one of megabytes, as a
+// font given as a data: address can be, does not run the regular expression
+// engine out of stack.
+const SRC_URL = /url\(\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|([^)\s]*))\s*\)/gi;
 function srcUrls(src, base) {
-  return [...String(src || "").matchAll(/url\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^)\s]*))\s*\)/gi)]
+  return [...String(src || "").matchAll(SRC_URL)]
     .map((m) => (m[1] ?? m[2] ?? m[3] ?? "").trim())
     .filter(Boolean)
     .map((url) => (url.startsWith("data:") ? url : resolve(url, base)))

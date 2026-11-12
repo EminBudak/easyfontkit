@@ -2291,7 +2291,7 @@ test("a page whose process crashes while it is read, as the system ends one when
   try {
     const started = Date.now();
     await assert.rejects(makeFontKit(url, { dir, timeLimit: 120_000 }), {
-      message: `The browser's page crashed while ${url} was read, so no kit was made. A page crashes when it runs out of memory: one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page.`,
+      message: `The browser's page crashed while ${url} was read, so no kit was made. A page can crash when it runs out of memory, as one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page, or when it holds more than the browser can handle.`,
     });
     assert.ok(killed > 0, "a renderer was killed");
     assert.ok(Date.now() - started < 30_000, `the run took ${Date.now() - started} ms`);
@@ -2321,7 +2321,7 @@ chrome.openPage = async () => {
 };
 `,
     );
-    const said = "easyfontkit: The browser's page crashed while http://127.0.0.1:9/ was read, so no kit was made. A page crashes when it runs out of memory: one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page.\n";
+    const said = "easyfontkit: The browser's page crashed while http://127.0.0.1:9/ was read, so no kit was made. A page can crash when it runs out of memory, as one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page, or when it holds more than the browser can handle.\n";
     // Stopped by SIGTERM a second after it started.
     const stopped = (env) =>
       new Promise((resolve) => {

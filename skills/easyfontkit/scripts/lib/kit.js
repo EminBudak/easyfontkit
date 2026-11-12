@@ -1135,14 +1135,16 @@ function stalledPage(asked, { pageUrl, first, stalled: { sheet } }) {
   return `${where(asked, pageUrl, first)} ${what}, so no kit was made. Try again later, or check the page in a normal browser.`;
 }
 
-// A page whose process crashed while it was read, as one does that runs
-// out of memory: one that loads very large files on a machine or in a job
-// held to a memory limit, or one whose own scripts use more than the
-// browser gives a page. Another try gives the same when the page itself is
-// the cause, and may help once more memory is free otherwise, which the
-// run cannot tell, so the message offers none.
+// A page whose process crashed while it was read, as one can that runs out
+// of memory, one that loads very large files on a machine or in a job held
+// to a memory limit, or one whose own scripts use more than the browser
+// gives a page, or one that holds more than the browser can handle, as a
+// page whose text asks for families of some 65000 @font-face rules does,
+// with gigabytes free. The browser does not say why. Another try gives the
+// same when the page itself is the cause, and may help once more memory is
+// free otherwise, which the run cannot tell, so the message offers none.
 function crashedPage(asked) {
-  return `The browser's page crashed while ${asked} was read, so no kit was made. A page crashes when it runs out of memory: one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page.`;
+  return `The browser's page crashed while ${asked} was read, so no kit was made. A page can crash when it runs out of memory, as one that loads very large files on a machine or in a job held to a memory limit, or one whose own scripts use more than the browser gives a page, or when it holds more than the browser can handle.`;
 }
 
 // The runs going on in this process, for a stop signal, and whether one has

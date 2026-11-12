@@ -1382,6 +1382,46 @@ test("a run started in a folder that was removed before it started, with the def
   }
 });
 
+test("a run whose folder it was started in is removed while the page is read, with the default --out or another that is not a full path, says that folder is gone and leaves nothing made, where it waited for a lock no run held and said another run was saving a kit there", { skip: noSignals }, () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-gonelater-"));
+  try {
+    // Loaded before the CLI: a browser and a page that stand in for real
+    // ones, and a read of the page that removes the folder the run was
+    // started in and gives a page of body text in Arial.
+    const stub = path.join(parent, "stub.js");
+    const lib = path.resolve(__dirname, "../skills/easyfontkit/scripts/lib");
+    fs.writeFileSync(
+      stub,
+      `const chrome = require(${JSON.stringify(path.join(lib, "chrome.js"))});
+const scan = require(${JSON.stringify(path.join(lib, "scan.js"))});
+chrome.launch = async () => ({ name: "chrome", sandboxed: false, close: async () => {} });
+chrome.openPage = async () => ({ crashing: null, crashed: null, lost: null, close() {} });
+scan.scanPage = async () => {
+  require("fs").rmdirSync(process.env.STARTED_IN);
+  const face = { familyName: "Liberation Sans", postScriptName: "", custom: false, glyphs: 40, italicGlyphs: 0, weights: { 400: 40 }, stacks: { "Arial, sans-serif": 40 }, nodes: [] };
+  return { pageUrl: "http://127.0.0.1:9/", first: "", answer: { status: 200, url: "http://127.0.0.1:9/" }, failed: null, left: "", stalled: null, title: "", challenge: "", roles: { body: [face] }, cut: [], files: [], skipped: [], refusedRead: [], unread: [], rules: [], faces: [], loaded: [], asked: [], labels: new Map(), tried: [] };
+};
+`,
+    );
+    for (const [args, tmp, end] of [
+      [[], os.tmpdir(), "or give --out as a full path."],
+      [["--out", "fonts/acme"], os.tmpdir(), "or give --out as a full path."],
+      [[], "tmp", "or give --out and TMPDIR as full paths."],
+    ]) {
+      const startedIn = path.join(parent, "start");
+      fs.mkdirSync(startedIn);
+      const began = Date.now();
+      const run = spawnSync(process.execPath, ["-r", stub, CLI, "http://127.0.0.1:9/", ...args], { cwd: startedIn, encoding: "utf8", env: { ...process.env, STARTED_IN: startedIn, TMPDIR: tmp }, timeout: 60_000 });
+      assert.equal(run.status, 1, run.stderr);
+      assert.ok(run.stderr.endsWith(`easyfontkit: The folder the run was started in is gone, so no kit was made. Run it from a folder that is there, ${end}\n`), run.stderr);
+      assert.ok(Date.now() - began < 8_000, `the run took ${Date.now() - began} ms`);
+      assert.deepEqual(fs.readdirSync(parent), ["stub.js"], "the folder made again for the kit is removed");
+    }
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("the CLI explains itself and refuses a missing address", () => {
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);

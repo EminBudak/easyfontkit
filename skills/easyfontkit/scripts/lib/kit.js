@@ -343,14 +343,31 @@ function takeOver(file, holder) {
     }
   }
 }
+// The folder the run was started in is gone, as when another shell removed
+// it: a relative path names nothing then. Node keeps the path it had
+// (process.cwd), and the system gives a folder that is gone no links.
+function startGone() {
+  try {
+    return fs.statSync(".").nlink === 0;
+  } catch {
+    return false;
+  }
+}
+// The message for a run whose folder is gone: a relative --out, as the
+// default is, names nothing, and a relative TMPDIR neither.
+const goneMessage = () => `The folder the run was started in is gone, so no kit was made. Run it from a folder that is there, or give ${path.isAbsolute(os.tmpdir()) ? "--out as a full path" : "--out and TMPDIR as full paths"}.`;
+
 // Two runs that save into one folder at the same moment take turns: the
 // first makes the lock file, with its pid in it, and the second waits for it
 // to go, at most LOCK_WAIT. The wait yields to the event loop, so a stop
 // signal that arrives during it ends the run before anything is written,
 // as it would at any other point. The folder itself can go during the
 // wait, as the run that made it removes it when its own save fails: then
-// remake() makes it again for this run. Gives the function that lets go of
-// the lock, which removes it only while it is still this run's.
+// remake() makes it again for this run. A relative dir in a folder the run
+// was started in that has gone since, as while the page was read, cannot be
+// made again, and the run stops and says so, where it waited for a lock no
+// run holds. Gives the function that lets go of the lock, which removes it
+// only while it is still this run's.
 async function lock(dir, remake) {
   const file = path.join(dir, LOCK);
   const mine = String(process.pid);
@@ -372,6 +389,7 @@ async function lock(dir, remake) {
     try {
       return fs.openSync(file, "wx");
     } catch (err) {
+      if (err.code === "ENOENT" && !path.isAbsolute(dir) && startGone()) throw new Error(goneMessage());
       // Taken, or gone again: tried again after the pause.
       if (err.code === "EEXIST" || err.code === "ENOENT") return undefined;
       throw err;
@@ -1148,7 +1166,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       process.cwd();
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
-      throw new Error(`The folder the run was started in is gone, so no kit was made. Run it from a folder that is there, or give ${path.isAbsolute(os.tmpdir()) ? "--out as a full path" : "--out and TMPDIR as full paths"}.`);
+      throw new Error(goneMessage());
     }
   }
   // Refused before the page is read: a folder of someone else's, or one

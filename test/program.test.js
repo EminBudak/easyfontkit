@@ -334,12 +334,19 @@ test("a script in the browser's place that could not start what it runs, as a la
   const page = put(root, "page", "<!DOCTYPE html>\n<html><body>Not Found</body></html>\n");
   const runsPage = put(root, "sh-page", `#!/bin/sh\nexec ${page} "$@"\n`);
   cases.push(ran(runsPage, `${esc(page)}: .+`, "exited with \\d+"));
-  // A launcher that runs a script whose interpreter is missing, under bash,
-  // which names both, and under dash.
+  // A launcher that runs a script whose interpreter is missing, under bash
+  // and under dash. bash's words for it differ by version: 5.1 and 5.3 name
+  // the interpreter, "bad interpreter: No such file or directory", and exit
+  // with 126, where 5.2 says "cannot execute: required file not found" and
+  // exits with 127. So the script is run once here first, and the run is to
+  // quote the first line the bash of this machine printed and its exit code.
   const inner = put(root, "inner", "#!/nonexistent/interp\n");
   if (shells.includes("/bin/bash")) {
     const bash = put(root, "bash-badinterp", `#!/bin/bash\nexec ${inner} "$@"\n`);
-    cases.push(ran(bash, `${esc(bash)}: .*bad interpreter: No such file or directory`, "exited with 126"));
+    const own = spawnSync(bash, [], { encoding: "utf8", timeout: 10_000 });
+    const first = own.stderr.split("\n").map((line) => line.trim()).find(Boolean) || "";
+    assert.match(first, new RegExp(`^${esc(bash)}: .*${esc(inner)}: `), `the first line bash printed of ${bash}, which exited with ${own.status}: ${JSON.stringify(own.stderr)}`);
+    cases.push(ran(bash, esc(first), `exited with ${own.status}`));
   }
   const dash = put(root, "sh-badinterp", `#!/bin/sh\nexec ${inner} "$@"\n`);
   cases.push(ran(dash, `${esc(dash)}: .*${esc(inner)}: .+`, "exited with 12[67]"));

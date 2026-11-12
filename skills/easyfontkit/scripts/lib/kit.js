@@ -928,10 +928,13 @@ function writeMarkdown(kit, families, dir) {
       lines.push(`- Files: ${saved.join("; ")}`);
     } else if (family.missing) {
       lines.push("- Files: Chrome drew with it, but its file was not caught");
-    } else if (family.notLoaded && family.notRead) {
-      lines.push(`- Files: none read, as ${list(family.notLoaded)} did not load while the page was read, and ${list(family.notRead)} ${family.notRead.length === 1 ? "was" : "were"} not read`);
-    } else if (family.notLoaded) {
-      lines.push(`- Files: none read, as ${list(family.notLoaded)} did not load while the page was read`);
+    } else if (family.notLoaded || family.notUsable) {
+      const why = [
+        ...(family.notLoaded ? [`${list(family.notLoaded)} did not load while the page was read`] : []),
+        ...(family.notUsable ? [`${list(family.notUsable)} ${family.notUsable.length === 1 ? "was not a usable font file" : "were not usable font files"}`] : []),
+        ...(family.notRead ? [`${list(family.notRead)} ${family.notRead.length === 1 ? "was" : "were"} not read`] : []),
+      ];
+      lines.push(`- Files: none read, as ${why.join(", and ")}`);
     } else if (family.notRead) {
       lines.push(`- Files: not read: ${list(family.notRead)}`);
     }

@@ -179,6 +179,11 @@ test("text a fallback drew in characters that a file of the web font's for them,
   // One whose server answered with an error has a note of its own, and a
   // later run gets the same answer.
   assert.deepEqual(read(polish, { skipped: [{ url: ext, reason: "the server answered 503" }] }).notes, [waited([ext], "")]);
+  // One that came and was not a usable font file, which another run gets
+  // too.
+  assert.deepEqual(read(polish, { skipped: [{ url: ext, reason: "not a font file" }] }).notes, [
+    `Some of the headings were drawn with Liberation Sans, a fallback, because Acme Latin's file ${ext} was not a usable font file. That text is counted as Acme Latin, the font the site asks for. The kit has no file of it for those characters.`,
+  ]);
   // A rule whose file the browser never asked for takes nothing, as the
   // browser asks for a file once the text needs it.
   const lacking = "Some of the headings were drawn with Liberation Sans, a fallback, as Acme Latin has no glyphs for those characters. That text is counted as Acme Latin, the font the site asks for.";
@@ -391,8 +396,53 @@ test("a web font given as a data: address that the browser asked for and could n
     skipped: [{ url: key, label, reason: "not a font file" }],
   });
   assert.equal(roles.body.family, "I10");
-  assert.deepEqual(families.map((f) => [f.name, f.system, f.notLoaded, f.source]), [["I10", false, [label], "inline"]]);
-  assert.deepEqual(notes, [`Some of the body text was drawn with Liberation Serif, a fallback, because I10's file, ${label}, did not load while the page was read. That text is counted as I10, the font the site asks for. The kit has no file of it, so its license is unknown.`]);
+  assert.deepEqual(families.map((f) => [f.name, f.system, "notLoaded" in f, f.notUsable, f.source]), [["I10", false, false, [label], "inline"]]);
+  assert.deepEqual(notes, [`Some of the body text was drawn with Liberation Serif, a fallback, because I10's file, ${label}, was not a usable font file. That text is counted as I10, the font the site asks for. The kit has no file of it, so its license is unknown.`]);
+});
+
+test("a web font whose file came and was not a usable font file, as a page a server sent with 200 in a font's place, an empty file or one cut short, is said to have a file that was not a usable font file, in its note, its license and fonts.json, where they said the file did not load while the page was read; one the server answered with an error, or the browser refused, did not load", () => {
+  const junk = "https://www.acme.com/fonts/junk.woff2";
+  const slow = "https://www.acme.com/fonts/slow.woff2";
+  const read = (skipped, urls = [junk]) =>
+    buildFamilies({
+      pageUrl: PAGE,
+      roles: { heading: [face("Liberation Serif", 120, '"Net Junk", serif', { custom: false, weight: "700" })] },
+      files: [],
+      rules: urls.map((url) => rule("Net Junk", url)),
+      faces: [],
+      loaded: [],
+      asked: urls,
+      skipped,
+    });
+  const unusable = (end) => `Some of the headings were drawn with Liberation Serif, a fallback, because Net Junk's file ${junk} was not a usable font file. That text is counted as Net Junk, the font the site asks for. The kit has no file of it${end}.`;
+  for (const reason of ["not a font file", "the server sent an empty file", "cut short or broken: its tables run past its 100 bytes"]) {
+    const { roles, families, notes } = read([{ url: junk, label: junk, reason }]);
+    assert.equal(roles.heading.family, "Net Junk", reason);
+    assert.deepEqual(
+      families.map((f) => [f.system, "notLoaded" in f, f.notUsable, f.license.status, f.license.basis]),
+      [[false, false, [junk], "unknown", "its file was not a usable font file, so nothing in it could be read"]],
+      reason,
+    );
+    assert.deepEqual(notes, [unusable(", so its license is unknown")], reason);
+  }
+  // A file the server answered with an error, or the browser refused, did
+  // not load, as before.
+  for (const reason of ["the server answered 404", "the browser refused it (CORS error: MissingAllowOriginHeader)"]) {
+    const { families, notes } = read([{ url: junk, label: junk, reason }]);
+    assert.deepEqual(
+      families.map((f) => [f.notLoaded, "notUsable" in f, f.license.basis]),
+      [[[junk], false, "its file did not load while the page was read, so nothing in it could be read"]],
+      reason,
+    );
+    assert.deepEqual(notes, [`Some of the headings were drawn with Liberation Serif, a fallback, because Net Junk's file ${junk} did not load while the page was read. That text is counted as Net Junk, the font the site asks for. The kit has no file of it, so its license is unknown.`], reason);
+  }
+  // One file that did not load and one that was not usable.
+  const both = read([{ url: junk, label: junk, reason: "not a font file" }], [slow, junk]);
+  assert.deepEqual(
+    both.families.map((f) => [f.notLoaded, f.notUsable, f.license.basis]),
+    [[[slow], [junk], "its file did not load while the page was read, so nothing in it could be read"]],
+  );
+  assert.deepEqual(both.notes, [`Some of the headings were drawn with Liberation Serif, a fallback, because Net Junk's file ${slow} did not load while the page was read, and its file ${junk} was not a usable font file. That text is counted as Net Junk, the font the site asks for. The kit has no file of it, so its license is unknown: try again later.`]);
 });
 
 test("a font on the visitor's computer keeps the name the CSS asks for it by", () => {

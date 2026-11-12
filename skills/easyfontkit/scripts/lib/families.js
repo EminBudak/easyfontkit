@@ -252,9 +252,10 @@ function regular(files) {
 }
 
 // A web family whose files the browser asked for and did not get while the
-// page was read (notLoaded), or that easyfontkit did not read (notRead),
-// with no other file of it read, and not one Chrome drew with either.
-const unloaded = (family) => Boolean(((family.notLoaded && family.notLoaded.size) || (family.notRead && family.notRead.size)) && !family.files.length && !family.missing);
+// page was read (notLoaded), that came and were not usable font files
+// (notUsable), or that easyfontkit did not read (notRead), with no other
+// file of it read, and not one Chrome drew with either.
+const unloaded = (family) => Boolean([family.notLoaded, family.notUsable, family.notRead].some((urls) => urls && urls.size) && !family.files.length && !family.missing);
 
 function buildFamilies(scan) {
   const { pageUrl, roles: rawRoles, files, rules, faces, loaded, asked = [], skipped = [], refusedRead = [], unread = [], labels = new Map() } = scan;
@@ -313,6 +314,11 @@ function buildFamilies(scan) {
   // load.
   const unreadOf = new Map(unread.map((one) => [bare(one.url), one]));
   const askedFor = new Set([...asked.map(bare), ...unreadOf.keys()]);
+  // The font files that came and were not usable font files (scan.skipped),
+  // as a page a server sent in a font's place, an empty file or one cut
+  // short, by address or key: they did load, and another run gets the same.
+  // One the server answered with an error, or the browser refused, did not.
+  const unusable = new Set(skipped.filter((skip) => !/^the (server answered|browser refused) /.test(skip.reason)).map((skip) => bare(skip.url)));
   // A family named as the CSS names it, for one of its files that was not
   // read or did not load.
   const cssFamily = (name) => {
@@ -356,7 +362,8 @@ function buildFamilies(scan) {
       const urls = declared.flatMap((rule) => rule.urls.map(bare)).filter((url) => askedFor.has(url));
       if (!urls.length) continue;
       const family = cssFamily(name);
-      family.notLoaded = new Set([...(family.notLoaded || []), ...urls.filter((url) => !unreadOf.has(url))]);
+      family.notLoaded = new Set([...(family.notLoaded || []), ...urls.filter((url) => !unreadOf.has(url) && !unusable.has(url))]);
+      family.notUsable = new Set([...(family.notUsable || []), ...urls.filter((url) => unusable.has(url))]);
       family.notRead = new Set([...(family.notRead || []), ...urls.filter((url) => unreadOf.has(url))]);
       return family;
     }
@@ -447,12 +454,15 @@ function buildFamilies(scan) {
   };
   // Why the kit has none of a family's files for text a fallback drew, by
   // the files that kept it out: "because Inter's file <a> did not load while
-  // the page was read" for those the browser did not get, and "in place of
-  // Inter, whose file <b> was not read, as <why>" for those easyfontkit did
-  // not read, which the browser may have drawn with or not, or both. Only a
-  // file that got no answer at all may come on another try (waiting).
+  // the page was read" for those the browser did not get, "because Inter's
+  // file <c> was not a usable font file" for those that came and were not,
+  // and "in place of Inter, whose file <b> was not read, as <why>" for those
+  // easyfontkit did not read, which the browser may have drawn with or not,
+  // or several of these. Only a file that got no answer at all may come on
+  // another try (waiting).
   const keptOut = (name, urls) => {
-    const late = urls.filter((url) => !unreadOf.has(url));
+    const late = urls.filter((url) => !unreadOf.has(url) && !unusable.has(url));
+    const bad = urls.filter((url) => unusable.has(url));
     const groups = new Map();
     for (const url of urls.filter((url) => unreadOf.has(url))) {
       const { why, label } = unreadOf.get(url);
@@ -460,8 +470,12 @@ function buildFamilies(scan) {
     }
     const notRead = listOf([...groups].map(([why, labels]) => `${fileList(labels)} ${labels.length === 1 ? "was" : "were"} not read, as ${UNREAD[why][labels.length === 1 ? 0 : 1]}`));
     const waiting = late.some((url) => !answered.has(url));
-    if (!late.length) return { why: `in place of ${name}, whose ${notRead}.`, waiting };
-    const because = `because ${name}'s ${fileList(late.map(labelled))} did not load while the page was read`;
+    const clauses = [
+      ...(late.length ? [`${fileList(late.map(labelled))} did not load while the page was read`] : []),
+      ...(bad.length ? [`${fileList(bad.map(labelled))} ${bad.length === 1 ? "was not a usable font file" : "were not usable font files"}`] : []),
+    ];
+    if (!clauses.length) return { why: `in place of ${name}, whose ${notRead}.`, waiting };
+    const because = `because ${name}'s ${clauses.join(", and its ")}`;
     return { why: notRead ? `${because}, and its ${notRead}.` : `${because}.`, waiting };
   };
   const notes = [...fallbacks.values()].map((fallback) => {
@@ -474,7 +488,7 @@ function buildFamilies(scan) {
     const drawn = `Some of the ${listOf(where)} ${many ? "were" : "was"} drawn with ${listOf(fonts)}, ${fonts.length > 1 ? "fallbacks" : "a fallback"}`;
     const counted = `That text is counted as ${family.name}, the font the site asks for.`;
     if (unloaded(family)) {
-      const { why: kept, waiting } = keptOut(family.name, [...(family.notLoaded || []), ...(family.notRead || [])]);
+      const { why: kept, waiting } = keptOut(family.name, [...(family.notLoaded || []), ...(family.notUsable || []), ...(family.notRead || [])]);
       return `${drawn}, ${kept} ${counted} The kit has no file of it, so its license is unknown${waiting ? ": try again later" : ""}.`;
     }
     if (why === "glyphs") return `${drawn}, as ${family.name} has no glyphs for those characters. ${counted}`;
@@ -519,20 +533,34 @@ function describeFamily(family, pageUrl, unreadOf = new Map(), labelled = (url) 
       free: freeMatches({ stacks: family.stacks.map(parseStack), category, stack: true }),
     };
   }
-  // The addresses of the files the browser did not get, and of those
-  // easyfontkit did not read, by their labels, for a family of which no file
-  // was read: where the site serves it from.
+  // The addresses of the files the browser did not get, of those that came
+  // and were not usable font files, and of those easyfontkit did not read,
+  // by their labels, for a family of which no file was read: where the site
+  // serves it from.
   const notLoaded = unloaded(family) ? [...(family.notLoaded || [])] : [];
+  const notUsable = unloaded(family) ? [...(family.notUsable || [])] : [];
   const notRead = unloaded(family) ? [...(family.notRead || [])] : [];
   const urls = family.files.flatMap((file) => file.urls);
-  const firstUrl = urls.find((url) => !url.startsWith("data:")) || urls[0] || notLoaded[0] || notRead[0] || "";
+  const firstUrl = urls.find((url) => !url.startsWith("data:")) || urls[0] || notLoaded[0] || notUsable[0] || notRead[0] || "";
   const unreadWhy = notRead.length ? UNREAD[unreadOf.get(notRead[0]).why][0] : "";
   const source = firstUrl ? sourceOf(firstUrl, pageUrl) : "unknown";
   const listed = [family.name, ...cssNames].map(lookup).find(Boolean) || null;
   const told = family.files.length ? telling(family.files).font : {};
   const license = family.files.length
     ? licenseOf(told, { source, listed })
-    : { status: "unknown", name: "", url: "", maker: "", basis: notLoaded.length ? "its file did not load while the page was read, so nothing in it could be read" : notRead.length ? `its file was not read, as ${unreadWhy}` : "its file was not caught, so it could not be read" };
+    : {
+        status: "unknown",
+        name: "",
+        url: "",
+        maker: "",
+        basis: notLoaded.length
+          ? "its file did not load while the page was read, so nothing in it could be read"
+          : notUsable.length
+            ? "its file was not a usable font file, so nothing in it could be read"
+            : notRead.length
+              ? `its file was not read, as ${unreadWhy}`
+              : "its file was not caught, so it could not be read",
+      };
   const reg = family.files.length ? regular(family.files).font : null;
   const category = categoryOf(reg, family.stacks, family.roles, listed);
   const metrics = reg ? { xHeight: reg.xHeight, capHeight: reg.capHeight, lowercaseWidth: reg.lowercaseWidth } : null;
@@ -558,6 +586,7 @@ function describeFamily(family, pageUrl, unreadOf = new Map(), labelled = (url) 
     system: false,
     missing: Boolean(family.missing),
     ...(notLoaded.length ? { notLoaded: notLoaded.map(labelled) } : {}),
+    ...(notUsable.length ? { notUsable: notUsable.map(labelled) } : {}),
     ...(notRead.length ? { notRead: notRead.map((url) => unreadOf.get(url).label) } : {}),
     cssNames,
     roles: family.roles,
@@ -575,13 +604,13 @@ function describeFamily(family, pageUrl, unreadOf = new Map(), labelled = (url) 
     listed: listed ? { id: listed.id, family: listed.family, from: listed.type === "g" ? "Google Fonts" : "Fontsource", license: listed.license } : null,
     metrics,
     files,
-    // With no file to measure, a family whose files did not load or were
-    // not read is matched as a font of the visitor's own is, by the stacks
-    // that ask for it.
+    // With no file to measure, a family whose files did not load, were not
+    // usable or were not read is matched as a font of the visitor's own is,
+    // by the stacks that ask for it.
     free:
       license.status === "open"
         ? []
-        : notLoaded.length || notRead.length
+        : notLoaded.length || notUsable.length || notRead.length
           ? freeMatches({ stacks: family.stacks.map(parseStack), category, stack: true })
           : freeMatches({ names: [family.name, ...cssNames], category, metrics, slab: /slab/i.test(family.name) || Boolean(reg && reg.panose[1] === 6) }),
   };

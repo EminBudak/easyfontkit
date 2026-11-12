@@ -2013,9 +2013,24 @@ test("a font file whose server sends no bytes, or one cut short, in its director
     assert.doesNotMatch(css, /@font-face \{/);
     assert.match(css, /^\/\* Fonts of 127\.0\.0\.1, read from [^\n]+\n {3}No font file of the page's is in the kit, so no @font-face rule follows\./);
     assert.doesNotMatch(css, /has a @font-face rule below/);
-    assert.ok(fs.readFileSync(path.join(dir, "FONTS.md"), "utf8").includes("\nfonts.css sets a variable per role. No font file of the page's is in the kit, so it declares none:\n"));
+    const md = fs.readFileSync(path.join(dir, "FONTS.md"), "utf8");
+    assert.ok(md.includes("\nfonts.css sets a variable per role. No font file of the page's is in the kit, so it declares none:\n"));
     assert.doesNotMatch(kit.notes.join("\n"), /try again later|offset|out of range|loaded too late/);
     assert.equal(kit.notes.length, 6, kit.notes.join("\n"));
+    // Each file came, so its family's note, its license and fonts.json say
+    // that it was not a usable font file, not that it did not load.
+    for (const [name, file] of [
+      ["Empty Font", "empty.ttf"],
+      ["Cut Font", "cut.ttf"],
+      ["Almost Font", "almost.ttf"],
+    ]) {
+      const family = kit.families.find((one) => one.name === name);
+      assert.deepEqual([family.notUsable, "notLoaded" in family, family.license.basis], [[`${origin}/${file}`], false, "its file was not a usable font file, so nothing in it could be read"], name);
+      assert.ok(md.includes(`\n- Files: none read, as ${origin}/${file} was not a usable font file\n`), md);
+      assert.ok(kit.notes.some((note) => note.includes(`, because ${name}'s file ${origin}/${file} was not a usable font file. That text is counted as ${name}, the font the site asks for.`)), kit.notes.join("\n"));
+    }
+    assert.ok(md.includes("\n- License: Unknown. Its file was not a usable font file, so nothing in it could be read.\n"), md);
+    assert.doesNotMatch(md, /did not load/);
   } finally {
     server.close();
     fs.rmSync(parent, { recursive: true, force: true });

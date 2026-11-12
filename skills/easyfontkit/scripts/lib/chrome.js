@@ -870,6 +870,9 @@ function connect(input, output) {
     const own = new Map();
     listeners.set(sessionId, own);
     let ended = false;
+    let crashed = null;
+    let onCrash;
+    const crashing = new Promise((resolve) => (onCrash = resolve));
     return {
       id: sessionId,
       // A call that gets no answer in its time says so (timedOut), and
@@ -893,6 +896,7 @@ function connect(input, output) {
       // as the browser's when the browser does not answer either.
       send(method, params = {}, timeoutMs = 30_000) {
         if (lost) return Promise.reject(lost);
+        if (crashed) return Promise.reject(crashed);
         if (ended) return Promise.reject(closedPipe());
         return new Promise((resolve, reject) => {
           const id = ++nextId;
@@ -923,6 +927,26 @@ function connect(input, output) {
       on(method, listener) {
         own.set(method, [...(own.get(method) || []), listener]);
       },
+      // A tab whose page crashed, as the system ends a page's process when
+      // the machine, or a job held to a memory limit, runs out of memory:
+      // its calls still waiting fail with err at once (crashed), and so does
+      // every call after it, as none of them can be answered, where each
+      // would wait out its time. crashing settles with err then.
+      crash(err) {
+        if (crashed || !sessionId) return;
+        crashed = err;
+        for (const [id, waiter] of pending) {
+          if (waiter.sessionId !== sessionId) continue;
+          pending.delete(id);
+          clearTimeout(waiter.timer);
+          waiter.reject(err);
+        }
+        onCrash(err);
+      },
+      get crashed() {
+        return crashed;
+      },
+      crashing,
       // A tab's session is let go of, and its calls still waiting fail
       // (closed); the browser's own closes the pipe.
       close() {
@@ -975,6 +999,13 @@ async function openPage({ pipe, name }, { width, height }) {
     const { sessionId } = await pipe.send("Target.attachToTarget", { targetId, flatten: true }, left());
     cdp = pipe.session(sessionId);
     await cdp.send("Page.enable", {}, left());
+    // A page that crashes ends the run at once (crash), as no call to it
+    // gets an answer. A browser that does not take the call goes on
+    // without, as before.
+    cdp.on("Inspector.targetCrashed", () => cdp.crash(Object.assign(new Error("The browser's page crashed."), { crashed: true })));
+    await cdp.send("Inspector.enable", {}, left()).catch((err) => {
+      if (err.timedOut || err.closed) throw err;
+    });
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: GUARD, worldName: GUARD_WORLD }, left());
     // The frames of other sites, each with the guard: cdp.frames holds their
     // sessions, and cdp.onFrame(watch) tells watch of each, those attached
@@ -1030,8 +1061,9 @@ async function navigate(cdp, url) {
   if (errorText) throw Object.assign(new Error(`Could not open ${url}: ${errorText}`), { errorText });
   let timer;
   const late = new Promise((resolve) => (timer = setTimeout(resolve, Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))));
-  await Promise.race([loaded, late]);
+  await Promise.race([loaded, late, cdp.crashing || late]);
   clearTimeout(timer);
+  if (cdp.crashed) throw cdp.crashed;
   const now = await currentAddress(cdp);
   return /^https?:/i.test(now) ? now : url;
 }

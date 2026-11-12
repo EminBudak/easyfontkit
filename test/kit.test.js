@@ -2000,6 +2000,67 @@ test("a font the page gives as a data: address is read from the browser's reques
   }
 });
 
+test("a page whose process crashes while it is read, as the system ends one when the machine or a job held to a memory limit runs out of memory, ends the run at once with that, and the earlier kit stays, where the run waited for the page and then said it stopped answering", { skip: noBrowser || (process.platform !== "linux" && "a browser's processes are told on Linux only") }, async () => {
+  // The renderers of the browser this process started: they descend from
+  // it, and Chrome names their kind on their command line.
+  const renderers = () => {
+    const parentOf = new Map();
+    for (const name of fs.readdirSync("/proc").filter((one) => /^\d+$/.test(one))) {
+      try {
+        const stat = fs.readFileSync(`/proc/${name}/stat`, "utf8");
+        parentOf.set(Number(name), Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]));
+      } catch {
+        // Gone.
+      }
+    }
+    const mine = (pid) => {
+      for (let at = pid, i = 0; at > 1 && i < 50; at = parentOf.get(at), i++) if (at === process.pid) return true;
+      return false;
+    };
+    return [...parentOf.keys()].filter((pid) => {
+      try {
+        return mine(pid) && fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes("--type=renderer");
+      } catch {
+        return false;
+      }
+    });
+  };
+  let killed = 0;
+  const server = http.createServer((req, res) => {
+    if (req.url === "/crash") {
+      for (const pid of renderers()) {
+        try {
+          process.kill(pid, "SIGKILL");
+          killed++;
+        } catch {
+          // Gone already.
+        }
+      }
+      return void res.writeHead(204).end();
+    }
+    res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><html><head><title>Crash</title></head><body><h1>A heading</h1><p>Body text that is read once the page has loaded.</p><script>addEventListener("load", () => fetch("/crash"))</script></body></html>`);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = normalizeUrl(`http://127.0.0.1:${server.address().port}/`);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-crash-"));
+  const dir = path.join(parent, "kit");
+  earlierKitIn(dir);
+  const before = snapshot(dir);
+  try {
+    const started = Date.now();
+    await assert.rejects(makeFontKit(url, { dir, timeLimit: 120_000 }), {
+      message: `The browser's page crashed while ${url} was read, so no kit was made. A page crashes this way when the machine, or a job held to a memory limit, has no memory left for it, as with a page that loads very large files.`,
+    });
+    assert.ok(killed > 0, "a renderer was killed");
+    assert.ok(Date.now() - started < 30_000, `the run took ${Date.now() - started} ms`);
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a run stopped while it reads the page, by a stop or by Ctrl-\\ sent to its process group, leaves the earlier kit as it was, ends its browser with its crash handler, leaves no crash report and ends by the signal", { skip: noBrowser || noSignals }, async () => {
   const { server, origin } = await serve({
     "/": { body: `<!doctype html><html><head><title>Stalls</title><link rel="stylesheet" href="/held.css"></head><body><h1>Stalls</h1><p>A style sheet that never comes.</p></body></html>` },

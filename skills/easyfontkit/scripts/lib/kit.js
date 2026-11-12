@@ -1113,6 +1113,15 @@ function stalledPage(asked, { pageUrl, first, stalled: { sheet } }) {
   return `${where(asked, pageUrl, first)} ${what}, so no kit was made. Try again later, or check the page in a normal browser.`;
 }
 
+// A page whose process crashed while it was read, as the system ends one
+// when the machine, or a job held to a memory limit, runs out of memory,
+// which a page that loads very large files can bring about. Another try
+// helps only once more memory is free, which the run cannot tell, so the
+// message does not offer one.
+function crashedPage(asked) {
+  return `The browser's page crashed while ${asked} was read, so no kit was made. A page crashes this way when the machine, or a job held to a memory limit, has no memory left for it, as with a page that loads very large files.`;
+}
+
 // The runs going on in this process, for a stop signal, and whether one has
 // come: a run waiting for another to let go of a folder's lock gives up at
 // once when it has, so the folder is left as it was.
@@ -1140,10 +1149,12 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       // A browser that stopped answering, or quit, while the page was read
       // ends the run whatever the reading made of it: the server or the page
       // that seemed not to answer was the browser, and a role or a file read
-      // after it stopped is missing.
+      // after it stopped is missing. So does a page that crashed.
       if (cdp.lost) throw cdp.lost;
+      if (cdp.crashed) throw cdp.crashed;
     } catch (err) {
-      throw stoppedAnswering(chrome.name, (cdp && cdp.lost) || err);
+      const why = (cdp && (cdp.lost || cdp.crashed)) || err;
+      throw why.crashed ? new Error(crashedPage(url)) : stoppedAnswering(chrome.name, why);
     } finally {
       if (cdp) cdp.close();
       await chrome.close();

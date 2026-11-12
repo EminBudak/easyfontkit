@@ -1197,7 +1197,9 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       writeMarkdown(kit, kit.families, part);
       writeCss(kit, kit.families, part);
     });
-    return { dir: target, kit };
+    // With how many of the page's font files were not read, which the notes
+    // name.
+    return { dir: target, kit, unread: scan.unread.length };
   } finally {
     runs.delete(run);
   }

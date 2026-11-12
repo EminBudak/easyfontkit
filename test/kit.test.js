@@ -1366,6 +1366,30 @@ test("the CLI explains itself and refuses a missing address", () => {
   assert.match(slow.stderr, /--timeout takes 30 to 600 seconds/);
 });
 
+test("the summary's Files line says how many of the page's font files were not read when none is in the kit, which the notes name, where it said none was loaded", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-summary-"));
+  try {
+    // The kit of a page whose one font file is larger than a run reads of
+    // one, given by a stand-in for makeFontKit, loaded before the CLI.
+    const kit = {
+      version: 1,
+      url: "https://acme.example/",
+      roles: { heading: { key: "acme", family: "Acme Display", weights: [700] } },
+      families: [{ key: "acme", name: "Acme Display", system: false, license: { status: "unknown" }, free: [{ family: "Inter" }], files: [] }],
+      notes: ["The font file https://acme.example/acme.ttf was not read, as it is larger than the 64 MB easyfontkit reads of one font file."],
+    };
+    const stub = path.join(parent, "stub.js");
+    const lib = path.resolve(__dirname, "../skills/easyfontkit/scripts/lib/kit.js");
+    fs.writeFileSync(stub, `require.cache[${JSON.stringify(lib)}] = { id: ${JSON.stringify(lib)}, filename: ${JSON.stringify(lib)}, loaded: true, children: [], exports: { stopRuns: () => [], makeFontKit: async () => ({ dir: "kit", kit: ${JSON.stringify(kit)}, unread: 1 }) } };\n`);
+    const cli = spawnSync(process.execPath, ["-r", stub, CLI, "acme.example"], { encoding: "utf8" });
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.match(cli.stdout, /^ {2}Files {5}1 not read \(see the notes\)$/m);
+    assert.match(cli.stdout, /^ {2}Note {6}The font file https:\/\/acme\.example\/acme\.ttf was not read/m);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a page's fonts: each role's face, every file saved as served, each license, the free matches", { skip: noBrowser }, async () => {
   const { server, origin } = await serve(PAGE);
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-out-"));

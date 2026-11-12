@@ -58,7 +58,10 @@ function parse(argv) {
 const ROLE_LABELS = { heading: "Headings", body: "Body", button: "Buttons", code: "Code" };
 const STATUS = { open: "open", commercial: "commercial", unknown: "license unknown", system: "system font" };
 
-function summary({ dir, kit }) {
+// unread: how many of the page's font files easyfontkit did not read, which
+// the notes name. With no file in the kit, the Files line says how many
+// they were, as the page did load them.
+function summary({ dir, kit, unread = 0 }) {
   const byKey = new Map(kit.families.map((family) => [family.key, family]));
   const host = new URL(kit.url).hostname.replace(/^www\./, "");
   const lines = [`Saved the fonts of ${host} to ${dir}`, ""];
@@ -70,7 +73,7 @@ function summary({ dir, kit }) {
   if (!Object.keys(kit.roles).length) lines.push("  No text found in headings, body text, buttons or code");
   const saved = kit.families.flatMap((family) => family.files).filter((file) => file.file);
   const all = kit.families.flatMap((family) => family.files);
-  lines.push(`  Files     ${saved.length ? `${saved.length} font file${saved.length === 1 ? "" : "s"} in ${dir}/files` : all.length ? `${all.length} read, none saved` : "none loaded"}`);
+  lines.push(`  Files     ${saved.length ? `${saved.length} font file${saved.length === 1 ? "" : "s"} in ${dir}/files` : all.length ? `${all.length} read, none saved` : unread ? `${unread} not read (see the notes)` : "none loaded"}`);
   for (const note of kit.notes) lines.push(`  Note      ${note}`);
   lines.push("", `Read ${dir}/FONTS.md for the licenses and the free matches.`);
   return lines.join("\n");

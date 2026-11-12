@@ -44,10 +44,16 @@ test("a quoted address of megabytes in a src, as a font given as a data: address
   }
 });
 
-test("a style sheet of many comments or @font-face blocks that never close is read in a moment, where the run took seconds for 320 KB of them and would take hours for the 64 MB it reads of style sheets, during which a stop signal waited", () => {
+test("a style sheet of many comments or @font-face blocks that never close, or a src of many url( openings that never close, is read in a moment, where the run took seconds for 320 KB of them and would take hours for the 64 MB it reads of style sheets, during which a stop signal waited", () => {
   const rule = "@font-face { font-family: Acme; src: url(/acme.woff2) } /* a comment */ ";
-  for (const opening of ["/* a", "@font-face{"]) {
-    const text = rule + opening.repeat(Math.ceil(320_000 / opening.length));
+  // The last two inside one block, whose src they make.
+  for (const [opening, start, end] of [
+    ["/* a", "", ""],
+    ["@font-face{", "", ""],
+    ["url(", "@font-face { font-family: Slow; src: ", " }"],
+    ['url("x', "@font-face { font-family: Slow; src: ", " }"],
+  ]) {
+    const text = rule + start + opening.repeat(Math.ceil(320_000 / opening.length)) + end;
     const started = Date.now();
     const rules = fontFaceRules(text, "https://acme.example/");
     const took = Date.now() - started;

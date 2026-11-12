@@ -72,15 +72,16 @@ const handedOut = (url) => /^[a-z][a-z0-9+.-]*:/i.test(String(url || "")) && !/^
 // the browser acts on it, on every system, and the address is kept for the
 // kit's notes. A frame of another site, which runs apart from the page, gets
 // it as it is attached to (guardFrames). The page's own scripts cannot reach
-// this world. The guard never sees a frame's first address, a frame the page
-// makes, or a frame of another site, that the page sends to such an address
-// by its script, a frame at about:blank, or made with no address, that the
-// page puts a script in, as its first document never gets the guard, the
-// move of a frame with no origin of its own, as one at a data: address or a
-// sandboxed one, that moves itself, as the browser fires no navigate event
-// in such a document, or a redirect: those reach the browser, and no
-// DevTools call cancels them. On Linux the browser's stand-ins take those
-// (see launch).
+// this world, so the page's rules and the text of its nodes are read there
+// too (see scan.js). The guard never sees a frame's first address, a frame
+// the page makes, or a frame of another site, that the page sends to such an
+// address by its script, a frame at about:blank, or made with no address,
+// that the page puts a script in, as its first document never gets the
+// guard, the move of a frame with no origin of its own, as one at a data:
+// address or a sandboxed one, that moves itself, as the browser fires no
+// navigate event in such a document, or a redirect: those reach the browser,
+// and no DevTools call cancels them. On Linux the browser's stand-ins take
+// those (see launch).
 const GUARD_WORLD = "easyfontkit-guard";
 const GUARD = `(() => {
   if (typeof navigation === "undefined") return;

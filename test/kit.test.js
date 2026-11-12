@@ -3268,6 +3268,19 @@ test("an address a page tried in more than one way is noted by the way that went
   assert.deepEqual(triedNotes(many(5)).slice(3), ["It tried 2 more addresses that are not web addresses as well."]);
 });
 
+test("of the addresses that are not web addresses a page tried, those the system may have opened, as in a browser installed as a snap or a Flatpak, are named before those that were not opened, so a note says the system may have opened one, where the first three tried were named and one that went further was counted with the rest", () => {
+  const { STAND_INS } = require("../skills/easyfontkit/scripts/lib/chrome");
+  const notOpened = (address) => `The page tried to open ${address}, which is not a web address: it was not opened.`;
+  const mayHave = (address) => `The page tried to open ${address}, which is not a web address, in a way easyfontkit may not stop in a browser installed as a snap or a Flatpak, so the system may have opened it with a program of its own, such as the mail program.`;
+  const cancelled = ["a", "b", "c"].map((name) => ({ url: `mailto:${name}@example.invalid`, how: "cancelled" }));
+  const started = { url: "mailto:d@example.invalid", how: "started" };
+  const window = { url: "mailto:e@example.invalid", how: "window" };
+  assert.deepEqual(triedNotes([...cancelled, window, started], { sandboxed: true }), [mayHave(started.url), notOpened(cancelled[0].url), notOpened(cancelled[1].url), "It tried 2 more addresses that are not web addresses as well."]);
+  // Where every such address found the stand-ins, as on Linux in a browser
+  // outside a sandbox, the first three tried are named.
+  if (STAND_INS) assert.deepEqual(triedNotes([...cancelled, started]), [...cancelled.map(({ url }) => notOpened(url)), "It tried 1 more address that is not a web address as well."]);
+});
+
 test("the browser listens on no port, so no other program on the machine can read or drive it, and is driven over its pipe", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easyfontkit-port-"));
   const saved = process.env.TMPDIR;

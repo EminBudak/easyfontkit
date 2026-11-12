@@ -1070,18 +1070,20 @@ function notOpened(asked, { failed: { url, error, noAnswer }, first }, { sandbox
 }
 
 // The notes on the addresses that are not web addresses the page tried to
-// open, the first three of them, each once, and how many more there were.
-// One the guard cancelled, or a window the page asked for, was not opened
-// on any system. On Linux the rest, as the first address of a frame, found
-// a session bus where nothing listens and the browser's stand-ins, unless
-// the browser runs in a sandbox of its own (sandboxed), as one installed as
-// a snap or a Flatpak, which may not take them; on macOS and Windows the
+// open, three of them, each once, and how many more there were. One the
+// guard cancelled, or a window the page asked for, was not opened on any
+// system. On Linux the rest, as the first address of a frame, found a
+// session bus where nothing listens and the browser's stand-ins, unless the
+// browser runs in a sandbox of its own (sandboxed), as one installed as a
+// snap or a Flatpak, which may not take them; on macOS and Windows the
 // browser hands those to the system, which can open them with a program of
-// its own. An address tried in more than one way is noted by the way that
-// went furthest: one the browser began to go to (started), as a frame's
-// first address, reached it, also when the guard cancelled a move of the
-// page's to the same address. The rest are counted as at least so many
-// when the page tried more addresses than a run keeps (more).
+// its own (opened), and they are named before the others, so a note says
+// that the system may have opened one. Else the first three are named. An
+// address tried in more than one way is noted by the way that went
+// furthest: one the browser began to go to (started), as a frame's first
+// address, reached it, also when the guard cancelled a move of the page's
+// to the same address. The rest are counted as at least so many when the
+// page tried more addresses than a run keeps (more).
 function triedNotes(tried = [], { sandboxed = false, more = false } = {}) {
   const rank = { asked: 0, cancelled: 1, window: 2, started: 3 };
   const byAddress = new Map();
@@ -1089,9 +1091,10 @@ function triedNotes(tried = [], { sandboxed = false, more = false } = {}) {
     const known = byAddress.get(one.url);
     if (!known || rank[one.how] > rank[known.how]) byAddress.set(one.url, one);
   }
-  const list = [...byAddress.values()];
+  const opened = ({ how }) => (!STAND_INS || sandboxed) && how !== "cancelled" && how !== "window";
+  const list = [...byAddress.values()].sort((a, b) => opened(b) - opened(a));
   const notes = list.slice(0, 3).map(({ url, how }) => {
-    if ((STAND_INS && !sandboxed) || how === "cancelled" || how === "window") return `The page tried to open ${url}, which is not a web address: it was not opened.`;
+    if (!opened({ how })) return `The page tried to open ${url}, which is not a web address: it was not opened.`;
     if (sandboxed) return `The page tried to open ${url}, which is not a web address, in a way easyfontkit may not stop in a browser installed as a snap or a Flatpak, so the system may have opened it with a program of its own, such as the mail program.`;
     return `The page tried to open ${url}, which is not a web address, in a way easyfontkit stops only on Linux, so the system may have opened it with a program of its own, such as the mail program.`;
   });

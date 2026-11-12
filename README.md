@@ -78,20 +78,20 @@ Any other font is measured: its x-height, cap height and the average width of it
 easyfontkit ships as an [Agent Skill](https://agentskills.io). Install it once and your agent runs it by itself when you ask for something in a site's typography:
 
 ```bash
-npx skills add EminBudak/easyfontkit
+npx skills add MakersMCP/easyfontkit
 ```
 
 That covers Claude Code, Codex, Cursor and the other agents the [`skills`](https://github.com/vercel-labs/skills) CLI supports. In Claude Code you can add it as a plugin instead:
 
 ```
-/plugin marketplace add EminBudak/easyfontkit
+/plugin marketplace add MakersMCP/easyfontkit
 /plugin install easyfontkit@easyfontkit
 ```
 
 In GitHub Copilot CLI, add the repo as a plugin marketplace and install from it:
 
 ```bash
-copilot plugin marketplace add EminBudak/easyfontkit
+copilot plugin marketplace add MakersMCP/easyfontkit
 copilot plugin install easyfontkit@easyfontkit
 ```
 

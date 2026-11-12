@@ -4,12 +4,12 @@
   "description": "Find the fonts a website really uses, save the font files with their licenses, and get the closest free match for the paid ones.",
   "license": "MIT",
   "author": "Emin Budak",
-  "homepage": "https://github.com/EminBudak/easyfontkit#readme",
+  "homepage": "https://github.com/MakersMCP/easyfontkit#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/EminBudak/easyfontkit.git"
+    "url": "git+https://github.com/MakersMCP/easyfontkit.git"
   },
-  "bugs": "https://github.com/EminBudak/easyfontkit/issues",
+  "bugs": "https://github.com/MakersMCP/easyfontkit/issues",
   "bin": {
     "easyfontkit": "skills/easyfontkit/scripts/easyfontkit.js"
   },

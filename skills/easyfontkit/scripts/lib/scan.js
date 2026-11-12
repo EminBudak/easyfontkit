@@ -489,12 +489,31 @@ function srcUrls(src, base) {
     .filter(Boolean);
 }
 
-// The @font-face rules in a style sheet's text.
+// The @font-face rules in a style sheet's text. Its comments are cut and
+// the rules' blocks found by scans that stop at the first comment or block
+// that does not close, as nothing closes after it, so a sheet of many
+// openings that never close is read in a moment, where a regular expression
+// tried each of them to the end of the sheet, for hours on one of 64 MB.
 function fontFaceRules(text, base) {
   const rules = [];
-  const clean = String(text || "").replace(/\/\*[\s\S]*?\*\//g, "");
-  for (const [, body] of clean.matchAll(/@font-face\s*\{([^}]*)\}/gi)) {
-    const d = declarations(body);
+  const all = String(text || "");
+  let clean = "";
+  for (let at = 0; ; ) {
+    const open = all.indexOf("/*", at);
+    const close = open === -1 ? -1 : all.indexOf("*/", open + 2);
+    if (close === -1) {
+      clean += all.slice(at);
+      break;
+    }
+    clean += all.slice(at, open);
+    at = close + 2;
+  }
+  const start = /@font-face\s*\{/gi;
+  for (let found = start.exec(clean); found; found = start.exec(clean)) {
+    const end = clean.indexOf("}", start.lastIndex);
+    if (end === -1) break;
+    const d = declarations(clean.slice(start.lastIndex, end));
+    start.lastIndex = end + 1;
     const family = unquote(d["font-family"]);
     const urls = srcUrls(d.src, base);
     if (family && urls.length) rules.push({ family, weight: d["font-weight"] || "400", style: d["font-style"] || "normal", unicodeRange: d["unicode-range"] || "", urls });

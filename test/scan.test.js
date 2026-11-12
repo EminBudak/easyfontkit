@@ -44,6 +44,21 @@ test("a quoted address of megabytes in a src, as a font given as a data: address
   }
 });
 
+test("a style sheet of many comments or @font-face blocks that never close is read in a moment, where the run took seconds for 320 KB of them and would take hours for the 64 MB it reads of style sheets, during which a stop signal waited", () => {
+  const rule = "@font-face { font-family: Acme; src: url(/acme.woff2) } /* a comment */ ";
+  for (const opening of ["/* a", "@font-face{"]) {
+    const text = rule + opening.repeat(Math.ceil(320_000 / opening.length));
+    const started = Date.now();
+    const rules = fontFaceRules(text, "https://acme.example/");
+    const took = Date.now() - started;
+    assert.deepEqual(
+      rules.map((one) => [one.family, one.urls]),
+      [["Acme", ["https://acme.example/acme.woff2"]]],
+    );
+    assert.ok(took < 1_000, `${opening}: ${took} ms`);
+  }
+});
+
 test("data URLs decode to their bytes", () => {
   assert.equal(decodeDataUrl("data:font/woff2;base64,d09GMg==").toString("latin1"), "wOF2");
   assert.equal(decodeDataUrl("data:text/plain,a%20b").toString("latin1"), "a b");

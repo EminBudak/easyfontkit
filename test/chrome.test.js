@@ -873,10 +873,12 @@ test("a tab let go of fails the calls still waiting on it at once and is detache
   assert.equal(await pipe.send("Browser.getVersion").catch((err) => err), gone);
 });
 
-// A page whose text is all drawn with Arial, as the browser tells it.
+// A page whose text is all drawn with Arial, as the browser tells it, with
+// a world of easyfontkit's own to read it in.
 const ARIAL = { fonts: [{ familyName: "Arial", postScriptName: "ArialMT", isCustomFont: false, glyphCount: 12 }] };
 const PAGE = {
   "Page.getFrameTree": { frameTree: { frame: { id: "1" } } },
+  "Page.createIsolatedWorld": { executionContextId: 1 },
   "DOM.getDocument": { root: { nodeId: 1 } },
   "DOM.querySelectorAll": { nodeIds: [2] },
   "CSS.getPlatformFontsForNode": ARIAL,

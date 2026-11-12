@@ -8,7 +8,7 @@
 // to tie a CSS family to its files when a file hides its own names.
 
 const crypto = require("crypto");
-const { navigate, currentAddress, triedSoFar, handedOut } = require("./chrome");
+const { navigate, currentAddress, triedSoFar, handedOut, GUARD_WORLD } = require("./chrome");
 const { describeFont } = require("./sfnt");
 const { timeLeft, sleep } = require("./time");
 const { FONT_BYTES, FILE_BYTES, CSS_BYTES, UNREAD, inMB } = require("./limits");
@@ -256,9 +256,20 @@ function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
   return { fonts, inline, asked, refused, statuses, faces, sheets, page, due, tried };
 }
 
-async function evaluate(cdp, expression, timeoutMs = 10_000) {
-  const { result = {} } = await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, timeoutMs).catch(() => ({}));
+async function evaluate(cdp, expression, timeoutMs = 10_000, contextId = 0) {
+  const { result = {} } = await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, ...(contextId ? { contextId } : {}) }, timeoutMs).catch(() => ({}));
   return result.value;
+}
+
+// The id of a world of easyfontkit's own in the page the tab shows now, the
+// one the guard runs in (see chrome.js), or 0 when there is none to be had,
+// as between two documents. The page's own scripts cannot reach it: what
+// runs there has JavaScript's own String, Object and Array, which a page
+// can replace in its own world, so a read that keeps only so much of what
+// the page holds, as of its rules or of a node's text, keeps to that there.
+async function ownWorld(cdp, frameId) {
+  const { executionContextId = 0 } = await cdp.send("Page.createIsolatedWorld", { frameId, worldName: GUARD_WORLD }, 10_000).catch(() => ({}));
+  return executionContextId;
 }
 
 const fontsReady = (cdp) => evaluate(cdp, "Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 5000))]).then(() => true)");
@@ -314,9 +325,10 @@ async function walk(cdp) {
 // text node holds. Read for a node drawn in part with a font of the
 // visitor's own, as one a web font has no glyphs for: { text, length },
 // the text cut to 20000 characters and how long it was. The page hands
-// back the text alone, however many children the node has. A page that
-// holds the call up, as its own scripts can, is not asked again in this
-// run: its text is not read, and the note on it is worded as before.
+// back the text alone, however many children the node has, read in
+// easyfontkit's own world (world), or no text when it has none. A page
+// that holds the call up, as its own scripts can, is not asked again in
+// this run: its text is not read, and the note on it is worded as before.
 const TEXT_KEPT = 20_000;
 const TEXT_WAIT = 5_000;
 const textHeld = new WeakSet();
@@ -331,14 +343,14 @@ const OWN_TEXT = `function (kept) {
   text = text.replace(/\\s+/g, " ").trim();
   return [text.slice(0, kept), text.length];
 }`;
-async function textOf(cdp, nodeId) {
+async function textOf(cdp, nodeId, world) {
   const none = { text: "", length: 0 };
-  if (textHeld.has(cdp)) return none;
+  if (textHeld.has(cdp) || !world) return none;
   const held = (err) => {
     if (err && err.timedOut) textHeld.add(cdp);
     return {};
   };
-  const { object } = await cdp.send("DOM.resolveNode", { nodeId }, TEXT_WAIT).catch(held);
+  const { object } = await cdp.send("DOM.resolveNode", { nodeId, executionContextId: world }, TEXT_WAIT).catch(held);
   if (!object || !object.objectId) return none;
   const { result = {} } = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: OWN_TEXT, arguments: [{ value: TEXT_KEPT }], returnByValue: true }, TEXT_WAIT).catch(held);
   await cdp.send("Runtime.releaseObject", { objectId: object.objectId }, TEXT_WAIT).catch(held);
@@ -351,8 +363,9 @@ async function textOf(cdp, nodeId) {
 // visitor's own also keeps, for each node it drew, the text Chrome counted
 // there and how many of its glyphs the visitor's own fonts drew (nodes).
 // The nodes are read while the run has 15 s left: `cut` says that its time
-// ran out before every node there was to read had been read.
-async function readRole(cdp, rootId, selector) {
+// ran out before every node there was to read had been read. Their text is
+// read in easyfontkit's own world (world).
+async function readRole(cdp, rootId, selector, world) {
   const { nodeIds = [] } = await cdp.send("DOM.querySelectorAll", { nodeId: rootId, selector }).catch(() => ({}));
   const faces = new Map();
   let withText = 0;
@@ -373,7 +386,7 @@ async function readRole(cdp, rootId, selector) {
     const weight = css("font-weight") || "400";
     const italic = /italic|oblique/.test(css("font-style"));
     const system = drawn.filter((font) => !font.isCustomFont).reduce((sum, font) => sum + font.glyphCount, 0);
-    const read = system ? await textOf(cdp, nodeId) : null;
+    const read = system ? await textOf(cdp, nodeId, world) : null;
     for (const font of drawn) {
       const key = `${font.isCustomFont ? "web" : "system"}\u0000${font.familyName}\u0000${font.postScriptName || ""}`;
       const face = faces.get(key) || {
@@ -400,13 +413,16 @@ async function readRole(cdp, rootId, selector) {
 // The faces of each role, and the roles the run's time ran out before any
 // text of was read (cut): the time a slow browser or a font that never
 // comes took, which a role with no text does not tell from one never read.
-async function readRoles(cdp) {
+// frameId is the tab's own frame, in whose page easyfontkit's own world
+// reads the text of nodes.
+async function readRoles(cdp, frameId) {
   const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
+  const world = await ownWorld(cdp, frameId);
   const roles = {};
   const cut = [];
   for (const [role, selectors] of ROLES) {
     for (const selector of selectors) {
-      const read = await readRole(cdp, root.nodeId, selector);
+      const read = await readRole(cdp, root.nodeId, selector, world);
       if (read.faces.length) {
         roles[role] = read.faces;
         break;
@@ -489,10 +505,11 @@ function fontFaceRules(text, base) {
 // The same rules as the page's own CSS object model has them: style sheets
 // a script builds rule by rule (CSS-in-JS) have no text to read, and other
 // sites' sheets have a text but no readable rules, so both are read. Run in
-// the page, with the most characters it gives back, past which it stops,
-// and dataPrint. A data: address in a src stands there as its print: the
-// browser's request for such a font, and its report of the face it loaded,
-// tell of it (record), and the address itself can be megabytes long.
+// easyfontkit's own world in the page (ownWorld), with the most characters
+// it gives back, past which it stops, and dataPrint. A data: address in a
+// src stands there as its print: the browser's request for such a font, and
+// its report of the face it loaded, tell of it (record), and the address
+// itself can be megabytes long.
 function cssomRules(most, print) {
   const out = [];
   let size = 0;
@@ -535,8 +552,9 @@ const keyed = (rule, byPrint = new Map()) => ({ ...rule, urls: rule.urls.map((ur
 // sheet past CSS_BYTES are. A sheet or a rule that cannot be read is passed
 // over. A data: address the CSS object model gives by its print is the
 // font the browser asked for with that print, by its key (inline, from
-// record).
-async function readRules(cdp, sheets, pageUrl, inline = new Map()) {
+// record). The CSS object model is read in easyfontkit's own world in the
+// page of the tab's own frame (frameId), and not at all when it has none.
+async function readRules(cdp, sheets, pageUrl, inline = new Map(), frameId = "") {
   const rules = [];
   let read = 0;
   for (const [styleSheetId, header] of sheets) {
@@ -553,7 +571,8 @@ async function readRules(cdp, sheets, pageUrl, inline = new Map()) {
     }
   }
   const byPrint = new Map([...inline].map(([key, font]) => [font.print, key]));
-  for (const rule of (await evaluate(cdp, `(${cssomRules})(${CSS_BYTES}, ${dataPrint})`)) || []) {
+  const world = await ownWorld(cdp, frameId);
+  for (const rule of (world && (await evaluate(cdp, `(${cssomRules})(${CSS_BYTES}, ${dataPrint})`, 10_000, world))) || []) {
     try {
       const family = unquote(rule.family);
       const urls = srcUrls(rule.src, rule.base);
@@ -699,7 +718,7 @@ async function scanPage(cdp, url, log = () => {}) {
   await fontsReady(cdp);
   await sleep(500);
   const title = String((await evaluate(cdp, "document.title")) || "").trim();
-  const { roles, cut } = await readRoles(cdp);
+  const { roles, cut } = await readRoles(cdp, recorded.page.frame);
   // With what the guard cancelled in the page the roles were read from.
   const tried = [...recorded.tried, ...(await triedSoFar(cdp))];
   // A script or a meta refresh can have moved the tab on since the load
@@ -715,7 +734,7 @@ async function scanPage(cdp, url, log = () => {}) {
   else if (recorded.page.shown) pageUrl = recorded.page.shown;
   const left = /^about:/i.test(now) ? now : "";
   const loaded = (await evaluate(cdp, "[...document.fonts].filter((f) => f.status === 'loaded').map((f) => ({ family: f.family, weight: f.weight, style: f.style }))")) || [];
-  const rules = await readRules(cdp, recorded.sheets, pageUrl, recorded.inline);
+  const rules = await readRules(cdp, recorded.sheets, pageUrl, recorded.inline, recorded.page.frame);
   const faces = recorded.faces.map((face) => ({
     family: unquote(face.fontFamily),
     weight: face.fontWeight || "",

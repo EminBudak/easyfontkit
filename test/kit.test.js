@@ -2074,6 +2074,59 @@ test("a style sheet a script built and gave new text once the browser had told i
   }
 });
 
+test("a page that replaces String.prototype.replace and slice, Object.values and Array.prototype.push in its own world cannot make the reads of its CSS object model and of a node's text give back what they leave out, as they run in a world of easyfontkit's own", { skip: noBrowser }, async () => {
+  const { scanPage, dataKey } = require("../skills/easyfontkit/scripts/lib/scan");
+  const inter = fixture("inter-latin-400.woff2");
+  const font = `data:font/woff2;base64,${inter.toString("base64")}`;
+  // Body text in Inter, given as a data: address in a sheet a script built,
+  // whose rules only the CSS object model gives, with 63000 characters of
+  // Japanese, which Inter has no glyphs for, so its text is read. Then the
+  // page replaces what those reads use in its own world.
+  const japanese = "日本語のテキストです ".repeat(6000);
+  const { server, origin } = await serve({
+    "/": {
+      body: `<!doctype html><html><head><title>Tamper</title></head><body><h1>A heading</h1><p>Body text ${japanese}</p><script>
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(${JSON.stringify(`@font-face { font-family: Tamper; src: url("${font}") format("woff2") } p { font-family: Tamper, serif }`)});
+        document.adoptedStyleSheets = [sheet];
+        String.prototype.replace = function () { return String(this); };
+        String.prototype.slice = function () { return String(this); };
+        Object.values = () => [];
+        Array.prototype.push = function () { return 0; };
+      </script></body></html>`,
+    },
+  });
+  setTimeLimit(60_000);
+  const chrome = await launch({ width: 1600, height: 900 });
+  let cdp;
+  try {
+    cdp = await openPage(chrome, { width: 1600, height: 900 });
+    // What the reads gave back.
+    const rules = [];
+    const texts = [];
+    const send = cdp.send.bind(cdp);
+    cdp.send = async (method, params, wait) => {
+      const answer = await send(method, params, wait);
+      if (method === "Runtime.evaluate" && params.expression.includes("CSSFontFaceRule")) rules.push(JSON.stringify(answer));
+      if (method === "Runtime.callFunctionOn") texts.push(answer.result && answer.result.value);
+      return answer;
+    };
+    const scan = await scanPage(cdp, `${origin}/`);
+    assert.equal(rules.length, 1);
+    assert.ok(!rules[0].includes(inter.toString("base64").slice(100, 200)), "the data: address stands there by its print");
+    assert.deepEqual(
+      scan.rules.filter((rule) => rule.family === "Tamper").map((rule) => rule.urls),
+      [[dataKey(font)]],
+    );
+    assert.ok(texts.some(([, length]) => length > 60_000), "the text of the body text was read");
+    for (const [text] of texts) assert.ok(text.length <= 20_000, `${text.length} characters came back`);
+  } finally {
+    if (cdp) cdp.close();
+    await chrome.close();
+    server.close();
+  }
+});
+
 test("a page whose process crashes while it is read, as the system ends one when the machine or a job held to a memory limit runs out of memory, ends the run at once with that, and the earlier kit stays, where the run waited for the page and then said it stopped answering", { skip: noBrowser || (process.platform !== "linux" && "a browser's processes are told on Linux only") }, async () => {
   // The renderers of the browser this process started: they descend from
   // it, and Chrome names their kind on their command line.

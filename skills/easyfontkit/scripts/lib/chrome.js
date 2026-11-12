@@ -1091,4 +1091,4 @@ async function currentAddress(cdp) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, connect, openPage, stoppedAnswering, navigate, currentAddress, triedSoFar, handedOut, STAND_INS, HANDLERS };
+module.exports = { findChrome, launch, killBrowsers, connect, openPage, stoppedAnswering, navigate, currentAddress, triedSoFar, handedOut, GUARD_WORLD, STAND_INS, HANDLERS };

@@ -288,8 +288,10 @@ test("the @font-face rules the page's CSS object model gives stand a data: addre
 
 // A tab whose page has style sheets: what the browser tells is given to it
 // by tell(), the text of a sheet is given from `texts` by its id, and a
-// script is run on `page`, the stand-in for the page's own document with
-// the classes of its rules, as the page would run it. asked lists the calls.
+// script run in the world of easyfontkit's own the tab gives, 7, is run on
+// `page`, the stand-in for the page's own document with the classes of its
+// rules, as the page would run it; in another world it gives nothing, as a
+// page's own scripts can make it. asked lists the calls.
 function sheetsTab(page, texts = {}) {
   const listeners = new Map();
   const asked = [];
@@ -303,6 +305,8 @@ function sheetsTab(page, texts = {}) {
     send: async (method, params = {}) => {
       asked.push([method, params.styleSheetId || ""]);
       if (method === "CSS.getStyleSheetText") return { text: texts[params.styleSheetId] || "" };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && params.contextId !== 7) return { result: { value: [] } };
       if (method === "Runtime.evaluate") return { result: { value: new Function("CSSFontFaceRule", "CSSImportRule", "document", "location", `return ${params.expression};`)(CSSFontFaceRule, CSSImportRule, page(CSSFontFaceRule), { href: "https://acme.example/" }) } };
       return {};
     },

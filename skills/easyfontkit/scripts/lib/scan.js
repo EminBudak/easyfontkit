@@ -237,10 +237,24 @@ function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
   // first address of a frame or one a frame's page redirected to, and a
   // window the page asked for (window), which the browser does not open
   // without a click. A frame of another site tells of its own, and of its
-  // frames' redirects, on a session of its own (openPage).
+  // frames' redirects, on a session of its own (openPage). A frame at such
+  // an address tells of it twice, and a page can try one any number of
+  // times, so each address is kept once with each way it went, up to 50
+  // addresses, and triedMore says there were more.
   const tried = [];
+  const triedAt = new Set();
+  const ways = new Set();
+  let triedMore = false;
   const keep = (how) => ({ url }) => {
-    if (handedOut(url) && tried.length < 50) tried.push({ url: String(url).slice(0, 300), how });
+    if (!handedOut(url)) return;
+    const address = String(url).slice(0, 300);
+    if (!triedAt.has(address)) {
+      if (triedAt.size >= 50) return void (triedMore = true);
+      triedAt.add(address);
+    }
+    if (ways.has(`${how}\u0000${address}`)) return;
+    ways.add(`${how}\u0000${address}`);
+    tried.push({ url: address, how });
   };
   const listen = (session) => {
     session.on("Page.frameScheduledNavigation", keep("asked"));
@@ -253,7 +267,21 @@ function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
   };
   listen(cdp);
   if (cdp.onFrame) cdp.onFrame(listen);
-  return { fonts, inline, asked, refused, statuses, faces, sheets, page, due, tried };
+  return {
+    fonts,
+    inline,
+    asked,
+    refused,
+    statuses,
+    faces,
+    sheets,
+    page,
+    due,
+    tried,
+    get triedMore() {
+      return triedMore;
+    },
+  };
 }
 
 async function evaluate(cdp, expression, timeoutMs = 10_000, contextId = 0) {
@@ -702,8 +730,8 @@ async function readFiles(fonts, inline = new Map(), refused = new Map(), statuse
 // moved itself on to that (left), for a page that did not draw, so it could
 // not be scrolled, the style sheet it waited for, if one had not come
 // (stalled), the addresses that are not web addresses the page tried to
-// open (tried), and the roles the run's time ran out before any text of
-// was read (cut).
+// open (tried) and whether it tried more than were kept (triedMore), and
+// the roles the run's time ran out before any text of was read (cut).
 // pageUrl is the address of the page the roles were read from, or the last
 // web address the tab showed when it has moved on to about:blank or to a
 // blob: address, so it is always a web address.
@@ -781,7 +809,7 @@ async function scanPage(cdp, url, log = () => {}) {
   // reach, which is not the site's bot check.
   const challenge = !failed && !files.length && CHALLENGE_TITLE.test(title) ? title : "";
   const answer = { status: recorded.page.status, url: recorded.page.url };
-  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, unread, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked, ...recorded.inline.keys()], labels: new Map([...recorded.inline].map(([key, font]) => [key, font.label])), tried };
+  return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, unread, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked, ...recorded.inline.keys()], labels: new Map([...recorded.inline].map(([key, font]) => [key, font.label])), tried, triedMore: recorded.triedMore };
 }
 
 module.exports = { scanPage, fontFaceRules, cssomRules, readRules, decodeDataUrl, dataKey, dataPrint, record, readFiles };

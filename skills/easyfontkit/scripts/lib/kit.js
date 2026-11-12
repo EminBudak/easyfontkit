@@ -1080,8 +1080,9 @@ function notOpened(asked, { failed: { url, error, noAnswer }, first }, { sandbox
 // its own. An address tried in more than one way is noted by the way that
 // went furthest: one the browser began to go to (started), as a frame's
 // first address, reached it, also when the guard cancelled a move of the
-// page's to the same address.
-function triedNotes(tried = [], { sandboxed = false } = {}) {
+// page's to the same address. The rest are counted as at least so many
+// when the page tried more addresses than a run keeps (more).
+function triedNotes(tried = [], { sandboxed = false, more = false } = {}) {
   const rank = { asked: 0, cancelled: 1, window: 2, started: 3 };
   const byAddress = new Map();
   for (const one of tried) {
@@ -1094,8 +1095,8 @@ function triedNotes(tried = [], { sandboxed = false } = {}) {
     if (sandboxed) return `The page tried to open ${url}, which is not a web address, in a way easyfontkit may not stop in a browser installed as a snap or a Flatpak, so the system may have opened it with a program of its own, such as the mail program.`;
     return `The page tried to open ${url}, which is not a web address, in a way easyfontkit stops only on Linux, so the system may have opened it with a program of its own, such as the mail program.`;
   });
-  const more = list.length - 3;
-  if (more > 0) notes.push(`It tried ${more} more ${more === 1 ? "address that is not a web address" : "addresses that are not web addresses"} as well.`);
+  const others = list.length - 3;
+  if (others > 0) notes.push(`It tried ${more ? "at least " : ""}${others} more ${others === 1 ? "address that is not a web address" : "addresses that are not web addresses"} as well.`);
   return notes;
 }
 
@@ -1230,7 +1231,7 @@ async function makeFontKit(rawUrl, { dir, files = true, timeLimit = 120_000, log
       const notes = [...built.notes];
       for (const skipped of scan.skipped) notes.push(`${opening(skipped.label || skipped.url)} was not a usable font file: ${skipped.reason}.`);
       notes.push(...unreadNotes(scan.unread));
-      notes.push(...triedNotes(scan.tried, { sandboxed }));
+      notes.push(...triedNotes(scan.tried, { sandboxed, more: scan.triedMore }));
       if (scan.cut.length) notes.push(`The run's time ran out before the ${list(scan.cut.map((role) => ROLE_WORDS[role]))} could be read: give it more time with --timeout.`);
       if (!files) notes.push("Run with --no-files: the font files were read but not saved.");
       kit = {

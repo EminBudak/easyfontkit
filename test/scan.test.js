@@ -142,6 +142,34 @@ test("the bodies of a page's font files are kept up to what a run keeps of one p
   assert.deepEqual(unreadNotes(read.unread.slice(0, 1)), [`The font file ${url(4)} was not read, as the page's font files came to more than the 200 MB easyfontkit reads of one page.`]);
 });
 
+test("the addresses that are not web addresses a page tries are kept each once, with each way it went, up to 50 addresses, so the notes count the rest of 26 frames at 26 such addresses as 23, and of 60 as at least 47, where 50 tellings of them were kept, which held 25 addresses as a frame tells of its address twice, and the notes counted 22 more for both", () => {
+  const { record } = require("../skills/easyfontkit/scripts/lib/scan");
+  const { triedNotes } = require("../skills/easyfontkit/scripts/lib/kit");
+  // n frames, each at an address of its own, which the browser tells of as
+  // asked and as started, and of which the first is asked again.
+  const frames = (n) => {
+    const cdp = tab({});
+    const recorded = record(cdp);
+    for (let i = 0; i < n; i++) {
+      const url = `mailto:a${i}@example.invalid`;
+      cdp.tell("Page.frameRequestedNavigation", { url });
+      cdp.tell("Page.frameStartedNavigating", { url });
+      cdp.tell("Page.frameRequestedNavigation", { url });
+    }
+    return recorded;
+  };
+  const counted = (n) => {
+    const recorded = frames(n);
+    return triedNotes(recorded.tried, { more: recorded.triedMore }).slice(3);
+  };
+  assert.deepEqual(counted(26), ["It tried 23 more addresses that are not web addresses as well."]);
+  assert.deepEqual(counted(50), ["It tried 47 more addresses that are not web addresses as well."]);
+  assert.deepEqual(counted(60), ["It tried at least 47 more addresses that are not web addresses as well."]);
+  const sixty = frames(60);
+  assert.equal(new Set(sixty.tried.map(({ url }) => url)).size, 50);
+  assert.equal(sixty.tried.length, 100, "each of 50 addresses with each way it went once");
+});
+
 test("a font file whose body the browser no longer holds when it is asked for, as the browser lets go of the oldest it keeps once font files that come at the same moment pass its buffer, is given apart with that and noted apart from those past what a run keeps, where it was left out with no word", async () => {
   const { record, readFiles } = require("../skills/easyfontkit/scripts/lib/scan");
   const { unreadNotes } = require("../skills/easyfontkit/scripts/lib/kit");

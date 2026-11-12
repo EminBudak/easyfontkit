@@ -10,7 +10,7 @@
 //   fonts.css   a @font-face rule for every saved file and, per role, the
 //               site's font and its closest free font as CSS variables
 //   fonts.json  everything above, for tools
-//   files/      every font file the page loaded, as the browser received it
+//   files/      the font files the page loaded, as the browser received them
 //
 // Nothing is written while the page is read. The kit is then made in a
 // part folder inside its folder, and moved in for an earlier kit there one
@@ -845,12 +845,9 @@ function writeCss(kit, families, dir) {
       ? commentLines(
           `The font files were read but not saved, so no @font-face rule follows. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts${imports.length ? ", which the @import lines load from Google Fonts or Fontsource" : ""}.${unloaded.names.length ? ` ${unloadedText(unloaded, (it) => `nothing here loads ${it}`, imports.length > 0)}` : ""} FONTS.md says how each one is licensed. */`,
         )
-      : [
-          "   Each font file the page loaded has a @font-face rule below, under its",
-          "   family's name. --font-heading, --font-body, --font-button and --font-code",
-          "   are the site's own fonts; the -free ones are the closest free fonts.",
-          "   FONTS.md says how each one is licensed. */",
-        ];
+      : // Each saved file: a file of the page's that was not read, as one
+        // larger than a run reads of one, is not saved and has no rule.
+        commentLines("Each saved font file has a @font-face rule below, under its family's name. --font-heading, --font-body, --font-button and --font-code are the site's own fonts; the -free ones are the closest free fonts. FONTS.md says how each one is licensed. */");
   const lines = [`/* Fonts of ${inComment(host)}, read from ${inComment(kit.url)} on ${kit.capturedAt.slice(0, 10)} by easyfontkit ${version}.`, ...about, "", ...imports];
   if (imports.length) lines.push("");
   for (const family of families) {

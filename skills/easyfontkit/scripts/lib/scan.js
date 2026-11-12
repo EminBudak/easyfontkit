@@ -1,11 +1,12 @@
 "use strict";
 
 // What a page draws its text with. The page is opened with the network
-// recorded, so every font file it loads is kept as the browser received it,
-// with no second download. Chrome then says which face it really drew
-// headings, body text, buttons and code with: the font it picked from the
-// CSS font stack, not the stack itself. The @font-face rules are read too,
-// to tie a CSS family to its files when a file hides its own names.
+// recorded, so the font files it loads are kept as the browser received
+// them, up to what a run reads of them (record), with no second download.
+// Chrome then says which face it really drew headings, body text, buttons
+// and code with: the font it picked from the CSS font stack, not the stack
+// itself. The @font-face rules are read too, to tie a CSS family to its
+// files when a file hides its own names.
 
 const crypto = require("crypto");
 const { navigate, currentAddress, triedSoFar, handedOut, GUARD_WORLD } = require("./chrome");
@@ -714,21 +715,21 @@ async function readFiles(fonts, inline = new Map(), refused = new Map(), statuse
   return { files: [...files.values()], skipped, refusedRead, unread };
 }
 
-// Opens the page and reads it: the faces of each role, every font file it
-// loaded, the ones it could not use and why (skipped), the browser's
-// refusals of files it read all the same (refusedRead), those it did not
-// read, as the page's had come to more than a run keeps, the file to more
-// than it reads of one or the browser no longer held it, each with its
-// address or key, its label and why (unread), the addresses of every one
-// the browser asked for and the keys of the fonts given as data: addresses
-// it asked for (asked), with their labels (labels), its @font-face rules,
-// the web fonts Chrome reports as loaded, the families document.fonts
-// holds, the status and address the server answered the page with
-// (answer), the address the page was first asked from as Chrome wrote it
-// (first), the address a redirect or the page led on to that could not be
-// opened or did not answer (failed), about:blank or the like when the page
-// moved itself on to that (left), for a page that did not draw, so it could
-// not be scrolled, the style sheet it waited for, if one had not come
+// Opens the page and reads it: the faces of each role, the font files it
+// loaded that were read, the ones it could not use and why (skipped), the
+// browser's refusals of files it read all the same (refusedRead), those it
+// did not read, as the page's had come to more than a run keeps, the file
+// to more than it reads of one or the browser no longer held it, each with
+// its address or key, its label and why (unread), the addresses of every
+// one the browser asked for and the keys of the fonts given as data:
+// addresses it asked for (asked), with their labels (labels), its
+// @font-face rules, the web fonts Chrome reports as loaded, the families
+// document.fonts holds, the status and address the server answered the page
+// with (answer), the address the page was first asked from as Chrome wrote
+// it (first), the address a redirect or the page led on to that could not
+// be opened or did not answer (failed), about:blank or the like when the
+// page moved itself on to that (left), for a page that did not draw, so it
+// could not be scrolled, the style sheet it waited for, if one had not come
 // (stalled), the addresses that are not web addresses the page tried to
 // open (tried) and whether it tried more than were kept (triedMore), and
 // the roles the run's time ran out before any text of was read (cut).

@@ -7,8 +7,9 @@
 // license. Commercial means the font or the service it comes from says it
 // is licensed: license text that sells or restricts it, a foundry's license
 // link, a paid font service, or embedding bits that only allow preview and
-// print. Anything else is unknown. The kit saves every file either way and
-// says which is which; what to do with them is the reader's call.
+// print. Anything else is unknown. The kit saves a file whatever its
+// license and says which is which; what to do with them is the reader's
+// call.
 
 const OPEN_TEXT = [
   [/open font licen[cs]e|scripts\.sil\.org\/ofl|openfontlicense\.org|\bOFL\b/i, "SIL Open Font License"],

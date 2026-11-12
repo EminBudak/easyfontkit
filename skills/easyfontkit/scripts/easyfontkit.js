@@ -10,7 +10,7 @@ const USAGE = `Usage: easyfontkit <url> [options]
 
 Reads a website the way a browser draws it and saves its fonts in one
 folder: which font its headings, body text, buttons and code are drawn
-with, every font file the page loads, how each one is licensed, and the
+with, the font files the page loads, how each one is licensed, and the
 closest free font for each one that is not free. FONTS.md is for people
 and coding agents, fonts.css for pages, fonts.json for tools.
 

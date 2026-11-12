@@ -13,7 +13,7 @@
   "interface": {
     "displayName": "easyfontkit",
     "shortDescription": "Fonts and licenses from a website",
-    "longDescription": "Opens a website in the Chrome, Chromium, Edge or Brave you already have and finds the fonts it draws headings, body text, buttons and code with. Saves every font file the page loads with what the file says about its license, names the closest free font for each paid one, and writes it all to FONTS.md, fonts.css and fonts.json. Needs Node 22 or newer and no API key.",
+    "longDescription": "Opens a website in the Chrome, Chromium, Edge or Brave you already have and finds the fonts it draws headings, body text, buttons and code with. Saves the font files the page loads with what the file says about its license, names the closest free font for each paid one, and writes it all to FONTS.md, fonts.css and fonts.json. Needs Node 22 or newer and no API key.",
     "developerName": "Emin Budak",
     "category": "Creativity",
     "capabilities": ["Read", "Write"],

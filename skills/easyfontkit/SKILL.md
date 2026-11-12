@@ -1,6 +1,6 @@
 ---
 name: easyfontkit
-description: Find the fonts a website really draws its headings, body text, buttons and code with, save every font file the page loads, say how each one is licensed, and name the closest free font for each one that is not free. Use it whenever the user wants to match a site's typography, asks what font a site uses or whether it is free, or asks for a page, video, slide deck or image in a product's style and you know its website.
+description: Find the fonts a website really draws its headings, body text, buttons and code with, save the font files the page loads, say how each one is licensed, and name the closest free font for each one that is not free. Use it whenever the user wants to match a site's typography, asks what font a site uses or whether it is free, or asks for a page, video, slide deck or image in a product's style and you know its website.
 ---
 
 # easyfontkit

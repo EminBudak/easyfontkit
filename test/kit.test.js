@@ -1515,7 +1515,7 @@ test("a page's fonts: each role's face, every file saved as served, each license
     assert.match(md, /\| Code \| System monospace font \| 400 \| System font \| JetBrains Mono \|/);
     assert.match(md, /The file says "Webfont sold by Acme Type, for use of the licensee only\."/);
     const css = fs.readFileSync(path.join(dir, "fonts.css"), "utf8");
-    assert.match(css, /^\/\* Fonts of 127\.0\.0\.1, read from [^\n]+\n {3}Each font file the page loaded has a @font-face rule below, under its\n/);
+    assert.match(css, /^\/\* Fonts of 127\.0\.0\.1, read from [^\n]+\n {3}Each saved font file has a @font-face rule below, under its family's\n {3}name\. /);
     assert.match(css, /@font-face \{\n {2}font-family: "Inter";\n {2}src: url\("files\/inter-400\.woff2"\) format\("woff2"\);\n {2}font-weight: 400;\n {2}font-style: normal;\n {2}unicode-range: U\+0000-00FF;/);
     // Inter is the closest free font of the heading's, in its weight alone:
     // the body's, the site's own, comes from its saved file.

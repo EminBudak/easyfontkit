@@ -36,7 +36,7 @@ easyfontkit-linear.app/
   FONTS.md      the fonts per role, each family's maker and license, and free matches
   fonts.css     a @font-face rule per saved file, and the fonts as CSS variables
   fonts.json    the same, for scripts
-  files/        every font file the page loaded, as the browser received it
+  files/        the font files the page loaded, as the browser received them
 ```
 
 FONTS.md starts with a table:
@@ -65,7 +65,7 @@ A font file carries its own fine print: a copyright line, a license description,
 5. Fontsource lists the family under an open license: open. This catches sites that self-host Inter with its license fields stripped.
 6. Anything else: unknown.
 
-Every file is saved either way, and FONTS.md says which is which. If a foundry wrote the site's own license number into the file, that number is left out of what the kit prints.
+A file is saved whatever its license, and FONTS.md says which is which. If a foundry wrote the site's own license number into the file, that number is left out of what the kit prints.
 
 ## How the free match is picked
 
@@ -120,7 +120,7 @@ Chrome hands an address that is not a web address, such as `mailto:` or `news:`,
 
 ## How it works
 
-1. Opens the page in a headless browser on a 1600x900 desktop screen, with the network recorded, so each font file is kept as it arrives, and each font the page gives as a `data:` address as the browser asks for it. A font the page's CSS names that the browser never asks for, as a fallback after one it took, is not read.
+1. Opens the page in a headless browser on a 1600x900 desktop screen, with the network recorded, so each font file is kept as it arrives, and each font the page gives as a `data:` address as the browser asks for it, up to what a run reads of them (see Limits). A font the page's CSS names that the browser never asks for, as a fallback after one it took, is not read.
 2. Waits for the page to load and for its fonts, then scrolls to the bottom and back, so sections that render late load their fonts too, and waits for the fonts again. The load is waited for up to 30 s, and the page's fonts up to 5 s more before the scroll and again after it, so a font that is slow to come holds the run until it comes, and one that never comes holds it about 40 s.
 3. For up to 24 headings, paragraphs, buttons and code blocks, asks Chrome which fonts it drew the text with and how many glyphs each one drew. The font with the most glyphs is the role's font.
 4. Ties each of those fonts to its file by the names inside the file, by the @font-face rule that loads it, or by Chrome's own record of the web fonts it loaded. Some sites hide the names in their files; then the CSS name stands in.

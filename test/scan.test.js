@@ -258,19 +258,22 @@ test("a font the page gives as a data: address is read from the browser's reques
   ]);
 });
 
-test("the @font-face rules the page's CSS object model gives stand a data: address in as an empty one and stop at the most characters given, so a page cannot make the run take its fonts' addresses whole", () => {
-  const { cssomRules } = require("../skills/easyfontkit/scripts/lib/scan");
+test("the @font-face rules the page's CSS object model gives stand a data: address in by its print and stop at the most characters given, so a page cannot make the run take its fonts' addresses whole", () => {
+  const { cssomRules, dataPrint } = require("../skills/easyfontkit/scripts/lib/scan");
   const big = `data:font/woff2;base64,${"QUJD".repeat(1 << 18)}`;
   const rule = (family, src) => Object.assign(Object.create(CSSFontFaceRule.prototype), { style: { getPropertyValue: (name) => ({ "font-family": family, src, "font-weight": "400", "font-style": "normal", "unicode-range": "" })[name] || "" } });
   class CSSFontFaceRule {}
   class CSSImportRule {}
   const sheet = { href: "https://acme.example/site.css", cssRules: [rule("Inl", `url("${big}") format("woff2"), url("https://acme.example/inl.woff2") format("woff2")`), rule("Plain", 'url("https://acme.example/plain.woff2")'), rule("Late", 'url("https://acme.example/late.woff2")')] };
-  const run = (most) => new Function("CSSFontFaceRule", "CSSImportRule", "document", "location", `return (${cssomRules})(${most});`)(CSSFontFaceRule, CSSImportRule, { styleSheets: [sheet] }, { href: "https://acme.example/" });
+  const run = (most) => new Function("CSSFontFaceRule", "CSSImportRule", "document", "location", `return (${cssomRules})(${most}, ${dataPrint});`)(CSSFontFaceRule, CSSImportRule, { styleSheets: [sheet] }, { href: "https://acme.example/" });
   const all = run(1e6);
+  // Its length, and its first and last 64 characters.
+  assert.equal(dataPrint(big), `data:easyfontkit,${big.length},data:font/woff2;base64,${"QUJD".repeat(10)}Q,${"QUJD".repeat(16)}`);
+  assert.equal(dataPrint('data:font/ttf,a"b\\c)d e'), "data:easyfontkit,23,data:font/ttf,a_b_c_d_e,data:font/ttf,a_b_c_d_e");
   assert.deepEqual(
     all.map((one) => [one.family, one.src]),
     [
-      ["Inl", 'url("data:") format("woff2"), url("https://acme.example/inl.woff2") format("woff2")'],
+      ["Inl", `url("${dataPrint(big)}") format("woff2"), url("https://acme.example/inl.woff2") format("woff2")`],
       ["Plain", 'url("https://acme.example/plain.woff2")'],
       ["Late", 'url("https://acme.example/late.woff2")'],
     ],
@@ -281,4 +284,59 @@ test("the @font-face rules the page's CSS object model gives stand a data: addre
     run(size(all[0]) + size(all[1])).map((one) => one.family),
     ["Inl", "Plain"],
   );
+});
+
+// A tab whose page has style sheets: what the browser tells is given to it
+// by tell(), the text of a sheet is given from `texts` by its id, and a
+// script is run on `page`, the stand-in for the page's own document with
+// the classes of its rules, as the page would run it. asked lists the calls.
+function sheetsTab(page, texts = {}) {
+  const listeners = new Map();
+  const asked = [];
+  class CSSFontFaceRule {}
+  class CSSImportRule {}
+  return {
+    asked,
+    CSSFontFaceRule,
+    on: (method, listener) => listeners.set(method, [...(listeners.get(method) || []), listener]),
+    tell: (method, params) => (listeners.get(method) || []).forEach((listener) => listener(params)),
+    send: async (method, params = {}) => {
+      asked.push([method, params.styleSheetId || ""]);
+      if (method === "CSS.getStyleSheetText") return { text: texts[params.styleSheetId] || "" };
+      if (method === "Runtime.evaluate") return { result: { value: new Function("CSSFontFaceRule", "CSSImportRule", "document", "location", `return ${params.expression};`)(CSSFontFaceRule, CSSImportRule, page(CSSFontFaceRule), { href: "https://acme.example/" }) } };
+      return {};
+    },
+  };
+}
+
+test("a font the page gives as a data: address in a style sheet whose text is past what a run reads of style sheets is tied to the browser's request for it by the print the CSS object model gives of it, so a family whose font the browser could not use is no longer taken for one of the visitor's own", async () => {
+  const { record, readRules, dataKey } = require("../skills/easyfontkit/scripts/lib/scan");
+  const { CSS_BYTES } = require("../skills/easyfontkit/scripts/lib/limits");
+  // A font of 3 MB that is no font file, as the browser asked for it, and
+  // another the browser never asked for.
+  const junk = `data:font/ttf;base64,${Buffer.alloc(3 << 20, 1).toString("base64")}`;
+  const never = `data:font/ttf;base64,${Buffer.alloc(3 << 20, 2).toString("base64")}`;
+  const rule = (CSSFontFaceRule, family, font) => Object.assign(Object.create(CSSFontFaceRule.prototype), { style: { getPropertyValue: (name) => ({ "font-family": family, src: `url(${font}) format("truetype")` })[name] || "" } });
+  // A small sheet's text gives a font as a data: address too, and is read.
+  const small = "data:font/woff2;base64,d09GMgABAAAA";
+  const cdp = sheetsTab((CSSFontFaceRule) => ({ styleSheets: [{ href: null, cssRules: [rule(CSSFontFaceRule, '"Junk"', junk), rule(CSSFontFaceRule, '"Never"', never)] }] }), { small: `@font-face { font-family: Small; src: url(${small}) format("woff2") } @font-face { font-family: Plain; src: url(/plain.woff2) }` });
+  const recorded = record(cdp);
+  cdp.tell("Network.requestWillBeSent", { requestId: "d1", type: "Font", request: { url: junk } });
+  // The big sheet is longer than a run reads of style sheets, so its text
+  // is not read and its rules come from the CSS object model alone.
+  cdp.tell("CSS.styleSheetAdded", { header: { styleSheetId: "big", origin: "regular", length: CSS_BYTES + 1, sourceURL: "https://acme.example/" } });
+  cdp.tell("CSS.styleSheetAdded", { header: { styleSheetId: "small", origin: "regular", length: 120, sourceURL: "https://acme.example/site.css" } });
+  const rules = await readRules(cdp, recorded.sheets, "https://acme.example/", recorded.inline);
+  assert.deepEqual(
+    cdp.asked.filter(([method]) => method === "CSS.getStyleSheetText").map(([, id]) => id),
+    ["small"],
+  );
+  assert.deepEqual(
+    rules.map((one) => one.family),
+    ["Small", "Plain", "Junk", "Never"],
+  );
+  assert.deepEqual(rules[0].urls, [dataKey(small)]);
+  assert.deepEqual(rules[1].urls, ["https://acme.example/plain.woff2"]);
+  assert.deepEqual(rules[2], { family: "Junk", weight: "400", style: "normal", unicodeRange: "", urls: [dataKey(junk)] });
+  assert.ok(!rules[3].urls[0].includes("base64") && rules[3].urls[0] !== dataKey(never), "a font the browser never asked for is tied to nothing");
 });

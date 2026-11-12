@@ -39,6 +39,14 @@ const sizeText = (bytes) => (bytes < 1024 * 1024 ? `${Math.max(1, Math.round(byt
 // address itself, which can be megabytes long, is not kept. The notes name
 // such a font by its media type and its size (dataLabel).
 const dataKey = (url) => `data:sha1,${crypto.createHash("sha1").update(String(url)).digest("hex")}`;
+// A print of a data: address: its length and its first and last 64
+// characters, each character that could end the address in a src written
+// as _. The rules read from the page's CSS object model give a data:
+// address by its print (cssomRules), as a page served over plain http has
+// no digest to make of one. record() keeps the print of each font the
+// browser asked for, so such a rule is tied to its font by it. It runs in
+// the page as well, as it is written.
+const dataPrint = (url) => `data:easyfontkit,${url.length},${[url.slice(0, 64), url.slice(-64)].map((part) => part.replace(/[^\w+/=;:,.%-]/g, "_")).join(",")}`;
 function dataLabel(url, bytes) {
   const type = (/^data:([^,;]{0,80})/i.exec(url) || [])[1] || "";
   return `a font the page gave as a data: address (${/^[\w.+-]+\/[\w.+-]+$/.test(type) ? `${type.toLowerCase()}, ` : ""}${sizeText(bytes)})`;
@@ -128,7 +136,7 @@ function record(cdp, most = FONT_BYTES, one = FILE_BYTES) {
     const key = dataKey(url);
     if (inline.has(key)) return key;
     const bytes = dataBytes(url);
-    const font = { label: dataLabel(url, bytes), body: null, left: "" };
+    const font = { label: dataLabel(url, bytes), body: null, left: "", print: dataPrint(url) };
     inline.set(key, font);
     if (bytes > one) font.left = "big";
     else if (kept + coming + bytes > most) font.left = "budget";
@@ -481,14 +489,14 @@ function fontFaceRules(text, base) {
 // The same rules as the page's own CSS object model has them: style sheets
 // a script builds rule by rule (CSS-in-JS) have no text to read, and other
 // sites' sheets have a text but no readable rules, so both are read. Run in
-// the page, with the most characters it gives back, past which it stops. A
-// data: address in a src stands there as an empty one: the browser's
-// request for such a font, and its report of the face it loaded, tell of it
-// (record), and the address itself can be megabytes long.
-function cssomRules(most) {
+// the page, with the most characters it gives back, past which it stops,
+// and dataPrint. A data: address in a src stands there as its print: the
+// browser's request for such a font, and its report of the face it loaded,
+// tell of it (record), and the address itself can be megabytes long.
+function cssomRules(most, print) {
   const out = [];
   let size = 0;
-  const lean = (src) => src.replace(/url\(\s*(?:"data:[^"\\]*(?:\\.[^"\\]*)*"|'data:[^'\\]*(?:\\.[^'\\]*)*'|data:[^)\s]*)\s*\)/gi, 'url("data:")');
+  const lean = (src) => src.replace(/url\(\s*(?:"(data:[^"\\]*(?:\\.[^"\\]*)*)"|'(data:[^'\\]*(?:\\.[^'\\]*)*)'|(data:[^)\s]*))\s*\)/gi, (whole, double, single, bare) => `url("${print(double ?? single ?? bare)}")`);
   const visit = (rules, base, depth) => {
     if (depth > 8) return;
     for (const rule of rules) {
@@ -515,13 +523,16 @@ function cssomRules(most) {
   return out;
 }
 
-// A rule's data: addresses by their keys.
-const keyed = (rule) => ({ ...rule, urls: rule.urls.map((url) => (url.startsWith("data:") ? dataKey(url) : url)) });
+// A rule's data: addresses by their keys, and those given by their prints
+// by the keys of the fonts with those prints (byPrint).
+const keyed = (rule, byPrint = new Map()) => ({ ...rule, urls: rule.urls.map((url) => byPrint.get(url) || (url.startsWith("data:") ? dataKey(url) : url)) });
 
 // The text of each style sheet is read while the text read so far stays
 // within CSS_BYTES, as its length tells before it is read. A sheet or a
-// rule that cannot be read is passed over.
-async function readRules(cdp, sheets, pageUrl) {
+// rule that cannot be read is passed over. A data: address the CSS object
+// model gives by its print is the font the browser asked for with that
+// print, by its key (inline, from record).
+async function readRules(cdp, sheets, pageUrl, inline = new Map()) {
   const rules = [];
   let read = 0;
   for (const [styleSheetId, header] of sheets) {
@@ -531,16 +542,17 @@ async function readRules(cdp, sheets, pageUrl) {
     read += length;
     const { text = "" } = await cdp.send("CSS.getStyleSheetText", { styleSheetId }).catch(() => ({}));
     try {
-      if (/@font-face/i.test(text)) rules.push(...fontFaceRules(text, header.sourceURL || pageUrl).map(keyed));
+      if (/@font-face/i.test(text)) rules.push(...fontFaceRules(text, header.sourceURL || pageUrl).map((rule) => keyed(rule)));
     } catch {
       // Passed over.
     }
   }
-  for (const rule of (await evaluate(cdp, `(${cssomRules})(${CSS_BYTES})`)) || []) {
+  const byPrint = new Map([...inline].map(([key, font]) => [font.print, key]));
+  for (const rule of (await evaluate(cdp, `(${cssomRules})(${CSS_BYTES}, ${dataPrint})`)) || []) {
     try {
       const family = unquote(rule.family);
       const urls = srcUrls(rule.src, rule.base);
-      if (family && urls.length) rules.push(keyed({ family, weight: rule.weight || "400", style: rule.style || "normal", unicodeRange: rule.unicodeRange || "", urls }));
+      if (family && urls.length) rules.push(keyed({ family, weight: rule.weight || "400", style: rule.style || "normal", unicodeRange: rule.unicodeRange || "", urls }, byPrint));
     } catch {
       // Passed over.
     }
@@ -698,7 +710,7 @@ async function scanPage(cdp, url, log = () => {}) {
   else if (recorded.page.shown) pageUrl = recorded.page.shown;
   const left = /^about:/i.test(now) ? now : "";
   const loaded = (await evaluate(cdp, "[...document.fonts].filter((f) => f.status === 'loaded').map((f) => ({ family: f.family, weight: f.weight, style: f.style }))")) || [];
-  const rules = await readRules(cdp, recorded.sheets, pageUrl);
+  const rules = await readRules(cdp, recorded.sheets, pageUrl, recorded.inline);
   const faces = recorded.faces.map((face) => ({
     family: unquote(face.fontFamily),
     weight: face.fontWeight || "",
@@ -716,4 +728,4 @@ async function scanPage(cdp, url, log = () => {}) {
   return { pageUrl, first: recorded.page.first, answer, failed, left, stalled: null, title, challenge, roles, cut, files, skipped, refusedRead, unread, rules, faces, loaded: loaded.map((face) => ({ ...face, family: unquote(face.family) })), asked: [...recorded.asked, ...recorded.inline.keys()], labels: new Map([...recorded.inline].map(([key, font]) => [key, font.label])), tried };
 }
 
-module.exports = { scanPage, fontFaceRules, cssomRules, decodeDataUrl, dataKey, record, readFiles };
+module.exports = { scanPage, fontFaceRules, cssomRules, readRules, decodeDataUrl, dataKey, dataPrint, record, readFiles };
